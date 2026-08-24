@@ -422,6 +422,15 @@ def structural_noise_floor(
 
 # ---- 胶带走廊标定 -------------------------------------------------------------
 
+# 扩展带收口常量（全部有实测依据，见 calibrate_tape_corridor 注释与
+# 2026-08-24 素材测量）：
+_MOTION_FREQ_LO = 0.10   # 暗频率 ≥0.10 才算"真实出现过"（31 帧样本 ≈ ≥3 帧）
+_MOTION_FREQ_HI = 0.85   # ≥0.85 视为静物（箱体/收集盒/早已落定的粪粒）
+_MOTION_MIN_COLS = 3     # 一行至少 3 列中频暗才算动物痕迹（单列尾巴不算）
+_BLOCK_GAP = 3           # 运动行块内允许的最大空隙行数（尾巴亮区实测 ≤3 行）
+_HANG_REACH = 60         # 动物运动块必须起始于胶带底端 60 行内（实测尾隙 31–36）
+_BOTTOM_MARGIN = 30      # 块底余量 ≈1×BL，覆盖标定采样未见到的更深姿态
+
 
 @dataclass(frozen=True)
 class TapeCorridor:
@@ -434,8 +443,9 @@ class TapeCorridor:
     - `row_range`: 胶带最大竖直延伸 [r0, r1]（闭区间）。r1 = 胶带底端
       （暗频率首次跌破阈值的行的上一行），≈ 尾根附着处。
     - `confidence`: 上部区域走廊列的平均暗频率 ∈ (0, 1]，越接近 1 越可信。
-    - `band_range`: 稳定化的面板行带 [r0, r1]。标定期逐帧扩展取并，避免
-      逐帧 panel_band 底缘在阈值附近抖动、把动物截断（实测踩过的坑）。
+    - `band_range`: 稳定化的面板行带 [r0, r1]。标定期逐帧扩展取并（避免
+      逐帧 panel_band 底缘在阈值附近抖动、把动物截断），再收口到动物活动块
+      之下（避免把底部收集盒区纳入搜索——盒内碎屑会成为假候选）。
     """
 
     col_range: tuple[int, int]
@@ -575,6 +585,32 @@ def calibrate_tape_corridor(
     prof = freq[:, c0 : c1 + 1].mean(axis=1)
     drops = np.flatnonzero(prof < dark_freq_thresh)
     row_end = r0 + int(drops[0]) - 1 if drops.size else r1
+
+    # 扩展带收口：不得进入底部收集盒区。扩展用的"亮占比 >0.70"挡不住盒区——
+    # 玻璃盒在部分隔间里大部分行仍是亮的（实测 ch3/4 延伸到 254，盒内不触边
+    # 的碎屑会成为候选）。收口依据一条几何事实：**动物悬挂在胶带上，它的活动
+    # 痕迹必须出现在胶带底端附近**；盒区的活动痕迹（粪粒随时间累积 → 中频暗）
+    # 离胶带底端远得多（实测：动物块顶离胶带底 31–36 行，盒区 ≥50 行）。
+    # 取起始于胶带底端 _HANG_REACH 行内的最大运动行块 = 动物，带底封到
+    # 块底 + _BOTTOM_MARGIN。找不到这样的块则不收口（保持扩展带，宁宽勿猜）。
+    motion = ((freq >= _MOTION_FREQ_LO) & (freq < _MOTION_FREQ_HI)).sum(axis=1)
+    motion_rows = np.flatnonzero(motion >= _MOTION_MIN_COLS)
+    blocks: list[tuple[int, int]] = []
+    if motion_rows.size:
+        btop = bbot = int(motion_rows[0])
+        for i in motion_rows[1:]:
+            if int(i) - bbot <= _BLOCK_GAP + 1:
+                bbot = int(i)
+            else:
+                blocks.append((btop, bbot))
+                btop = bbot = int(i)
+        blocks.append((btop, bbot))
+    row_end_local = row_end - r0
+    hang_blocks = [b for b in blocks if b[0] <= row_end_local + _HANG_REACH]
+    if hang_blocks:
+        animal_block = max(hang_blocks, key=lambda b: b[1] - b[0])
+        r1 = min(r1, r0 + animal_block[1] + _BOTTOM_MARGIN)
+
     return TapeCorridor(
         col_range=(c0, c1),
         row_range=(r0, row_end),

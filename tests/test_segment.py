@@ -379,3 +379,40 @@ def test_corridor_band_range_prevents_truncation() -> None:
     res = S.segment_animal(g0, corridor=corr)
     assert res.ok, res.reason
     assert int(res.mask.sum()) == 20 * 12, int(res.mask.sum())
+
+
+def test_band_cap_stops_above_collection_box() -> None:
+    """回归：扩展带不得进入底部收集盒区。
+
+    玻璃盒的部分行仍是亮的（亮占比 >0.70），纯亮度扩展会一路伸进盒区，
+    盒内不触边的碎屑会成为假候选（实测 ch3 行 246–251 有 44 px 碎屑）。
+    收口依据：动物悬挂在胶带上，其运动痕迹（中频暗像素块）必须起始于胶带
+    底端附近；盒区的痕迹（粪粒累积）远离胶带。带底封到动物运动块底 + 余量。
+    """
+    def frame(i: int) -> np.ndarray:
+        g = _corridor_scene(animal_row=160 + 5 * i, animal_h=20)
+        # 盒区碎屑：行 240–255，只在半数帧出现（粪粒累积 → 中频暗）
+        if i % 2 == 0:
+            g[240:256, 30:51] = 15.0
+        return g
+
+    frames = [frame(i) for i in range(6)]
+    corr = S.calibrate_tape_corridor(frames)
+    assert corr is not None
+    assert corr.band_range[1] < 240, corr     # 收口在盒区之上
+    assert corr.band_range[1] >= 184, corr    # 但仍覆盖动物最深行 + 余量
+
+    # 碎屑帧上分割：只出动物，不出碎屑
+    res = S.segment_animal(frames[0], corridor=corr)
+    assert res.ok, res.reason
+    assert int(res.mask.sum()) == 20 * 12, int(res.mask.sum())
+    assert res.mask[240:, :].sum() == 0, "盒区像素不得进入掩膜"
+
+
+def test_band_cap_absent_without_motion() -> None:
+    """无动物运动痕迹（全静止采样）⇒ 不收口，保持扩展带。宁宽勿猜。"""
+    frames = [_corridor_scene(animal_row=160) for _ in range(4)]
+    corr = S.calibrate_tape_corridor(frames)
+    assert corr is not None
+    # 面板行 70–258 全亮 ⇒ 扩展带到底；动物静止（暗频率=1.0）不构成运动块
+    assert corr.band_range[1] >= 250, corr
