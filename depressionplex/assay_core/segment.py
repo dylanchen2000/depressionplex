@@ -180,7 +180,7 @@ def segment_animal(
     *,
     thresh: float | None = None,
     band: tuple[int, int] | None = None,
-    tape_width_frac: float = 0.20,
+    tape_width_frac: float = 0.10,
     min_area: int = 20,
     max_area_frac: float = 0.35,
 ) -> SegResult:
@@ -242,6 +242,9 @@ def segment_animal(
         # 因为纯胶带上端有时是较宽的结头，"宽度沿高度恒定"这条判据在真实素材上不成立。
         flags.append("tape_attached")
     if pick.width <= max_tape_w:
+        # 阈值取 0.10 而非 0.20：实测真实胶带宽 6–7 px / 隔间宽 95 px ≈ 7%，
+        # 而动物宽 12–16 px ≈ 13–17%。用 0.20（19 px）会让这个标记在每个隔间
+        # 都触发，等于没有信息。恒亮的标记比没有标记更糟。
         flags.append("narrow_as_tape")
 
     out = np.zeros_like(g, dtype=bool)

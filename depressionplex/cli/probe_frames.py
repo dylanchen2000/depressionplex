@@ -88,6 +88,10 @@ def main(argv: list[str] | None = None) -> int:
         bl2 = bl * bl if bl > 0 else float("nan")
         d_area = np.abs(np.diff(areas))
         jitter = d_area / bl2
+        # 门用 p90 而非单帧 max：门要量的是**噪声底**，而单帧离群值并不会淹没
+        # immobility 信号——bout 后处理的 Noise Thresh / Min Length 会把它滤掉。
+        # max 仍然打印出来作为诊断量。
+        jit_p90 = float(np.percentile(jitter, 90))
         elong = [sil.metrics(m, with_holes=False) for m in ok]
         el = [e.elongation for e in elong if e is not None]
 
@@ -113,7 +117,7 @@ def main(argv: list[str] | None = None) -> int:
 
         # 门只在动物"较静"时才有判据意义（否则测到的是信号）。
         moving = bool(res) and float(np.mean(res)) > 0.02
-        gate = float(jitter.max()) <= AREA_JITTER_GATE and not sanity
+        gate = jit_p90 <= AREA_JITTER_GATE and not sanity
         if moving and not gate:
             sanity.append("动物在动（RAD 残差 > 0.02），本帧段不适合用于噪声门判定")
         all_pass = all_pass and gate
@@ -123,7 +127,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         print(
             f"          面积抖动 |Δ| 均值 {d_area.mean():.1f} px 最大 {d_area.max():.1f} px"
-            f" → 归一化 均值 {jitter.mean():.4f} 最大 {jitter.max():.4f}"
+            f" → 归一化 均值 {jitter.mean():.4f} p90 {jit_p90:.4f} 最大 {jitter.max():.4f}"
             f"  [{'通过' if gate else ('信号主导' if moving else '不通过')} 门槛 {AREA_JITTER_GATE}]"
         )
         if res:
