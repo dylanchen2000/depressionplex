@@ -16,7 +16,7 @@ ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "tests"))
 
-TEST_MODULES = ("test_bouts", "test_rad", "test_geometry")
+TEST_MODULES = ("test_bouts", "test_rad", "test_geometry", "test_segment")
 
 
 def main() -> int:
