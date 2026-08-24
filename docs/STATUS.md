@@ -255,3 +255,18 @@ Noise Thresh / Min Length 会把它滤掉。故门判 p90，max 仅作诊断量�
 
 - 测试跑法：`python3 run_tests.py`（自带 runner，不依赖 pytest）
 - 核心模块只依赖 numpy，刻意不引入 OpenCV——视频 I/O 层才需要
+
+### 原语标注工具 v1（2026-08-25，分支 `feat/primitive-annotator`）
+
+`assay_core/primitives.py` + `cli/annotate.py`：规划 §3.5 落地——标原子原语
+（多标签，非互斥类别），规则表导出学术 / CSI 兼容 / 我方 L1+L2 三套口径；
+加一套量表 = 加一个规则表对象，原语不重标。
+
+- 原语表：前肢/后肢有动作、躯干形变、整体刚体摆动、身体轴朝向（多类）、
+  触壁/触杆、前爪抓尾（TST）、头在水面上（FST）。
+- 口径语义明确：仅前肢帧在学术口径按发表惯例落 Immobility、我方单列
+  ForelimbOnly；CSI 兼容口径如实复刻其缺陷（仅前肢/钟摆计为 Mobility）；
+  尾巴攀爬是**试次级**排除（逐帧两类别都不命中 = 排除区）。
+- CLI：init（可用规则引擎输出做主动学习种子，标 suggested_by）/ edit（交互
+  勾选）/ export（逐帧 + CSI 兼容 bout 统计）/ agree（逐原语逐帧 Cohen's κ，§6.3）。
+- 工具不需要任何人工数据即可构建；规则表为起点版本，P0 定稿后更新。
