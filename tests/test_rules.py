@@ -148,3 +148,45 @@ def test_summarize_produces_bout_stats() -> None:
     s = R.summarize_tst(lab, fps=25.0)
     assert "Immobility" in s and "Mobility" in s
     assert s["Immobility"].frames > 0
+
+
+def test_swing_gap_scales_with_fps() -> None:
+    """gap = 半个钟摆周期：随帧率缩放；估不出主频用兜底。"""
+    assert R.swing_gap_frames(25.0, 1.2, 99) == 10   # 25/(2×1.2)≈10.4
+    assert R.swing_gap_frames(50.0, 1.2, 99) == 21   # 同摆,帧率翻倍 gap 翻倍
+    assert R.swing_gap_frames(25.0, None, 12) == 12  # 无主频 → 兜底
+
+
+def _pendulum_masks(n: int, cycles: int, amp_deg: float = 20.0):
+    pivot = (100.0, 20.0)
+    arm = 90.0
+    out = []
+    for i in range(n):
+        swing = np.deg2rad(amp_deg) * np.sin(2 * np.pi * cycles * i / n)
+        out.append(
+            draw_body(
+                (200, 200),
+                (pivot[0] + arm * np.sin(swing), pivot[1] + arm * np.cos(swing)),
+                np.pi / 2 + swing,
+                60.0,
+                22.0,
+            )
+        )
+    return out, pivot
+
+
+def test_passive_swing_is_fps_invariant() -> None:
+    """同一 1 Hz 物理钟摆：25 fps 与 50 fps 采样都应判 PassiveSwing。
+
+    过零间隙随帧率翻倍；固定帧数 gap 会在高帧率下把事件切碎，
+    周期归一化后不变（时间轴归一化 = 空间 BL 归一化的对应物）。
+    """
+    m25, piv = _pendulum_masks(75, 3)     # 3 周期 / 75 帧 @25fps = 1 Hz
+    lab25 = R.label_tst_events(
+        R.build_tst_features(m25, suspension=piv, fps=25.0))
+    assert lab25.passive_swing.any()
+
+    m50, piv = _pendulum_masks(150, 3)    # 同摆 @50fps
+    lab50 = R.label_tst_events(
+        R.build_tst_features(m50, suspension=piv, fps=50.0))
+    assert lab50.passive_swing.any(), "高帧率下周期归一化 gap 应保住事件"

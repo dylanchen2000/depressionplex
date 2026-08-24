@@ -178,18 +178,37 @@ def build_tst_features(
 
 @dataclass
 class TstRulesParams:
-    """阈值起点值。θ_mob 由合成标定 + 真实静止/活动交叉验证（STATUS 结论四）；
-    其余为暂标定值，待双人 ethogram 标定后更新。"""
+    """阈值起点值。
 
-    theta_mob: float = 0.0175          # 0.015–0.02 区间中点（实测交叉验证）
+    **θ_mob 冻结（评审护栏，2026-08-24）**：provisional 值，只许用双人 ethogram
+    重标定；**禁止用本系统自己的输出调它**——拿模型输出拟合模型阈值是循环
+    论证。表面效度（挣扎期 Mobility 主导等）不是精度，分不出阈值偏敏感与否。
+    """
+
+    theta_mob: float = 0.0175          # FROZEN provisional：0.015–0.02 区间中点
+                                       # （合成标定 + 真实静止/活动交叉验证）
     theta_hind: float = 0.30           # 尾侧段残差占比下限（金标准"仅前肢不计"）
-    omega_min: float = 0.05            # 被动摆角速度下限（弧度/帧，≈1.25 rad/s @25fps）
+    omega_min: float = 1.25            # 被动摆角速度下限（弧度/**秒**）。
+                                       # 每帧角速度随帧率缩小，阈值必须用秒单位
+                                       # （= 旧 0.05 弧度/帧 @25fps），否则换帧率失灵
     swing_band_hz: tuple[float, float] = (0.4, 2.5)  # 单摆频带（自适应中心在其内）
-    swing_max_gap_frames: int = 12     # 钟摆速度过零是固有物理（每半周期一次），
-                                       # 事件须跨过这些零点，gap 单独放宽
+    swing_max_gap_frames: int = 12     # 估不出钟摆周期时的兜底 gap（帧）
     min_event_frames: int = 25         # 事件最短持续 1 s @25fps
     max_gap_frames: int = 5            # 允许短暂丢失
     climb_rise_frac: float = 0.3       # 攀爬：事件内质心相对悬挂点上移 ≥ 0.3×BL 趋势
+
+
+def swing_gap_frames(fps: float, f_star: float | None, fallback: int) -> int:
+    """Passive Swing 事件的时间过滤 gap = **半个估计钟摆周期**（帧数）。
+
+    钟摆速度过零是固有物理（每周期两次），事件必须跨过这些零点；过零间隙
+    随帧率与体重（摆长）变化，写帧数常数会换条件就失灵。空间用 BL 归一化，
+    时间用钟摆周期归一化——同一道理换到时间轴（评审推论，2026-08-24）。
+    估不出主频时用兜底值。
+    """
+    if f_star is not None and f_star > 0:
+        return max(1, int(round(fps / (2.0 * f_star))))
+    return fallback
 
 
 def dominant_frequency(x: np.ndarray, fps: float) -> float | None:
@@ -255,15 +274,17 @@ def label_tst_events(
     swing_raw = AND(
         still,
         ~np.isnan(f.omega),
-        np.abs(f.omega) >= p.omega_min,
+        np.abs(f.omega) * f.fps >= p.omega_min,   # 每帧角速度 → 秒单位
     )
+    f_star: float | None = None
     if swing_raw.any():
         # 主频用全序列算：幅值门控会只采到速度峰、把频谱搬到二倍频。
-        f_swing = dominant_frequency(f.omega, f.fps)
-        if f_swing is None or not (
-            p.swing_band_hz[0] <= f_swing <= p.swing_band_hz[1]
+        f_star = dominant_frequency(f.omega, f.fps)
+        if f_star is None or not (
+            p.swing_band_hz[0] <= f_star <= p.swing_band_hz[1]
         ):
             swing_raw = zero.copy()  # 频带不符 ⇒ 不是钟摆，拒绝整段
+            f_star = None
 
     # L2 Tail Climbing：拓扑闭环 且 质心相对悬挂点持续上移。
     holes = f.hole_count >= 1
@@ -298,7 +319,7 @@ def label_tst_events(
     passive = temporal(
         swing_raw,
         min_len=p.min_event_frames,
-        max_gap=p.swing_max_gap_frames,
+        max_gap=swing_gap_frames(f.fps, f_star, p.swing_max_gap_frames),
     )
     climb = ev(climb_raw)
     # L1 Immobility：残差低即计入（含被动摆动，与 CSI UseMotionComp 口径一致）。
