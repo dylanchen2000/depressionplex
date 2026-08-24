@@ -192,9 +192,11 @@ class TstRulesParams:
                                        # 每帧角速度随帧率缩小，阈值必须用秒单位
                                        # （= 旧 0.05 弧度/帧 @25fps），否则换帧率失灵
     swing_band_hz: tuple[float, float] = (0.4, 2.5)  # 单摆频带（自适应中心在其内）
-    swing_max_gap_frames: int = 12     # 估不出钟摆周期时的兜底 gap（帧）
-    min_event_frames: int = 25         # 事件最短持续 1 s @25fps
-    max_gap_frames: int = 5            # 允许短暂丢失
+    # 时间常量一律秒（单位不变量，见 README 硬规矩）；帧数在内部按 fps 换算。
+    swing_fallback_gap_s: float = 0.5  # 估不出钟摆周期时的兜底 gap（秒；
+                                       # ≈1.0–1.2 Hz 的半周期）
+    min_event_s: float = 1.0           # 事件最短持续（秒）
+    max_gap_s: float = 0.2             # 允许短暂丢失（秒）
     climb_rise_frac: float = 0.3       # 攀爬：事件内质心相对悬挂点上移 ≥ 0.3×BL 趋势
 
 
@@ -259,6 +261,9 @@ def label_tst_events(
     p = params or TstRulesParams()
     n = len(f.residual)
     zero = np.zeros(n, dtype=bool)
+    # 单位不变量：秒 → 帧（按本试次 fps）
+    min_len = max(1, int(round(p.min_event_s * f.fps)))
+    max_gap = max(0, int(round(p.max_gap_s * f.fps)))
 
     residual_ok = ~np.isnan(f.residual)
     moving = AND(residual_ok, f.residual >= p.theta_mob)
@@ -291,7 +296,7 @@ def label_tst_events(
     rising = zero.copy()
     dy = f.centroid_dy
     if bl is not None and bl > 0:
-        win = p.min_event_frames
+        win = min_len
         for i in range(n):
             j = min(i + win, n)
             a = max(i - win, 0)
@@ -307,9 +312,7 @@ def label_tst_events(
     climb_raw = AND(holes, rising)
 
     def ev(raw: np.ndarray) -> np.ndarray:
-        return temporal(
-            raw, min_len=p.min_event_frames, max_gap=p.max_gap_frames
-        )
+        return temporal(raw, min_len=min_len, max_gap=max_gap)
 
     # 各事件只依赖自己所需的特征：raw 谓词里 NaN 比较天然为 False，
     # 故"特征缺失 ⇒ 该事件不成立"已内含；不能用全局 unknown 一刀切
@@ -318,8 +321,10 @@ def label_tst_events(
     forelimb = ev(forelimb_raw)
     passive = temporal(
         swing_raw,
-        min_len=p.min_event_frames,
-        max_gap=swing_gap_frames(f.fps, f_star, p.swing_max_gap_frames),
+        min_len=min_len,
+        max_gap=swing_gap_frames(
+            f.fps, f_star, max(1, int(round(p.swing_fallback_gap_s * f.fps)))
+        ),
     )
     climb = ev(climb_raw)
     # L1 Immobility：残差低即计入（含被动摆动，与 CSI UseMotionComp 口径一致）。

@@ -184,10 +184,11 @@ def segment_animal(
     band: tuple[int, int] | None = None,
     corridor: "TapeCorridor | None" = None,
     tape_width_frac: float = 0.10,
-    min_area: int = 20,
+    min_area: int | None = None,
     max_area_frac: float = 0.35,
     body_run_min_px: int = 3,
     climb_frac_thresh: float = 0.10,
+    bl: float | None = None,
 ) -> SegResult:
     """从单个隔间的灰度 ROI 里分出动物剪影。
 
@@ -218,7 +219,16 @@ def segment_animal(
     - 动物**攀爬**（抓尾/抓胶带上移）是真实行为，不是噪声：回搜命中时返回
       该动物并打 `animal_in_corridor`，供事件层使用；正常悬挂但剪影与走廊
       重叠占比高（≥ `climb_frac_thresh`）同样打此标记。
+
+    单位不变量：`min_area` 缺省时取 BL 相对值（`bl` 参数或走廊携带的标定
+    估计）；BL 缺失回退绝对地板 20 px（README 台账），corridor=None 且无 bl
+    时与历史版本逐位一致。
     """
+    if min_area is None:
+        bl_eff = bl
+        if bl_eff is None and corridor is not None:
+            bl_eff = corridor.bl_est
+        min_area = _scaled(bl_eff)["min_area"]
     if corridor is not None:
         result = _segment_with_corridor(
             gray,
@@ -427,9 +437,43 @@ def structural_noise_floor(
 # 扩展带收口常量（全部有实测依据，见 calibrate_tape_corridor 注释与
 # 2026-08-24 素材测量）：
 _PRESENCE_FREQ_LO = 0.10  # 暗频率 ≥0.10 才算"出现过"（31 帧样本 ≈ ≥3 帧）
-_PRESENCE_MIN_COLS = 3    # 一行至少 3 列暗才算痕迹（单列尾巴/噪点不算）
-_BLOCK_GAP = 3            # 行块内允许的最大空隙行数（尾巴亮区实测 ≤3 行）
-_HANG_REACH = 60          # 动物块必须起始于胶带底端 60 行内（实测尾隙 31–36）
+# ---- 单位不变量（见 README 项目不变量）-----------------------------------------
+# 判定阈值一律 BL 相对；下列像素/行值只是**传感器/现架噪底**（量化与当前素材
+# 实测），BL 已知时由 _scaled() 取 max(地板, 相对项)。台账记于 README。
+_PRESENCE_FLOOR_COLS = 3  # 列量化地板；BL 已知 max(3, round(0.1×BL))
+_BLOCK_GAP_FLOOR = 3      # 行量化地板；BL 已知 max(3, round(0.1×BL))
+_HANG_REACH_FLOOR = 60    # 现架实测地板（尾隙 31–36）；BL 已知 max(60, round(2×BL))
+_BOX_MARGIN_FLOOR = 15    # 评审判据地板；BL 已知 max(15, round(0.5×BL))
+_BOTTOM_GUARD_FLOOR = 20  # 帧底护栏地板；BL 已知 max(20, round(0.66×BL))
+_MIN_AREA_FLOOR_PX = 8    # 分割噪声地板（0.43px 抖动）；BL 已知 max(8, round(0.02×BL²))
+_NO_BL_MIN_AREA_PX = 20   # BL 缺失时的绝对回退（现架动物 ≥150px，低两个量级）
+_SEAL_BL_K = 1.0          # 收口余量 = k×BL
+
+
+def _scaled(bl: float | None) -> dict:
+    """BL 相对阈值 + 传感器地板。bl=None 时返回地板（回退路径）。"""
+    if bl is None or bl <= 0:
+        return {
+            "min_cols": _PRESENCE_FLOOR_COLS,
+            "block_gap": _BLOCK_GAP_FLOOR,
+            "hang_reach": _HANG_REACH_FLOOR,
+            "box_margin": _BOX_MARGIN_FLOOR,
+            "bottom_guard": _BOTTOM_GUARD_FLOOR,
+            "min_area": _NO_BL_MIN_AREA_PX,
+        }
+    return {
+        "min_cols": max(_PRESENCE_FLOOR_COLS, int(round(0.1 * bl))),
+        "block_gap": max(_BLOCK_GAP_FLOOR, int(round(0.1 * bl))),
+        "hang_reach": max(_HANG_REACH_FLOOR, int(round(2.0 * bl))),
+        "box_margin": max(_BOX_MARGIN_FLOOR, int(round(0.5 * bl))),
+        "bottom_guard": max(_BOTTOM_GUARD_FLOOR, int(round(0.66 * bl))),
+        "min_area": max(int(round(0.02 * bl * bl)), _MIN_AREA_FLOOR_PX),
+    }
+
+
+_PRESENCE_MIN_COLS = _PRESENCE_FLOOR_COLS  # 一遍（BL 未知）建块用地板
+_BLOCK_GAP = _BLOCK_GAP_FLOOR              # 同上
+_HANG_REACH = _HANG_REACH_FLOOR            # seed 判据在 bl_est 之前，用地板
 # 收口余量 = _SEAL_BL_K × BL（BL 在标定期对全部标定帧估一次，取中位数）。
 # **不用硬编码像素**：本项目主张阈值体长归一化（D2），且硬件规格 ≥1280×720
 # 比当前素材线性约 2.7×，届时 BL 46–98 px，固定像素余量相对缩到 ~0.4×BL、
@@ -464,6 +508,7 @@ class TapeCorridor:
     confidence: float
     band_range: tuple[int, int]
     sealed: bool = True
+    bl_est: float | None = None  # 标定期体长中位数；供下游 BL 相对阈值（单位不变量）
 
 
 def _extended_band(
@@ -657,6 +702,7 @@ def calibrate_tape_corridor(
                 btop = bbot = int(i)
         blocks.append((btop, bbot))
     sealed = False
+    bl_est = 0.0
     # 识别悬挂块用"向下生长"而不是逐块判定：从最高的悬挂块出发（块顶必须在
     # **胶带底端以下**——胶带自身的轻微摆动会在胶带区内制造痕迹块，实测 v6
     # 隔间1 因此把带收塌到胶带底端之上；动物悬挂只出现在底端之下，攀爬向上、
@@ -684,11 +730,12 @@ def calibrate_tape_corridor(
         )
         bl_est = _estimate_body_length(grays, provisional)
         if bl_est > 0:
+            eff = _scaled(bl_est)   # 单位不变量：BL 相对 + 地板
             min_body_run = max(5.0, bl_est / 4.0)
             # 动物从顶端胶带悬挂，不会垂到帧底；贴近帧底的块是盒/框，不是动物。
-            # 实测各视频动物最深处离帧底 ≥40 行，_BOTTOM_GUARD 取 20 留足余量，
-            # 并对大动物按 0.5×BL 放大。
-            bottom_guard = max(_BOTTOM_GUARD, int(0.5 * bl_est))
+            # 实测各视频动物最深处离帧底 ≥40 行；bottom_guard 按 0.66×BL 缩放
+            # （现架 BL 30 ⇒ 20，与初版实测值一致）。
+            bottom_guard = eff["bottom_guard"]
             frame_bottom_local = (h - 1) - r0
             idx = blocks.index(seed)
             animal_bottom = seed[1]
@@ -704,10 +751,11 @@ def calibrate_tape_corridor(
                 else:
                     rest.append(b)
             seal = r0 + animal_bottom + int(round(_SEAL_BL_K * bl_est))
-            # 硬上界：盒区结构顶（首个未并下来的块）− _BOX_MARGIN。
+            # 硬上界：盒区结构顶（首个未并下来的块）− box_margin（0.5×BL，
+            # 现架 ≥15 行，即评审判据）。
             if rest:
                 box_top = r0 + rest[0][0]
-                seal = min(seal, box_top - _BOX_MARGIN)
+                seal = min(seal, box_top - eff["box_margin"])
             # 收口永不裁掉已观测到的动物区域（盒缘贴着动物的极端几何下，
             # 宁留窄余量也不截断观测）。
             seal = max(seal, r0 + animal_bottom)
@@ -720,6 +768,7 @@ def calibrate_tape_corridor(
         confidence=float(col_score[c0 : c1 + 1].mean()),
         band_range=(r0, r1),
         sealed=sealed,
+        bl_est=bl_est if bl_est > 0 else None,
     )
 
 
@@ -739,7 +788,7 @@ def _estimate_body_length(
             corridor,
             thresh=None,
             tape_width_frac=0.10,
-            min_area=20,
+            min_area=_NO_BL_MIN_AREA_PX,
             max_area_frac=0.35,
             body_run_min_px=3,
             climb_frac_thresh=0.10,

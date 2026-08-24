@@ -83,3 +83,11 @@ def test_none_and_tiny_entries_ignored() -> None:
     by = {c.chamber: c for c in tv.chambers}
     assert by[1].status == V.STATUS_VALID
     assert by[4].status == V.STATUS_DETACHED
+
+
+def test_verdicts_invariant_to_area_scale() -> None:
+    """单位不变量配套：全部面积 ×4（更高分辨率同一试次）判定不变。"""
+    calib = {1: _profile(200), 2: _profile(190), 3: _profile(210), 4: _profile(40)}
+    v1 = V.assess_trial_validity(calib)
+    v2 = V.assess_trial_validity({k: [4 * x for x in p] for k, p in calib.items()})
+    assert [c.status for c in v1.chambers] == [c.status for c in v2.chambers]

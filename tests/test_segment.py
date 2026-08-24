@@ -473,3 +473,47 @@ def test_seal_respects_box_trace_hard_cap() -> None:
     # 上界 = 290 − 10 = 280；动物最深行 ≈224 必须仍被覆盖
     assert 250 <= corr.band_range[1] <= 280, corr
     assert corr.band_range[1] < 290, corr
+
+
+def _tst_scene_scaled(s: int, *, animal_row: int = 150, animal_h: int = 30,
+                      animal_w: int = 12) -> np.ndarray:
+    """_tst_scene 的 s 倍分辨率版本（同一物理场景，像素标度 ×s）。"""
+    h, w = 268 * s, 95 * s
+    g = np.full((h, w), 250.0)
+    g[0 : 70 * s, :] = 10.0
+    g[h - 9 * s :, :] = 10.0
+    g[70 * s : 135 * s, 44 * s : 50 * s] = 15.0
+    g[animal_row * s : (animal_row + animal_h) * s,
+      ((95 - animal_w) // 2) * s : ((95 - animal_w) // 2 + animal_w) * s] = 20.0
+    return g
+
+
+def test_scale_invariance_resolution() -> None:
+    """单位不变量配套测试：同一物理场景在 ×1 与 ×2 分辨率下同一判定。
+
+    走廊标定都 sealed、都找到动物、伸展度一致、面积按 ×4（像素面积随标度²）。
+    若哪个阈值是像素常数，两分辨率的判定会分叉。
+    """
+    res = {}
+    for s in (1, 2):
+        frames = [_tst_scene_scaled(s, animal_row=150 + i) for i in range(6)]
+        corr = S.calibrate_tape_corridor(frames)
+        assert corr is not None and corr.sealed, (s, corr)
+        r = S.segment_animal(frames[0][:, :], corridor=corr)
+        assert r.ok, (s, r.reason)
+        res[s] = (corr, r)
+    c1, r1 = res[1]
+    c2, r2 = res[2]
+    # 走廊列区间按标度缩放
+    assert c2.col_range[0] == 2 * c1.col_range[0] or abs(
+        c2.col_range[0] - 2 * c1.col_range[0]) <= 1
+    a1 = int(r1.mask.sum())
+    a2 = int(r2.mask.sum())
+    assert 3.5 <= a2 / a1 <= 4.5, (a1, a2)
+
+
+def test_min_area_scales_with_bl() -> None:
+    """min_area 缺省时随 BL² 缩放：大 BL 不接受小碎屑，小 BL 不被高地板误伤。"""
+    assert S._scaled(30)["min_area"] == 18 or S._scaled(30)["min_area"] == 20
+    assert S._scaled(90)["min_area"] == int(round(0.02 * 90 * 90))  # 162，随标度
+    assert S._scaled(None)["min_area"] == S._NO_BL_MIN_AREA_PX     # 回退地板
