@@ -413,19 +413,24 @@ def test_band_cap_stops_above_collection_box() -> None:
 
 
 def test_band_cap_absent_without_motion() -> None:
-    """无动物运动痕迹（全静止采样）⇒ 不收口、保持扩展带，但必须**显式标记**。
+    """静止采样（动物每帧都在，频率=1.0）同样构成出现行块 ⇒ 正常收口；
+    只有胶带底端以下**毫无痕迹**（空隔间/动物脱落）才不收口，且必须显式标记。
 
     不收口 = 回到"带底可能进盒区"的已知危险态；静默退化违反 §6.2 纪律。
     """
     frames = [_corridor_scene(animal_row=160) for _ in range(4)]
     corr = S.calibrate_tape_corridor(frames)
     assert corr is not None
-    assert corr.sealed is False, corr
-    # 面板行 70–258 全亮 ⇒ 扩展带到底；动物静止（暗频率=1.0）不构成运动块
-    assert corr.band_range[1] >= 250, corr
-    # 危险态必须随每次分割显式传给上层
-    res = S.segment_animal(frames[0], corridor=corr)
-    assert res.ok, res.reason
+    assert corr.sealed is True, corr
+    assert corr.band_range[1] >= 189, corr   # 覆盖静止动物（160–189）+ 余量
+
+    # 真空走廊：胶带下没有任何痕迹 ⇒ 不收口 + 显式危险态标记
+    empty = [_corridor_scene(animal_row=0, animal_h=0) for _ in range(4)]
+    corr2 = S.calibrate_tape_corridor(empty)
+    assert corr2 is not None
+    assert corr2.sealed is False, corr2
+    assert corr2.band_range[1] >= 250, corr2   # 保持扩展带
+    res = S.segment_animal(empty[0], corridor=corr2)
     assert "band_unsealed" in res.flags
 
 

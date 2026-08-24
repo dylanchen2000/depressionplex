@@ -426,17 +426,17 @@ def structural_noise_floor(
 
 # 扩展带收口常量（全部有实测依据，见 calibrate_tape_corridor 注释与
 # 2026-08-24 素材测量）：
-_MOTION_FREQ_LO = 0.10   # 暗频率 ≥0.10 才算"真实出现过"（31 帧样本 ≈ ≥3 帧）
-_MOTION_FREQ_HI = 0.85   # ≥0.85 视为静物（箱体/收集盒/早已落定的粪粒）
-_MOTION_MIN_COLS = 3     # 一行至少 3 列中频暗才算动物痕迹（单列尾巴不算）
-_BLOCK_GAP = 3           # 运动行块内允许的最大空隙行数（尾巴亮区实测 ≤3 行）
-_HANG_REACH = 60         # 动物运动块必须起始于胶带底端 60 行内（实测尾隙 31–36）
+_PRESENCE_FREQ_LO = 0.10  # 暗频率 ≥0.10 才算"出现过"（31 帧样本 ≈ ≥3 帧）
+_PRESENCE_MIN_COLS = 3    # 一行至少 3 列暗才算痕迹（单列尾巴/噪点不算）
+_BLOCK_GAP = 3            # 行块内允许的最大空隙行数（尾巴亮区实测 ≤3 行）
+_HANG_REACH = 60          # 动物块必须起始于胶带底端 60 行内（实测尾隙 31–36）
 # 收口余量 = _SEAL_BL_K × BL（BL 在标定期对全部标定帧估一次，取中位数）。
 # **不用硬编码像素**：本项目主张阈值体长归一化（D2），且硬件规格 ≥1280×720
 # 比当前素材线性约 2.7×，届时 BL 46–98 px，固定像素余量相对缩到 ~0.4×BL、
 # 会把动物切掉。k 由当前数据反解：30 px 余量 / BL 20.9–35.6 = 0.84–1.44，取 1.0。
 _SEAL_BL_K = 1.0
-_BOX_MARGIN = 10         # 收口硬上界与盒区痕迹顶端的最小间隔行数
+_BOX_MARGIN = 15         # 收口硬上界与盒区结构顶端的最小间隔行数（评审判据）
+_BOTTOM_GUARD = 20       # 离帧底这么近的痕迹块一律视为盒/框（动物悬挂够不到帧底）
 
 
 @dataclass(frozen=True)
@@ -500,6 +500,24 @@ def _max_outside_run(dark_row: np.ndarray, cols: np.ndarray) -> int:
         cur = cur + 1 if g == 1 else 1
         if cur > best:
             best = cur
+    return best
+
+
+def _block_max_run(pmask: np.ndarray, block: tuple[int, int]) -> int:
+    """块内所有行中、出现像素的最长连续段宽度。
+
+    判"这个痕迹块里有没有身体级的宽行"：动物身体必有（蜷曲/悬挂时宽 ≥ 体长/4），
+    2 px 的静态挂线/划痕/边缘渗漏没有。收口生长时据此区分动物碎片与盒区结构。
+    """
+    best = 0
+    for r in range(block[0], block[1] + 1):
+        idx = np.flatnonzero(pmask[r])
+        if idx.size == 0:
+            continue
+        runs = np.split(idx, np.flatnonzero(np.diff(idx) > 1) + 1)
+        w = max(len(s) for s in runs)
+        if w > best:
+            best = w
     return best
 
 
@@ -610,35 +628,50 @@ def calibrate_tape_corridor(
     # 扩展带收口：不得进入底部收集盒区。扩展用的"亮占比 >0.70"挡不住盒区——
     # 玻璃盒在部分隔间里大部分行仍是亮的（实测 ch3/4 延伸到 254，盒内不触边
     # 的碎屑会成为候选）。收口依据一条几何事实：**动物悬挂在胶带上，它的活动
-    # 痕迹必须出现在胶带底端附近**；盒区的活动痕迹（粪粒随时间累积 → 中频暗）
-    # 离动物远得多（实测 ≥50 行，且与体长同比例缩放）。具体做法见下方"向下
-    # 生长"注释；带底封到 动物块底 + _SEAL_BL_K×BL（BL 归一化，见常量注释），
-    # **两侧都有约束**——再取盒区痕迹顶 − _BOX_MARGIN 为硬上界，防胶带更长、
-    # 挂得更低的个体把收口推进盒区。找不到悬挂块或估不出 BL ⇒ 不收口，但必须
-    # 显式标 sealed=False（下游打 band_unsealed）：不收口 = 回到刚被证明会伸进
-    # 盒区的状态，静默退化违反 §6.2 纪律。
-    motion = ((freq >= _MOTION_FREQ_LO) & (freq < _MOTION_FREQ_HI)).sum(axis=1)
-    motion_rows = np.flatnonzero(motion >= _MOTION_MIN_COLS)
+    # 痕迹必须出现在胶带底端附近**；盒区结构（盒缘/挂线/累积粪粒，静态或渐积）
+    # 离动物更远。具体做法见下方"向下生长"注释；带底封到 动物块底 + _SEAL_BL_K×BL
+    # （BL 归一化，见常量注释），**两侧都有约束**——再取盒区结构顶 − _BOX_MARGIN
+    # 为硬上界，防胶带更长、挂得更低的个体把收口推进盒区。找不到悬挂块或估不出
+    # BL ⇒ 不收口，但必须显式标 sealed=False（下游打 band_unsealed）：不收口 =
+    # 回到刚被证明会伸进盒区的状态，静默退化违反 §6.2 纪律。
+    #
+    # 痕迹行块建立在**出现行**（暗频率 ≥ _PRESENCE_FREQ_LO，静物与运动都算）上：
+    # 动物静止重叠区（频率=1.0）与盒区静态结构（频率≈1.0）都是高频，只靠频率
+    # 分不开，靠"与动物块的间隙 > BL"+"块内最宽行 ≥ 体宽"分开；若把静物排除，
+    # 盒缘这种静态结构反而看不见，硬上界会漏。胶带本身也是静态高频，建块前把
+    # 胶带底端以上的走廊列从出现掩膜里挖掉——否则胶带会与动物并成一块、块顶
+    # 冲到面板带顶、seed 判据失配（实测 v4 隔间3）。
+    pmask = freq >= _PRESENCE_FREQ_LO
+    row_end_local = row_end - r0
+    pmask[: row_end_local + 1, c0 : c1 + 1] = False
+    presence = pmask.sum(axis=1)
+    presence_rows = np.flatnonzero(presence >= _PRESENCE_MIN_COLS)
     blocks: list[tuple[int, int]] = []
-    if motion_rows.size:
-        btop = bbot = int(motion_rows[0])
-        for i in motion_rows[1:]:
+    if presence_rows.size:
+        btop = bbot = int(presence_rows[0])
+        for i in presence_rows[1:]:
             if int(i) - bbot <= _BLOCK_GAP + 1:
                 bbot = int(i)
             else:
                 blocks.append((btop, bbot))
                 btop = bbot = int(i)
         blocks.append((btop, bbot))
-    row_end_local = row_end - r0
     sealed = False
-    # 识别悬挂运动块用"向下生长"而不是逐块判定：动物在某些行**所有**标定帧
-    # 都在时（静止重叠区），那些行暗频率 =1.0、被算作静物，运动块会被劈成
-    # 多段。从最高的悬挂块（块顶在胶带底端 _HANG_REACH 行内）出发往下生长：
-    # 与当前区域的间隙 ≤ BL 的块仍是动物（静止重叠区与尾巴亮区都 ≤ 体长），
-    # 间隙 > BL 处即盒区。盒区离动物的距离与体长同比例缩放（几何相似），
-    # 故 BL 相对判据跨分辨率成立。
+    # 识别悬挂块用"向下生长"而不是逐块判定：从最高的悬挂块出发（块顶必须在
+    # **胶带底端以下**——胶带自身的轻微摆动会在胶带区内制造痕迹块，实测 v6
+    # 隔间1 因此把带收塌到胶带底端之上；动物悬挂只出现在底端之下，攀爬向上、
+    # 不影响深度收口），且在底端 _HANG_REACH 行内。生长规则：与当前区域的间隙
+    # ≤ BL **且** 块内出现过身体级宽行的块仍是动物（静止重叠区与尾巴亮区都
+    # ≤ 体长；身体必然有宽行，2 px 的静态挂线/划痕没有——实测 v7 隔间2 盒区
+    # 2 px 挂线曾按间隙 ≤ BL 被误并入动物区）。间隙 > BL 或无宽行的块即盒区
+    # 结构。距离与宽度判据都相对 BL，与体长同比例缩放，跨分辨率成立。
     seed = next(
-        (b for b in blocks if b[0] <= row_end_local + _HANG_REACH), None
+        (
+            b
+            for b in blocks
+            if row_end_local - 3 <= b[0] <= row_end_local + _HANG_REACH
+        ),
+        None,
     )
     if seed is not None:
         conf = float(col_score[c0 : c1 + 1].mean())
@@ -651,20 +684,33 @@ def calibrate_tape_corridor(
         )
         bl_est = _estimate_body_length(grays, provisional)
         if bl_est > 0:
+            min_body_run = max(5.0, bl_est / 4.0)
+            # 动物从顶端胶带悬挂，不会垂到帧底；贴近帧底的块是盒/框，不是动物。
+            # 实测各视频动物最深处离帧底 ≥40 行，_BOTTOM_GUARD 取 20 留足余量，
+            # 并对大动物按 0.5×BL 放大。
+            bottom_guard = max(_BOTTOM_GUARD, int(0.5 * bl_est))
+            frame_bottom_local = (h - 1) - r0
             idx = blocks.index(seed)
             animal_bottom = seed[1]
             rest: list[tuple[int, int]] = []
             for b in blocks[idx + 1 :]:
-                if b[0] - animal_bottom <= bl_est:
+                near_bottom = b[1] >= frame_bottom_local - bottom_guard
+                if (
+                    not near_bottom
+                    and b[0] - animal_bottom <= bl_est
+                    and _block_max_run(pmask, b) >= min_body_run
+                ):
                     animal_bottom = b[1]
                 else:
                     rest.append(b)
             seal = r0 + animal_bottom + int(round(_SEAL_BL_K * bl_est))
-            # 硬上界：盒区痕迹顶（首个未并下来的块）− _BOX_MARGIN。防胶带
-            # 更长、挂得更低的个体把 块底 + k·BL 推进盒区。
+            # 硬上界：盒区结构顶（首个未并下来的块）− _BOX_MARGIN。
             if rest:
                 box_top = r0 + rest[0][0]
                 seal = min(seal, box_top - _BOX_MARGIN)
+            # 收口永不裁掉已观测到的动物区域（盒缘贴着动物的极端几何下，
+            # 宁留窄余量也不截断观测）。
+            seal = max(seal, r0 + animal_bottom)
             r1 = min(r1, seal)
             sealed = True
 
