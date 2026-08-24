@@ -31,6 +31,10 @@ ROLE_WATER_SURFACE = "water_surface"
 ROLE_CHAMBER = "chamber"
 ROLE_SUSPENSION_BAR = "suspension_bar"
 ROLE_SUSPENSION_POINT = "suspension_point"
+# 胶带走廊：悬挂胶带所在的竖直列区间（加最大竖直延伸）。相机固定 ⇒ 胶带位置是
+# 每段录像的常量，应**标定一次**（人工确认后 confirmed=True），而不是每帧推断。
+# 缺失时分割退化为无走廊的启发式路径，不报错——它是可选优化项，不是必需角色。
+ROLE_TAPE_CORRIDOR = "tape_corridor"
 
 KIND_POINT = "point"
 KIND_LINE = "line"
@@ -49,9 +53,12 @@ _ROLE_KINDS: dict[str, tuple[str, ...]] = {
     ROLE_CHAMBER: (KIND_POLYGON, KIND_RECT),
     ROLE_SUSPENSION_BAR: (KIND_LINE,),
     ROLE_SUSPENSION_POINT: (KIND_POINT,),
+    ROLE_TAPE_CORRIDOR: (KIND_RECT,),
 }
 
 # 每个范式必须具备的角色，缺一个就不允许出正式结果。
+# 注意：tape_corridor **不在其中**——走廊是可选优化项，缺失时分割退化为
+# 无走廊的启发式路径而非报错（见 segment.segment_animal 的 corridor 参数）。
 REQUIRED_ROLES: dict[str, tuple[str, ...]] = {
     "FST": (ROLE_TANK, ROLE_WATER_SURFACE),
     "TST": (ROLE_CHAMBER, ROLE_SUSPENSION_BAR),
