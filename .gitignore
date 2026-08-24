@@ -1,0 +1,36 @@
+# 大文件不进仓库：原始视频、掩膜、模型权重
+# 规则来自全局约定——git 只放文字产出与小图（<1MB）
+*.mp4
+*.avi
+*.mpg
+*.mpeg
+*.mov
+*.mkv
+*.onnx
+*.pt
+*.pth
+*.npz
+*.npy
+
+# 数据与产出目录
+data/
+videos/
+masks/
+result_packages/
+runs/
+outputs/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.deps/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# 系统
+.DS_Store
+Thumbs.db
