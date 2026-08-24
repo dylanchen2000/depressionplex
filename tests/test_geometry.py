@@ -143,3 +143,25 @@ def test_no_colour_field_exists() -> None:
     fields = G.GeometryPrimitive.__dataclass_fields__
     for banned in ("color", "colour", "rgb", "hue"):
         assert banned not in fields, f"GeometryPrimitive 不应有 {banned} 字段"
+
+
+def test_tape_corridor_role_is_optional_rect() -> None:
+    """tape_corridor：只能画成矩形；是可选角色，缺失时 TST 标定仍然合法。
+
+    走廊是"标定一次的优化项"，不是出正式结果的前提——缺失时分割退化为
+    无走廊的启发式路径（见 segment.segment_animal），而不是拒绝分析。
+    """
+    env = _tst_env()
+    assert env.validate() == [], "缺少 tape_corridor 不应影响 TST 合法性"
+
+    G.make_rect(env, G.ROLE_TAPE_CORRIDOR, 40, 68, 46, 124,
+                instance=1, confirmed=True)
+    assert env.validate() == []
+    p = env.by_role(G.ROLE_TAPE_CORRIDOR)[0]
+    assert p.key == "tape_corridor_1"
+
+    try:
+        G.make_line(env, G.ROLE_TAPE_CORRIDOR, 0, 0, 10, 10)
+    except G.GeometryError:
+        return
+    raise AssertionError("tape_corridor 画成 line 应被拒绝")

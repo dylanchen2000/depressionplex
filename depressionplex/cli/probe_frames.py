@@ -8,6 +8,10 @@
 
 用法：
     python3 -m depressionplex.cli.probe_frames frames/seq_*.png --chambers 4
+
+    # 带胶带走廊标定（标定帧建议从全片均匀抽 20–40 帧）：
+    python3 -m depressionplex.cli.probe_frames frames/seq_*.png --chambers 4 \
+        --calibrate-from calib/c_*.png
 """
 
 from __future__ import annotations
@@ -37,6 +41,13 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("frames", nargs="+", type=Path)
     ap.add_argument("--chambers", type=int, default=4)
+    ap.add_argument(
+        "--calibrate-from",
+        nargs="+",
+        type=Path,
+        default=[],
+        help="胶带走廊标定帧（建议从全片均匀抽 20–40 帧）。给了则第 4 节走走廊路径",
+    )
     args = ap.parse_args(argv)
 
     paths = sorted(args.frames)
@@ -57,6 +68,30 @@ def main(argv: list[str] | None = None) -> int:
     if args.chambers and len(chambers) != args.chambers:
         print(f"  [警告] 与期望的 {args.chambers} 个不符——标定需人工确认")
 
+    # 胶带走廊标定（提案，非权威）。给了 --calibrate-from 才启用。
+    corridors: dict[int, S.TapeCorridor] = {}
+    if args.calibrate_from:
+        calib_paths = sorted(args.calibrate_from)
+        calib_grays = [load_gray(p) for p in calib_paths]
+        print(f"\n== 2.5 胶带走廊标定（提案，非权威；{len(calib_grays)} 帧）==")
+        if len(calib_grays) < 2:
+            print("  [警告] 标定帧不足 2 帧，退回无走廊路径")
+        else:
+            for k, (c0, c1) in enumerate(chambers, 1):
+                corr = S.calibrate_tape_corridor(
+                    [g[:, c0 : c1 + 1] for g in calib_grays]
+                )
+                if corr is None:
+                    print(f"  隔间{k}: 标定失败 → 退回无走廊路径")
+                    continue
+                corridors[k] = corr
+                print(
+                    f"  隔间{k}: 走廊列 {corr.col_range[0]}-{corr.col_range[1]}"
+                    f"（宽 {corr.col_range[1] - corr.col_range[0] + 1} px）"
+                    f"  行 {corr.row_range[0]}-{corr.row_range[1]}"
+                    f"  置信 {corr.confidence:.3f}  面板带 {corr.band_range}"
+                )
+
     nf = S.structural_noise_floor(grays)
     print("\n== 3. 分割噪声底（静态高对比结构，非动物）==")
     if "delta_mean" in nf:
@@ -74,7 +109,10 @@ def main(argv: list[str] | None = None) -> int:
     print("  注意：动物在动时，抖动 = 分割噪声 + 真实形变。RAD 残差可判断是否在动。")
     all_pass = bool(rep["passes_gate"])
     for k, (c0, c1) in enumerate(chambers, 1):
-        results = [S.segment_animal(g[:, c0 : c1 + 1]) for g in grays]
+        results = [
+            S.segment_animal(g[:, c0 : c1 + 1], corridor=corridors.get(k))
+            for g in grays
+        ]
         ok = [r.mask for r in results if r.ok and r.mask is not None]
         flags = sorted({f for r in results for f in r.flags})
         reasons = sorted({r.reason for r in results if not r.ok})

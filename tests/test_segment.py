@@ -163,3 +163,219 @@ def test_label_components_sorted_and_bboxes() -> None:
     assert [c.area for c in comps] == [48, 9]
     assert comps[0].bbox == (10, 10, 15, 17)
     assert comps[0].height == 6 and comps[0].width == 8
+
+
+# ---- 胶带走廊标定与走廊路径 ---------------------------------------------------
+#
+# 场景约定（与 _tst_scene 一致）：95 宽隔间 ROI，行 0–70 顶框（黑），
+# 70–258 亮面板，259+ 底框。胶带 = 列 44–50 的竖直暗条，动物 = 暗矩形。
+
+
+def _corridor_scene(
+    *,
+    tape_rows: tuple[int, int] = (70, 135),
+    tape_cols: tuple[int, int] = (44, 50),
+    connect_rows: tuple[int, int] | None = None,  # 胶带延伸到动物（连通）
+    animal_row: int = 150,
+    animal_h: int = 30,
+    animal_w: int = 12,
+    animal_col: int | None = None,  # None = 居中
+) -> np.ndarray:
+    h, w = 268, 95
+    g = np.full((h, w), 250.0)
+    g[0:70, :] = 10.0
+    g[259:, :] = 10.0
+    tc0, tc1 = tape_cols
+    tr0, tr1 = tape_rows
+    g[tr0:tr1, tc0:tc1] = 15.0
+    if connect_rows is not None:
+        g[connect_rows[0]:connect_rows[1], tc0:tc1] = 15.0
+    c0 = (w - animal_w) // 2 if animal_col is None else animal_col
+    g[animal_row : animal_row + animal_h, c0 : c0 + animal_w] = 20.0
+    return g
+
+
+def test_corridor_none_is_bit_identical_to_default() -> None:
+    """C3 精神：corridor=None 必须走原路径，行为逐位一致。"""
+    for scene in (
+        _tst_scene(),
+        _tst_scene(animal_row=170),
+        _corridor_scene(connect_rows=(135, 150)),
+    ):
+        base = S.segment_animal(scene)
+        res = S.segment_animal(scene, corridor=None)
+        assert res.ok == base.ok
+        assert res.flags == base.flags
+        assert res.reason == base.reason
+        if base.ok:
+            assert np.array_equal(res.mask, base.mask)
+
+
+def test_calibrate_finds_static_tape_with_moving_animal() -> None:
+    """暗频率法：动物在动，胶带静止 ⇒ 走廊 = 胶带列。"""
+    frames = [
+        _corridor_scene(animal_row=150 + 6 * i, animal_col=36 + 3 * i)
+        for i in range(6)
+    ]
+    corr = S.calibrate_tape_corridor([f[:, :] for f in frames])
+    assert corr is not None, "标定不应失败"
+    assert corr.col_range == (44, 49), corr
+    # 行下界 = 胶带底端（暗频率首次跌破 0.9 的上一行），允许 ±1 行
+    assert abs(corr.row_range[1] - 134) <= 1, corr
+    assert corr.confidence >= 0.95, corr
+
+
+def test_calibrate_needs_at_least_two_frames() -> None:
+    assert S.calibrate_tape_corridor([_corridor_scene()]) is None
+    assert S.calibrate_tape_corridor([]) is None
+
+
+def test_calibrate_none_without_static_vertical_structure() -> None:
+    """没有静态胶带（动物每帧换位、无固定暗列）⇒ 返回 None，不猜。"""
+    frames = [
+        _corridor_scene(tape_rows=(0, 0), animal_row=140 + 10 * i,
+                        animal_col=30 + 8 * i)
+        for i in range(5)
+    ]
+    assert S.calibrate_tape_corridor(frames) is None
+
+
+def test_calibrate_disambiguates_edge_pillar() -> None:
+    """多个候选段时：贴 ROI 边缘的是结构立柱渗漏，应丢弃，取内部胶带段。"""
+    frames = []
+    for i in range(4):
+        g = _corridor_scene(animal_row=150 + 5 * i)
+        g[:, 0:4] = 10.0  # 左缘立柱：整条高度全暗
+        frames.append(g)
+    corr = S.calibrate_tape_corridor(frames)
+    assert corr is not None
+    assert corr.col_range == (44, 49), corr
+
+
+def test_calibrate_none_on_two_interior_runs() -> None:
+    """两段内部静态暗条、消歧后仍唯一性不足 ⇒ 返回 None，不猜。"""
+    frames = []
+    for i in range(3):
+        g = _corridor_scene(animal_row=160 + 4 * i)
+        g[70:135, 20:26] = 15.0  # 第二条"胶带"
+        frames.append(g)
+    assert S.calibrate_tape_corridor(frames) is None
+
+
+def test_corridor_separates_connected_tape() -> None:
+    """核心修复：动物与胶带连通时，走廊路径按胶带底端截断，不再挑到胶带。"""
+    g = _corridor_scene(connect_rows=(135, 150))
+    # 无走廊：连通体被整体挑中（胶带把面积拉长），打 tape_attached
+    base = S.segment_animal(g)
+    assert base.ok
+    assert "tape_attached" in base.flags
+    assert int(base.mask.sum()) > 30 * 12 + 100, "基线应包含胶带像素"
+
+    corr = S.TapeCorridor(
+        col_range=(44, 49),
+        row_range=(70, 149),   # 胶带最大延伸（含连接段）
+        confidence=1.0,
+        band_range=(70, 238),
+    )
+    res = S.segment_animal(g, corridor=corr)
+    assert res.ok, res.reason
+    assert "tape_attached" not in res.flags
+    assert int(res.mask.sum()) == 30 * 12, int(res.mask.sum())
+    rows = np.flatnonzero(res.mask.any(axis=1))
+    assert rows.min() >= 150, "截断面以上（胶带区）不应有动物像素"
+
+
+def test_corridor_nothing_below_tape_fails_explicitly() -> None:
+    """边界情况 1：胶带底端以下没有任何动物 ⇒ 显式失败 + 标记，绝不返回胶带。
+
+    截断面在胶带底端，结构上已不可能把胶带当动物；此处验证"动物缺失/完全
+    缩在走廊里与胶带无法区分"时的显式失败纪律（空掩膜会被下游当成
+    immobility，把失败伪装成信号）。
+    """
+    g = _corridor_scene()
+    g[150:180, :] = 250.0           # 抹掉默认动物：胶带下方空无一物
+    corr = S.TapeCorridor((44, 49), (70, 134), 1.0, (70, 238))
+    res = S.segment_animal(g, corridor=corr)
+    assert not res.ok
+    assert res.mask is None
+    assert res.reason
+    assert "animal_in_corridor" in res.flags
+
+
+def test_corridor_thin_animal_below_tape_is_returned() -> None:
+    """细瘦动物顺胶带轴悬挂、完全在走廊列内、但在胶带底端**以下** ⇒ 正常返回。
+
+    这是真实姿态（挣扎期动物沿胶带轴拉长，实测隔间 2 A 批），不是胶带：
+    截断面在胶带底端，其下的细条只可能是动物。与"缩在胶带区无法区分"不同，
+    不得误杀。
+    """
+    g = _corridor_scene()
+    g[150:180, :] = 250.0           # 抹掉默认动物
+    g[150:180, 46:49] = 20.0        # 3 px 宽、在走廊列内、位于胶带底端之下
+    corr = S.TapeCorridor((44, 49), (70, 134), 1.0, (70, 238))
+    res = S.segment_animal(g, corridor=corr)
+    assert res.ok, res.reason
+    assert int(res.mask.sum()) == 30 * 3, int(res.mask.sum())
+    rows = np.flatnonzero(res.mask.any(axis=1))
+    assert rows.min() >= 150, "胶带区（截断面以上）不应有像素"
+
+
+def test_corridor_climbing_animal_returned_and_flagged() -> None:
+    """边界情况 2+4：动物爬上走廊区是真实行为——必须返回、打标记、不裁身体。"""
+    g = _corridor_scene(tape_rows=(70, 131))   # 胶带底端 = 行 130，与走廊一致
+    g[150:180, :] = 250.0           # 抹掉默认动物
+    g[90:131, 40:61] = 20.0         # 身体整体在胶带底端之上，且突出走廊两侧
+    corr = S.TapeCorridor((44, 49), (70, 130), 1.0, (70, 238))
+    res = S.segment_animal(g, corridor=corr)
+    assert res.ok, res.reason
+    assert "animal_in_corridor" in res.flags
+    # 不静默裁掉：身体在走廊外的像素必须保留
+    assert int(res.mask.sum()) == 41 * 21, int(res.mask.sum())
+    cols = np.flatnonzero(res.mask.any(axis=0))
+    assert cols.min() <= 40 and cols.max() >= 60
+
+
+def test_corridor_invalid_falls_back_with_flag() -> None:
+    """边界情况 3：走廊结构非法 ⇒ 退回无走廊路径 + corridor_unused 标记。"""
+    g = _corridor_scene(connect_rows=(135, 150))
+    base = S.segment_animal(g)
+    bad = S.TapeCorridor((500, 510), (70, 134), 1.0, (70, 238))
+    res = S.segment_animal(g, corridor=bad)
+    assert res.ok == base.ok
+    assert np.array_equal(res.mask, base.mask)
+    assert "corridor_unused" in res.flags
+    assert "tape_attached" in res.flags  # 退化路径的原标记保留
+
+
+def test_corridor_band_range_prevents_truncation() -> None:
+    """回归：逐帧 panel_band 底缘在阴影带前截断时，走廊路径用标定带找回动物。
+
+    实测踩坑：面板底部阴影行亮占比 0.84–0.93，落在 0.85 门槛附近，
+    逐帧 band 底缘在 163/239 之间跳变，动物被随机截断。标定期逐帧扩展
+    取并（>0.70）后带是稳定的。
+    """
+    def frame(animal_row: int) -> np.ndarray:
+        g = _corridor_scene(animal_row=animal_row, animal_h=20)
+        # 面板下部的阴影带：亮占比 0.842（<0.85 ⇒ panel_band 截断；>0.70 ⇒ 可扩回）。
+        # 与动物重叠时亮占比 0.716，仍 >0.70——对齐实测（阴影 7–16% 暗、
+        # 动物 ~13% 宽），扩展不会被动物挡住。
+        g[200:240, 0:15] = 10.0
+        # 阴影带以下彻底暗（收集盒），扩展到此为止
+        g[240:259, :] = 30.0
+        return g
+
+    frames = [frame(210), frame(214), frame(218)]
+    g0 = frames[0]
+    # 单帧 panel_band 确实截断在阴影带之前，动物（行 210–230）被丢在带外
+    assert S.panel_band(g0)[1] < 210
+    r_no = S.segment_animal(g0)
+    assert (not r_no.ok) or int(r_no.mask[210:230, :].sum()) == 0, \
+        "无走廊路径不应找到被截断的动物"
+
+    corr = S.calibrate_tape_corridor(frames)
+    assert corr is not None
+    assert corr.col_range == (44, 49), corr
+    assert corr.band_range[1] >= 239, corr   # 扩展带覆盖阴影区
+    res = S.segment_animal(g0, corridor=corr)
+    assert res.ok, res.reason
+    assert int(res.mask.sum()) == 20 * 12, int(res.mask.sum())
