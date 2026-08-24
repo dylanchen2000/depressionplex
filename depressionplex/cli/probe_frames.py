@@ -85,11 +85,17 @@ def main(argv: list[str] | None = None) -> int:
                     print(f"  隔间{k}: 标定失败 → 退回无走廊路径")
                     continue
                 corridors[k] = corr
+                seal_note = (
+                    "已收口"
+                    if corr.sealed
+                    else "[警告] 未收口(band_unsealed)：无悬挂运动块/估不出 BL，"
+                    "带底为扩展值，可能已进盒区"
+                )
                 print(
                     f"  隔间{k}: 走廊列 {corr.col_range[0]}-{corr.col_range[1]}"
                     f"（宽 {corr.col_range[1] - corr.col_range[0] + 1} px）"
                     f"  行 {corr.row_range[0]}-{corr.row_range[1]}"
-                    f"  置信 {corr.confidence:.3f}  面板带 {corr.band_range}"
+                    f"  置信 {corr.confidence:.3f}  面板带 {corr.band_range} {seal_note}"
                 )
 
     nf = S.structural_noise_floor(grays)

@@ -180,11 +180,12 @@ def _corridor_scene(
     animal_h: int = 30,
     animal_w: int = 12,
     animal_col: int | None = None,  # None = 居中
+    height: int = 268,
 ) -> np.ndarray:
-    h, w = 268, 95
+    h, w = height, 95
     g = np.full((h, w), 250.0)
     g[0:70, :] = 10.0
-    g[259:, :] = 10.0
+    g[h - 9 :, :] = 10.0
     tc0, tc1 = tape_cols
     tr0, tr1 = tape_rows
     g[tr0:tr1, tc0:tc1] = 15.0
@@ -399,6 +400,7 @@ def test_band_cap_stops_above_collection_box() -> None:
     frames = [frame(i) for i in range(6)]
     corr = S.calibrate_tape_corridor(frames)
     assert corr is not None
+    assert corr.sealed, corr
     assert corr.band_range[1] < 240, corr     # 收口在盒区之上
     assert corr.band_range[1] >= 184, corr    # 但仍覆盖动物最深行 + 余量
 
@@ -407,12 +409,62 @@ def test_band_cap_stops_above_collection_box() -> None:
     assert res.ok, res.reason
     assert int(res.mask.sum()) == 20 * 12, int(res.mask.sum())
     assert res.mask[240:, :].sum() == 0, "盒区像素不得进入掩膜"
+    assert "band_unsealed" not in res.flags
 
 
 def test_band_cap_absent_without_motion() -> None:
-    """无动物运动痕迹（全静止采样）⇒ 不收口，保持扩展带。宁宽勿猜。"""
+    """无动物运动痕迹（全静止采样）⇒ 不收口、保持扩展带，但必须**显式标记**。
+
+    不收口 = 回到"带底可能进盒区"的已知危险态；静默退化违反 §6.2 纪律。
+    """
     frames = [_corridor_scene(animal_row=160) for _ in range(4)]
     corr = S.calibrate_tape_corridor(frames)
     assert corr is not None
+    assert corr.sealed is False, corr
     # 面板行 70–258 全亮 ⇒ 扩展带到底；动物静止（暗频率=1.0）不构成运动块
     assert corr.band_range[1] >= 250, corr
+    # 危险态必须随每次分割显式传给上层
+    res = S.segment_animal(frames[0], corridor=corr)
+    assert res.ok, res.reason
+    assert "band_unsealed" in res.flags
+
+
+def test_seal_margin_scales_with_body_length() -> None:
+    """收口余量 = k×BL，不是硬编码像素（D2 体长归一化主张）。
+
+    同一布局、仅动物体长不同（高场景，两者都碰不到帧底）：
+    大动物的收口应比小动物显著更深。硬编码余量下两者之差只来自块底，
+    k×BL 下还叠加余量之差。
+    """
+    def video(animal_h: int) -> list[np.ndarray]:
+        return [
+            _corridor_scene(animal_row=150 + 5 * i, animal_h=animal_h, height=400)
+            for i in range(6)
+        ]
+
+    small = S.calibrate_tape_corridor(video(20))
+    large = S.calibrate_tape_corridor(video(80))
+    assert small is not None and large is not None
+    assert small.sealed and large.sealed
+    assert large.band_range[1] - small.band_range[1] >= 40, (small, large)
+
+
+def test_seal_respects_box_trace_hard_cap() -> None:
+    """硬上界：块底 + k×BL 伸进盒区时，取 盒区痕迹顶 − margin（两侧都有约束）。
+
+    高场景：动物（60 px 体长）挂得深，盒区痕迹离动物块底 66 行
+    （> BL ⇒ 不会被生长误并），但 块底 + k·BL 会越过 痕迹顶 − 10 ⇒
+    硬上界兜底生效，同时动物最深行仍被覆盖。
+    """
+    def frame(i: int) -> np.ndarray:
+        g = _corridor_scene(animal_row=150 + 3 * i, animal_h=60, height=340)
+        if i % 2 == 0:                      # 盒区痕迹（中频暗）：行 290–310
+            g[290:310, 30:51] = 15.0
+        return g
+
+    corr = S.calibrate_tape_corridor([frame(i) for i in range(6)])
+    assert corr is not None
+    assert corr.sealed, corr
+    # 上界 = 290 − 10 = 280；动物最深行 ≈224 必须仍被覆盖
+    assert 250 <= corr.band_range[1] <= 280, corr
+    assert corr.band_range[1] < 290, corr

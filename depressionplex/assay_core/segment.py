@@ -17,6 +17,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from . import silhouette as sil
+
 
 @dataclass(frozen=True, eq=False)
 class Component:
@@ -429,7 +431,12 @@ _MOTION_FREQ_HI = 0.85   # ≥0.85 视为静物（箱体/收集盒/早已落定�
 _MOTION_MIN_COLS = 3     # 一行至少 3 列中频暗才算动物痕迹（单列尾巴不算）
 _BLOCK_GAP = 3           # 运动行块内允许的最大空隙行数（尾巴亮区实测 ≤3 行）
 _HANG_REACH = 60         # 动物运动块必须起始于胶带底端 60 行内（实测尾隙 31–36）
-_BOTTOM_MARGIN = 30      # 块底余量 ≈1×BL，覆盖标定采样未见到的更深姿态
+# 收口余量 = _SEAL_BL_K × BL（BL 在标定期对全部标定帧估一次，取中位数）。
+# **不用硬编码像素**：本项目主张阈值体长归一化（D2），且硬件规格 ≥1280×720
+# 比当前素材线性约 2.7×，届时 BL 46–98 px，固定像素余量相对缩到 ~0.4×BL、
+# 会把动物切掉。k 由当前数据反解：30 px 余量 / BL 20.9–35.6 = 0.84–1.44，取 1.0。
+_SEAL_BL_K = 1.0
+_BOX_MARGIN = 10         # 收口硬上界与盒区痕迹顶端的最小间隔行数
 
 
 @dataclass(frozen=True)
@@ -446,12 +453,17 @@ class TapeCorridor:
     - `band_range`: 稳定化的面板行带 [r0, r1]。标定期逐帧扩展取并（避免
       逐帧 panel_band 底缘在阈值附近抖动、把动物截断），再收口到动物活动块
       之下（避免把底部收集盒区纳入搜索——盒内碎屑会成为假候选）。
+    - `sealed`: 带底是否已按动物活动块收口。**False 是显式的危险态**：
+      未收口 = 带底仍是扩展值、可能已进盒区，此时分割会带 `band_unsealed`
+      标记。找不到悬挂运动块或估不出 BL 时才会出现（见 §6.2 纪律：
+      宁可带警告跑，不静默回到坏状态）。手工给定的走廊默认 True。
     """
 
     col_range: tuple[int, int]
     row_range: tuple[int, int]
     confidence: float
     band_range: tuple[int, int]
+    sealed: bool = True
 
 
 def _extended_band(
@@ -495,7 +507,7 @@ def calibrate_tape_corridor(
     grays: list[np.ndarray],
     *,
     dark_freq_thresh: float = 0.90,
-    upper_frac: float = 1.0 / 3.0,
+    top_depth: int = 30,
     band_ext_frac: float = 0.70,
     max_width_frac: float = 0.25,
     thresh: float | None = None,
@@ -506,14 +518,16 @@ def calibrate_tape_corridor(
 
     - 胶带在几乎所有帧都占据同一批列；动物在动。**逐像素统计"暗频率"
       = 该像素在多少比例的帧里低于阈值**，胶带列 ≈ 1.0，动物扫过的列远低于。
-    - 只看面板行带的**上部**（上 `upper_frac`）：动物极少长时间待在紧贴胶带
-      顶端处（实测：动物顶部行在面板带中下段），上部区域几乎只有胶带。
+    - 候选列只看**面板带顶缘起 `top_depth` 行**：胶带从面板带顶缘垂下，这段
+      必在胶带内、且动物悬挂在胶带底端之下、到不了这里。**锚定在带顶而不是
+      取全带的固定比例**——带深随素材变化，比例窗口会伸到胶带底端以下，把
+      走廊列的分数稀释到阈值之下（高个素材上实测踩到）。
     - 走廊行下界 = 走廊列的暗频率自上面下首次跌破阈值处（≈ 胶带底端/尾根）。
       取**首次**跌破而非"最低达标行"：再往下动物频繁出现会形成第二段高频区，
       不能当作胶带的延伸。
 
     判别依据（实测）：结构立柱暗占比 1.00、胶带 0.32–0.67（全带），两者宽度
-    都约 6–7 px，靠宽度分不开。本函数在上部区域找候选列段，若出现多段则依次
+    都约 6–7 px，靠宽度分不开。本函数在顶部区域找候选列段，若出现多段则依次
     用两条结构性规则消歧（不是猜测，失败即返回 None）：
 
     1. 贴 ROI 左/右边缘的段是立柱渗漏，优先丢弃（胶带悬在隔间内部）；
@@ -550,7 +564,8 @@ def calibrate_tape_corridor(
     freq = dark.mean(axis=0)
     bh = r1 - r0 + 1
 
-    u_depth = max(1, int(bh * upper_frac))
+    # 顶部窗口锚定在带顶（胶带从带顶垂下），不随带深按比例放大。
+    u_depth = max(1, min(top_depth, bh))
     col_score = freq[:u_depth, :].mean(axis=0)
     cand = np.flatnonzero(col_score >= dark_freq_thresh)
     if cand.size == 0:
@@ -582,17 +597,26 @@ def calibrate_tape_corridor(
         return None
 
     c0, c1 = runs[0]
-    prof = freq[:, c0 : c1 + 1].mean(axis=1)
-    drops = np.flatnonzero(prof < dark_freq_thresh)
-    row_end = r0 + int(drops[0]) - 1 if drops.size else r1
+    # 胶带底端 = 各走廊列"首次跌破"位置的中位数。不用平均剖面：胶带边缘的
+    # 抗锯齿列可能只在上段稳定、中段就开始闪动（实测 ch2 列 47 在行 95 就跌破，
+    # 而胶带真底端在 124），平均剖面会被这种离群列拉偏；逐列取中位数免疫。
+    col_drops: list[int] = []
+    for j in range(c0, c1 + 1):
+        d = np.flatnonzero(freq[:, j] < dark_freq_thresh)
+        col_drops.append(int(d[0]) if d.size else bh)
+    med = int(np.median(col_drops))
+    row_end = r0 + med - 1 if med < bh else r1
 
     # 扩展带收口：不得进入底部收集盒区。扩展用的"亮占比 >0.70"挡不住盒区——
     # 玻璃盒在部分隔间里大部分行仍是亮的（实测 ch3/4 延伸到 254，盒内不触边
     # 的碎屑会成为候选）。收口依据一条几何事实：**动物悬挂在胶带上，它的活动
     # 痕迹必须出现在胶带底端附近**；盒区的活动痕迹（粪粒随时间累积 → 中频暗）
-    # 离胶带底端远得多（实测：动物块顶离胶带底 31–36 行，盒区 ≥50 行）。
-    # 取起始于胶带底端 _HANG_REACH 行内的最大运动行块 = 动物，带底封到
-    # 块底 + _BOTTOM_MARGIN。找不到这样的块则不收口（保持扩展带，宁宽勿猜）。
+    # 离动物远得多（实测 ≥50 行，且与体长同比例缩放）。具体做法见下方"向下
+    # 生长"注释；带底封到 动物块底 + _SEAL_BL_K×BL（BL 归一化，见常量注释），
+    # **两侧都有约束**——再取盒区痕迹顶 − _BOX_MARGIN 为硬上界，防胶带更长、
+    # 挂得更低的个体把收口推进盒区。找不到悬挂块或估不出 BL ⇒ 不收口，但必须
+    # 显式标 sealed=False（下游打 band_unsealed）：不收口 = 回到刚被证明会伸进
+    # 盒区的状态，静默退化违反 §6.2 纪律。
     motion = ((freq >= _MOTION_FREQ_LO) & (freq < _MOTION_FREQ_HI)).sum(axis=1)
     motion_rows = np.flatnonzero(motion >= _MOTION_MIN_COLS)
     blocks: list[tuple[int, int]] = []
@@ -606,17 +630,80 @@ def calibrate_tape_corridor(
                 btop = bbot = int(i)
         blocks.append((btop, bbot))
     row_end_local = row_end - r0
-    hang_blocks = [b for b in blocks if b[0] <= row_end_local + _HANG_REACH]
-    if hang_blocks:
-        animal_block = max(hang_blocks, key=lambda b: b[1] - b[0])
-        r1 = min(r1, r0 + animal_block[1] + _BOTTOM_MARGIN)
+    sealed = False
+    # 识别悬挂运动块用"向下生长"而不是逐块判定：动物在某些行**所有**标定帧
+    # 都在时（静止重叠区），那些行暗频率 =1.0、被算作静物，运动块会被劈成
+    # 多段。从最高的悬挂块（块顶在胶带底端 _HANG_REACH 行内）出发往下生长：
+    # 与当前区域的间隙 ≤ BL 的块仍是动物（静止重叠区与尾巴亮区都 ≤ 体长），
+    # 间隙 > BL 处即盒区。盒区离动物的距离与体长同比例缩放（几何相似），
+    # 故 BL 相对判据跨分辨率成立。
+    seed = next(
+        (b for b in blocks if b[0] <= row_end_local + _HANG_REACH), None
+    )
+    if seed is not None:
+        conf = float(col_score[c0 : c1 + 1].mean())
+        provisional = TapeCorridor(
+            col_range=(c0, c1),
+            row_range=(r0, row_end),
+            confidence=conf,
+            band_range=(r0, r1),
+            sealed=False,
+        )
+        bl_est = _estimate_body_length(grays, provisional)
+        if bl_est > 0:
+            idx = blocks.index(seed)
+            animal_bottom = seed[1]
+            rest: list[tuple[int, int]] = []
+            for b in blocks[idx + 1 :]:
+                if b[0] - animal_bottom <= bl_est:
+                    animal_bottom = b[1]
+                else:
+                    rest.append(b)
+            seal = r0 + animal_bottom + int(round(_SEAL_BL_K * bl_est))
+            # 硬上界：盒区痕迹顶（首个未并下来的块）− _BOX_MARGIN。防胶带
+            # 更长、挂得更低的个体把 块底 + k·BL 推进盒区。
+            if rest:
+                box_top = r0 + rest[0][0]
+                seal = min(seal, box_top - _BOX_MARGIN)
+            r1 = min(r1, seal)
+            sealed = True
 
     return TapeCorridor(
         col_range=(c0, c1),
         row_range=(r0, row_end),
         confidence=float(col_score[c0 : c1 + 1].mean()),
         band_range=(r0, r1),
+        sealed=sealed,
     )
+
+
+def _estimate_body_length(
+    grays: list[np.ndarray], corridor: TapeCorridor
+) -> float:
+    """标定期体长：全部标定帧走一遍走廊路径，取掩膜 BL 的**中位数**。
+
+    只供收口余量归一化用（_SEAL_BL_K × BL）。中位数对个别帧失手免疫：
+    试次全程动物悬挂，绝大多数帧的掩膜是动物；即便个别帧挑到盒区碎屑也
+    移不动中位数。估不出（全失败）返回 0，调用方放弃收口并显式标记。
+    """
+    bls: list[float] = []
+    for g in grays:
+        res = _segment_with_corridor(
+            np.asarray(g, dtype=np.float64),
+            corridor,
+            thresh=None,
+            tape_width_frac=0.10,
+            min_area=20,
+            max_area_frac=0.35,
+            body_run_min_px=3,
+            climb_frac_thresh=0.10,
+        )
+        if res is None or not res.ok or res.mask is None:
+            continue
+        met = sil.metrics(res.mask, with_holes=False)
+        if met is not None and met.body_length > 0:
+            bls.append(met.body_length)
+    return float(np.median(bls)) if bls else 0.0
 
 
 def _find_animal_below(
@@ -673,6 +760,8 @@ def _segment_with_corridor(
     sub = g[r0 : r1 + 1, :] < thr
     cols = np.zeros(w, dtype=bool)
     cols[max(c0, 0) : min(c1, w - 1) + 1] = True
+    # 未收口是显式危险态（带底可能已进盒区）：每次分割都带标记，供上层 QC。
+    unsealed_flag = () if corridor.sealed else ("band_unsealed",)
 
     # 逐行"走廊外最长连续暗段"。抗锯齿是 1 px 孤立点，动物身体是连续段。
     runs = np.array(
@@ -704,7 +793,7 @@ def _segment_with_corridor(
                 if hits.size == 0
                 else "走廊区见疑似攀爬信号，但未找到合规动物组件"
             )
-            return SegResult(None, reason, flags=("animal_in_corridor",))
+            return SegResult(None, reason, flags=("animal_in_corridor",) + unsealed_flag)
 
     out = np.zeros_like(g, dtype=bool)
     out[r0 + t_local : r1 + 1, :] = pick.mask
@@ -721,4 +810,4 @@ def _segment_with_corridor(
     if pick.width <= max_tape_w:
         flags.append("narrow_as_tape")
 
-    return SegResult(out, "", tuple(flags))
+    return SegResult(out, "", tuple(flags) + unsealed_flag)
