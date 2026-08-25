@@ -63,15 +63,27 @@ def test_all_valid() -> None:
 
 
 def test_no_body_anywhere_needs_prior_to_decide() -> None:
-    """全试次尾级：相对判据不可决（边界），给绝对先验 ⇒ unknown 而非自洽 valid。"""
+    """全试次尾级：相对判据不可决（边界）；常开下界 prior ⇒ 整批判脱落。"""
     calib = {k: _profile(30) for k in (1, 2, 3, 4)}
     # 无先验：相对判据自洽地判 valid——这是已记录的不可决边界
     tv_rel = V.assess_trial_validity(calib)
     assert all(c.status == V.STATUS_VALID for c in tv_rel.chambers)
-    # 有先验：全局参考(≈30) < 100 ⇒ 全 unknown，疑似整批脱落
+    # 有先验：thr = max(0.5×median_others≈15, 100) = 100 > 30 ⇒ 整批脱落
     tv = V.assess_trial_validity(calib, body_area_prior=100.0)
-    assert all(c.status == V.STATUS_UNKNOWN for c in tv.chambers)
-    assert tv.exclude == () and tv.needs_repair == ()
+    assert all(c.status == V.STATUS_DETACHED for c in tv.chambers)
+    assert tv.exclude == (1, 2, 3, 4)
+
+
+def test_three_of_four_detached_stable_with_prior() -> None:
+    """评审用例：3/4 脱落时相对基准退化，常开下界使判据仍成立。"""
+    calib = {1: _profile(200), 2: _profile(5), 3: [None] * 8, 4: _profile(5)}
+    tv = V.assess_trial_validity(calib, body_area_prior=100.0)
+    by = {c.chamber: c for c in tv.chambers}
+    assert by[1].status == V.STATUS_VALID
+    assert by[2].status == V.STATUS_DETACHED
+    assert by[3].status == V.STATUS_DETACHED
+    assert by[4].status == V.STATUS_DETACHED
+    assert tv.exclude == (2, 3, 4)
 
 
 def test_none_and_tiny_entries_ignored() -> None:
