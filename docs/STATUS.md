@@ -270,3 +270,17 @@ Noise Thresh / Min Length 会把它滤掉。故门判 p90，max 仅作诊断量�
 - CLI：init（可用规则引擎输出做主动学习种子，标 suggested_by）/ edit（交互
   勾选）/ export（逐帧 + CSI 兼容 bout 统计）/ agree（逐原语逐帧 Cohen's κ，§6.3）。
 - 工具不需要任何人工数据即可构建；规则表为起点版本，P0 定稿后更新。
+
+### 评审跟进落地（2026-08-25，PR#6–#8 已合并）
+
+- **单位不变量**（PR#6）：README 顶部硬规矩——阈值必须物理单位 + 实测标度
+  归一化（空间 BL、时间秒/物理周期），禁像素/帧常数；传感器噪底单独台账
+  （噪声底是传感器属性，像素量合理；不变量约束判定阈值）。rules 全秒、
+  segment `_scaled(bl)`、TapeCorridor 携 bl_est；标度不变性测试入约定。
+- **盲法工具级硬约束**（PR#7）：`--from-events` 仅 `--pool train`；`agree`
+  任一预填即拒；κ 与原始一致率/出现率同报，稀有(<5%)附 PABAK。**main 已验**：
+  验证池预填 exit=1、训练池允许、含预填 agree exit=1。标注人力到位即可开工。
+- **validity 常开下界**（PR#8）：threshold = max(0.5×median_others, prior)，
+  任意脱落数量鲁棒。
+
+测试 100 全绿（main）。
