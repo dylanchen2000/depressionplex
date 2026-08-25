@@ -183,3 +183,34 @@ def Cohen_kappa(a: np.ndarray, b: np.ndarray) -> float:
     if pe >= 1.0 - 1e-12:
         return 1.0
     return float((po - pe) / (1 - pe))
+
+
+# 稀有原语阈值（评审定，2026-08-25）：出现率低于此的 κ 受基率悖论支配。
+RARE_PREVALENCE = 0.05
+
+
+def agreement_report(a: np.ndarray, b: np.ndarray) -> dict:
+    """逐原语一致性报告：κ **必须**与原始一致率、出现率同报。
+
+    基率悖论（评审护栏）：出现率 <5% 的原语（如「前爪抓尾」），两人 99%
+    一致 κ 仍可能近 0——不预防会得出"标注员不合格"的错误结论去返工没问题的
+    标注。稀有原语附 PABAK（= 2×po−1）。期望按原语分别设，**不用一个全局
+    κ 门槛卡所有原语**。
+    """
+    a = np.asarray(a, dtype=bool)
+    b = np.asarray(b, dtype=bool)
+    n = len(a)
+    po = float((a == b).mean()) if n else 0.0
+    prev = float((a | b).mean()) if n else 0.0
+    rep = {
+        "n_frames": n,
+        "prevalence": prev,
+        "raw_agreement": po,
+        "kappa": Cohen_kappa(a, b),
+        "rate_a": float(a.mean()) if n else 0.0,
+        "rate_b": float(b.mean()) if n else 0.0,
+        "rare": prev < RARE_PREVALENCE,
+    }
+    if rep["rare"]:
+        rep["pabak"] = 2.0 * po - 1.0
+    return rep
