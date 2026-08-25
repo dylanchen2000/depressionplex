@@ -71,3 +71,29 @@ def test_cohen_kappa() -> None:
     assert P.Cohen_kappa(a, ~a) < 0.0
     z = np.zeros(6, dtype=bool)
     assert P.Cohen_kappa(z, z) == 1.0  # 双方常假：约定 1.0
+
+
+def test_agreement_report_rare_primitive_gets_pabak() -> None:
+    """基率悖论防护：稀有原语 κ 难看但原始一致率极高 ⇒ 附 PABAK。"""
+    n = 1000
+    a = np.zeros(n, dtype=bool)
+    b = np.zeros(n, dtype=bool)
+    a[0:10] = True            # a 标了 10 帧
+    b[10:20] = True           # b 标了另 10 帧（无重叠）→ 原始一致率仍 98%
+    rep = P.agreement_report(a, b)
+    assert rep["rare"] is True
+    assert rep["prevalence"] < 0.05
+    assert rep["raw_agreement"] >= 0.98
+    assert "pabak" in rep and rep["pabak"] > 0.9   # PABAK 揭示真实一致水平
+    assert rep["kappa"] < 0.5                       # κ 被基率压低 → 不能单看 κ
+
+
+def test_agreement_report_common_primitive_no_pabak() -> None:
+    a = np.zeros(1000, dtype=bool)
+    b = np.zeros(1000, dtype=bool)
+    a[0:400] = True
+    b[0:400] = True
+    rep = P.agreement_report(a, b)
+    assert rep["rare"] is False
+    assert "pabak" not in rep
+    assert rep["kappa"] == 1.0

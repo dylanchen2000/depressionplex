@@ -49,6 +49,14 @@ def _prims_for(assay: str) -> list[str]:
 
 
 def cmd_init(args: argparse.Namespace) -> int:
+    # 盲法硬约束（评审 2026-08-25，工具级而非文档级）：预填机器输出会产生
+    # 锚定偏差，污染唯一验收基准（trial 级 r≥0.95 拿人工当真值）。预填只许
+    # 训练池；验证集必须盲标。
+    if args.from_events and args.pool != "train":
+        raise SystemExit(
+            "硬约束：--from-events 仅允许 --pool train。验证集必须盲标——"
+            "预填机器输出会锚定标注员、虚高 κ、污染验收真值。"
+        )
     doc = {
         "schema": SCHEMA,
         "trial": args.trial,
@@ -56,6 +64,8 @@ def cmd_init(args: argparse.Namespace) -> int:
         "annotator": args.annotator,
         "fps": args.fps,
         "n_frames": args.n_frames,
+        "pool": args.pool,
+        "prefill": bool(args.from_events),
         "bouts": [],
     }
     if args.from_events:
@@ -72,7 +82,8 @@ def cmd_init(args: argparse.Namespace) -> int:
                 }
             )
     _save(Path(args.out), doc)
-    print(f"已创建 {args.out}（{len(doc['bouts'])} 个建议 bout）")
+    print(f"已创建 {args.out}（pool={args.pool} prefill={bool(args.from_events)}，"
+          f"{len(doc['bouts'])} 个建议 bout）")
     return 0
 
 
@@ -160,16 +171,31 @@ def cmd_agree(args: argparse.Namespace) -> int:
     b = _load(Path(args.b))
     if a["n_frames"] != b["n_frames"]:
         raise SystemExit("两文件帧数不符")
+    # 盲法硬约束：κ 只在盲标 trial 上算。任一文件带机器预填 ⇒ 锚定偏差 ⇒
+    # κ 虚高（两人同意的是机器，不是行为无歧义）。文档拦不住赶进度的人，
+    # 所以这里是工具级硬约束。
+    if a.get("prefill") or b.get("prefill"):
+        raise SystemExit(
+            "硬约束：κ 只在全盲标注上计算——至少一份文件含机器预填"
+            "（--from-events）。请用盲标文件做一致性检验。"
+        )
     n = a["n_frames"]
     ba = [P.Bout(x["start"], x["end"], x["primitives"]) for x in a["bouts"]]
     bb = [P.Bout(x["start"], x["end"], x["primitives"]) for x in b["bouts"]]
-    print(f"逐原语逐帧 Cohen's κ（{a['annotator']} vs {b['annotator']}）:")
+    print(f"逐原语一致性（{a['annotator']} vs {b['annotator']}；"
+          "κ 与原始一致率/出现率同报，稀有附 PABAK，期望按原语分别设）:")
     for pid in _prims_for(a["assay"]):
         if P.PRIMITIVES[pid]["kind"] != "bool":
             continue
         ka = P.expand_to_frames(ba, n, pid)
         kb = P.expand_to_frames(bb, n, pid)
-        print(f"  {pid}: κ={P.Cohen_kappa(ka, kb):.3f}")
+        rep = P.agreement_report(ka, kb)
+        extra = f"  PABAK={rep['pabak']:.3f}（稀有原语，κ 受基率支配）" if rep["rare"] else ""
+        print(
+            f"  {pid}: κ={rep['kappa']:.3f}  原始一致率={rep['raw_agreement']:.3f}"
+            f"  出现率={rep['prevalence']:.1%}"
+            f"  (a={rep['rate_a']:.1%}, b={rep['rate_b']:.1%}){extra}"
+        )
     return 0
 
 
@@ -185,6 +211,12 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--n-frames", type=int, required=True)
     p.add_argument("--fps", type=float, default=25.0)
     p.add_argument("--from-events", default=None, help="规则引擎建议 bout 的 JSON")
+    p.add_argument(
+        "--pool",
+        choices=("train", "validate"),
+        default="validate",
+        help="标注池。硬约束：--from-events 仅 train；validate 必须盲标",
+    )
     p.set_defaults(fn=cmd_init)
 
     p = sub.add_parser("edit")
