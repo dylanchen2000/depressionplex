@@ -16,11 +16,13 @@ TST 金标准（Can et al. 2012）要求排除脱落/攀爬等动物——自动
 判据只依赖面积量级，逐帧分割细节变了也稳定；参考量取**其他**隔间的中位数，
 脱落隔间自身不参与定标。
 
-**相对判据的已知边界**：全试次所有隔间都只有尾级面积时（整批脱落），相对
-判据自洽地"认为"尾级就是身体级——不可决。此时用 `body_area_prior`
-（硬件规格级绝对先验，如按规格分辨率与预期 BL 推出的最小身体面积）兜底：
-全局参考低于先验 ⇒ 全部报 unknown。不给先验则该边界保持不可决（调用方
-自行承担），probe_frames 以 --body-area-prior 显式传入。
+**相对判据的已知边界与常开下界**（评审加固，2026-08-25）：全试次所有隔间
+都只有尾级面积时（整批脱落），相对判据自洽地"认为"尾级就是身体级——不可决；
+3/4 脱落时 median_others 也会退化。故 `body_area_prior`（硬件规格级绝对
+先验，如按规格分辨率与预期 BL 推出的最小身体面积）是**常开下界**而非兜底：
+threshold = max(0.5×median_others, prior)，任意脱落数量下成立。不给先验时
+整批尾级边界保持不可决（调用方自行承担），probe_frames 以
+--body-area-prior 显式传入。
 """
 
 from __future__ import annotations
@@ -103,40 +105,31 @@ def assess_trial_validity(
         else []
     )
 
-    # 绝对先验兜底：整批脱落时相对判据不可决（见模块 docstring）。
-    if body_area_prior is not None and (
-        not pos or float(np.median(pos)) < body_area_prior
-    ):
-        return TrialValidity(
-            tuple(
-                ChamberValidity(
-                    k, STATUS_UNKNOWN, maxes[k], 0.0, 0.0, False,
-                    "全局参考低于绝对先验：本批无身体级面积，整批疑似脱落，"
-                    "不得相对自洽地判 valid",
-                )
-                for k in sorted(calib_areas)
-            )
-        )
+    # 先验是**常开下界**（评审加固，2026-08-25）：threshold = max(0.5×median_others,
+    # prior)。相对基准在任意脱落数量下都可能退化（3/4 脱落时 median_others 可为
+    # 尾级/0），常开下界使判据对脱落数量鲁棒，不必枚举"几个脱落"的分支。
+    prior = body_area_prior or 0.0
 
     out: list[ChamberValidity] = []
     for k in sorted(calib_areas):
         others = [meds[j] for j in body_ids if j != k and meds[j] > 0]
-        if not others:
+        ref = float(np.median(others)) if others else 0.0
+        thr = max(body_frac * ref, prior)
+        if thr <= 0:
             if k in body_ids and meds[k] > 0:
-                # 唯一有身体的隔间：以自身为参考（其余皆尾级/空）。
+                # 唯一有身体的隔间且无先验：以自身为参考（相对项）。
                 ref = meds[k]
+                thr = body_frac * ref
                 out.append(ChamberValidity(
-                    k, STATUS_VALID, maxes[k], ref, body_frac * ref, True,
+                    k, STATUS_VALID, maxes[k], ref, thr, True,
                     "仅自身有身体级面积，参考取自身",
                 ))
                 continue
             out.append(ChamberValidity(
                 k, STATUS_UNKNOWN, maxes[k], 0.0, 0.0, False,
-                "无有身体的隔间可作参考，参考量不可估",
+                "无有身体的隔间可作参考且无先验，参考量不可估",
             ))
             continue
-        ref = float(np.median(others))
-        thr = body_frac * ref
         ever = maxes[k] >= thr
         if not ever:
             out.append(ChamberValidity(
