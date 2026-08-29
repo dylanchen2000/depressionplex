@@ -1,7 +1,10 @@
 # DepressionPlex STATUS
 
 > 快照，不是日志。永远只反映当前状态。历史在 git commit 与 Obsidian 里。
-> 最后更新：2026-08-24
+> 最后更新：2026-08-30
+>
+> 当前决策：**V2 独立轨道 HTML 是唯一正式标注工具；V1/V3 retired，不再采用。**
+> 规范见 [`ANNOTATION_CONTRACT_V2.md`](ANNOTATION_CONTRACT_V2.md)。
 
 ## 主线目标
 
@@ -38,7 +41,7 @@ DepressionScan，并在三处超越它（见 README）。
 **已定论（2026-08-24）**：判据错误而非实现错误——伸展度下界把"不是胶带"与"细长"
 混为一谈，且蜷曲（Curled-up）本就是规划文档 §3.4 的 TST 姿态之一。A1 已按 v1.1 修正
 （删伸展度下界，改为面积区间 + 伸展度上界 ≤8 + 身份正向证据：RAD 残差 > 2× 噪声底
-或静止时抖动达标）。修正后全数通过；PR #1 待合并。
+或静止时抖动达标）。修正后全数通过；PR #1 已合并。
 
 **合并前追加修复（盒区收口）**：扩展带（亮占比 >0.70 取并）会伸进底部收集盒区
 （实测 ch3/4 扩到 254；盒内不触边碎屑 44 px 在行 246–251，会成为假候选）。收口依据：
@@ -224,30 +227,34 @@ Noise Thresh / Min Length 会把它滤掉。故门判 p90，max 仅作诊断量�
 
 ## 正在进行
 
-无。等下一步指令。
+1. **P0 工程收口已完成**：V2 独立轨道是唯一 canonical 格式；版本、时间窗、视频身份、
+   逐鼠校验、盲标、enriched CSV、agreement 和 rubric 派生硬门均已固化到权威 HTML 与
+   Python 入口。`visibility != clear` 的派生结果统一为 `unknown`。
+2. **存量标注进入显式迁移阶段**：视频及原始标注 SHA-256 基线已写入
+   `PILOT_SOURCE_MANIFEST_2026-08-29.md`，逐文件质量与 quarantine 决策已写入
+   `PILOT_MIGRATION_AUDIT_2026-08-30.md`；原件保持只读。待由权威记录/标注员确认计分窗，
+   并裁决 1 组重复与 7 组重叠 interval 后，才能生成合规新文件。
+3. **P1 pilot 暂不扩量**：当前为 0/12 个契约合规双标 TST chamber-trial；另有 1 对
+   legacy 双标仅可诊断，且常见原语 κ 尚未达到 0.80。先对齐 `subtle/marked` 与整体摆动 SOP。
 
 ## 下一步（按优先级）
 
-1. ~~拿真实 TST 视频跑通 S1 阈值分割 + 实测硬门~~ **已完成，通过**（见上）。
-2. ~~把胶带走廊做成标定几何~~ **已完成**（分支 `feat/tape-corridor`，PR #1 待合并，
-   验收与跨视频泛化全过）。
-3. ~~取静止时段帧重测噪声门~~ **已完成**（见「结论四」：静止动物面积抖动 0.0035，
-   门槛 0.02，余量 6×；θ_mob 合成标定在真实数据上成立）。
-4. ~~`rules.py`：TST 事件判定~~ **已完成**（见上节；合成测试 + 真实数据 sanity 通过；
-   阈值待双人 ethogram 标定更新）。下一步是把它与 bouts 流水线串成 trial 级输出
-   （immobility 总时长 vs 人工 r ≥ 0.95 的验收靶）。
-5. `flow.py`：掩膜内稠密光流。**降优先级**：背光把动物压成近二值黑剪影（本批素材
-   对比度 208.5/6.77×，恰是纹理被压得最狠的），剪影内部几乎无纹理，大概率失效。
-   不先花时间去验一个大概率不成立的特征；真要验，留到有纹理素材或 FST 水下场景再说。
-6. 原语标注工具 + 原语表定稿（P0 未完成项，是最大人力瓶颈的前置）。双人评分人力是
-   道俊的资源决策，作为待拍板项提出。
+1. 取得下列人工开放项后，依据已冻结的 manifest 不覆盖原件地生成迁移草稿与逐文件执行记录；
+   `analysis_window`、mouse 与范式等语义字段必须人工/权威确认，不能猜。
+2. 做 1 例共同练习（不计数），先对齐 `none/subtle/marked`、`trunk_deforming` 与
+   `whole_body_swing` 边界。
+3. 完成两名独立标注员、至少 3 个视频、12 个唯一 chamber-trial 的盲标 pilot；常见原语
+   κ ≥ 0.80 后才扩量。
+4. 把现有 rules + bouts 串成 trial 级 `result.json/review.json`，人工真值到位前所有阈值
+   保持 provisional。
+5. `flow.py` 继续降优先级；只在有纹理素材或 FST 水下场景出现明确需要时再评估。
 
 ## 阻塞
 
 | 阻塞项 | 说明 |
 |---|---|
 | ~~沙箱无 Bridge~~ | **已解（2026-08-24）**：存在直接在 Mac 上跑的会话，可读 `Work/depression抑郁绝望` 与 `~/Work/heavy/depression`（全部 7+7 个存量视频）、直接跑 git。沙箱受限时的旧路径仍保留 |
-| ~~无法创建 GitHub 仓库~~ | **已解**：`dylanchen2000/depressionplex`（私有）已建，Mac 端可 push，PR #1 已开 |
+| ~~无法创建 GitHub 仓库~~ | **已解**：`dylanchen2000/depressionplex`（私有）已建，PR #1–#8 均已合并 |
 | 沙箱 site-packages 损坏 | `cv2`/`scipy`/`pytest` 均 I/O 错误且无法重装（pip 本身也坏）。核心模块因此**只依赖 numpy**（这本身是好事）。`PIL` 可用，所以**上传 PNG 帧图即可分析**；视频解码需在 Mac 做（ffmpeg 已装）。Mac 侧 `cv2`/`scipy` 可正常 import（光流等需要时再做） |
 | 分辨率偏低 | 476×268 / 4 隔间 ⇒ 每只动物 BL 仅 **17–29 px**，比 CSI 单笼位像素还少。对 immobility 够用（对比度救场），但限制肢体级细节。我方硬件规格仍应保持 ≥1280×720 |
 
@@ -256,7 +263,7 @@ Noise Thresh / Min Length 会把它滤掉。故门判 p90，max 仅作诊断量�
 - 测试跑法：`python3 run_tests.py`（自带 runner，不依赖 pytest）
 - 核心模块只依赖 numpy，刻意不引入 OpenCV——视频 I/O 层才需要
 
-### 原语标注工具 v1（2026-08-25，分支 `feat/primitive-annotator`）
+### 原语标注工具 v1（历史，2026-08-25，现已 retired）
 
 `assay_core/primitives.py` + `cli/annotate.py`：规划 §3.5 落地——标原子原语
 （多标签，非互斥类别），规则表导出学术 / CSI 兼容 / 我方 L1+L2 三套口径；
@@ -269,7 +276,7 @@ Noise Thresh / Min Length 会把它滤掉。故门判 p90，max 仅作诊断量�
   尾巴攀爬是**试次级**排除（逐帧两类别都不命中 = 排除区）。
 - CLI：init（可用规则引擎输出做主动学习种子，标 suggested_by）/ edit（交互
   勾选）/ export（逐帧 + CSI 兼容 bout 统计）/ agree（逐原语逐帧 Cohen's κ，§6.3）。
-- 工具不需要任何人工数据即可构建；规则表为起点版本，P0 定稿后更新。
+- 该实现是历史起点；2026-08-29 起不再产生正式标注，正式口径统一到 V2 独立轨道契约。
 
 ### 评审跟进落地（2026-08-25，PR#6–#8 已合并）
 
@@ -279,7 +286,8 @@ Noise Thresh / Min Length 会把它滤掉。故门判 p90，max 仅作诊断量�
   segment `_scaled(bl)`、TapeCorridor 携 bl_est；标度不变性测试入约定。
 - **盲法工具级硬约束**（PR#7）：`--from-events` 仅 `--pool train`；`agree`
   任一预填即拒；κ 与原始一致率/出现率同报，稀有(<5%)附 PABAK。**main 已验**：
-  验证池预填 exit=1、训练池允许、含预填 agree exit=1。标注人力到位即可开工。
+  验证池预填 exit=1、训练池允许、含预填 agree exit=1。该盲法原则继续保留，但正式数据
+  入口已转为 V2；需先通过 V2 契约硬门，不能直接按旧 CLI 扩量。
 - **validity 常开下界**（PR#8）：threshold = max(0.5×median_others, prior)，
   任意脱落数量鲁棒。
 

@@ -106,4 +106,23 @@ TST 金标准要求排除「因先前挣扎惯性产生的钟摆式摆动」。C
 
 ## 开发状态
 
-见 `docs/STATUS.md`。完整规划见工作区 `outputs/DepressionPlex_算法模型规划与研发路线图_v0.5.md`。
+见 `docs/STATUS.md`。标注层只采用 `docs/ANNOTATION_CONTRACT_V2.md` 中定义的
+V2 独立轨道契约；V1 共享 bout 与 V3 共享 segment 均已 retired。权威浏览器工具为
+`tools/annotation/DepressionPlex_annotation_tool_v2.html`。
+
+存量标注的只读身份与迁移结论分别见
+`docs/PILOT_SOURCE_MANIFEST_2026-08-29.md` 和
+`docs/PILOT_MIGRATION_AUDIT_2026-08-30.md`。
+
+V2 机器校验入口：
+
+```bash
+python3 -m depressionplex.cli.annotation_v2 validate annotation.json --video source.mp4
+python3 -m depressionplex.cli.annotation_v2 agree rater-a.json rater-b.json
+python3 -m depressionplex.cli.annotation_v2 export-csv annotation.json annotation.csv --mouse 1
+python3 -m depressionplex.cli.annotation_v2 migrate-csv legacy.csv candidate.json \
+  --metadata metadata.json --provenance provenance.json
+```
+
+完整规划的源文档保留在工作区根目录
+`DepressionPlex_算法模型规划与研发路线图_v0.5.docx`。
