@@ -23,15 +23,15 @@ from typing import Any, Iterable, Mapping
 
 SCHEMA = 2
 FORMAT = "depressionplex.annotation.v2"
-TOOL_VERSION = "2.1.0"
-PRIMITIVE_SET_VERSION = "depressionplex-primitives-v2.0.0"
-RUBRIC_VERSION = "depressionplex-rubrics-v2.0.0"
+TOOL_VERSION = "2.2.0"
+PRIMITIVE_SET_VERSION = "depressionplex-primitives-v2.1.0"
+RUBRIC_VERSION = "depressionplex-rubrics-v2.1.0"
 INTERVAL_SEMANTICS = "closed"
 ANALYSIS_WINDOW_SEMANTICS = "half_open"
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 TST_FORMAL_FPS = 25.0
-TST_FORMAL_WINDOW_FRAMES = 9000
+TST_MIN_FORMAL_WINDOW_FRAMES = 9000
 
 
 @dataclass(frozen=True)
@@ -95,7 +95,7 @@ TRACK_DEFS: dict[str, TrackDef] = {
         "前爪抓尾", "bool", ("false", "true"), "TST"
     ),
     "axis_orient": _track(
-        "身体轴朝向", "orient", ("down", "level", "up"), "TST"
+        "身体轴朝向", "orient", ("down", "level", "up", "unknown"), "TST"
     ),
     "visibility": _track(
         "可见性", "cat", ("clear", "occluded", "uncertain"), "TST,FST"
@@ -246,8 +246,10 @@ def validation_errors(
         if not _nonempty_string(doc.get(key)):
             errors.append(f"{key}: expected a non-empty string")
     role = doc.get("annotator_role")
-    if role != "independent_rater":
-        errors.append("annotator_role: expected 'independent_rater'")
+    if role not in ("independent_rater", "legacy_rater"):
+        errors.append(
+            "annotator_role: expected 'independent_rater' or 'legacy_rater'"
+        )
 
     assay = doc.get("assay")
     if assay not in ASSAY_PROFILES:
@@ -347,10 +349,10 @@ def validation_errors(
     ):
         if _is_number(fps) and float(fps) != TST_FORMAL_FPS:
             errors.append(f"fps: formal TST V2 requires {TST_FORMAL_FPS:g} fps")
-        if valid_window and window[1] - window[0] != TST_FORMAL_WINDOW_FRAMES:
+        if valid_window and window[1] - window[0] < TST_MIN_FORMAL_WINDOW_FRAMES:
             errors.append(
-                "analysis_window: formal TST V2 requires exactly "
-                f"{TST_FORMAL_WINDOW_FRAMES} frames (360 seconds at 25 fps)"
+                "analysis_window: formal TST V2 requires at least "
+                f"{TST_MIN_FORMAL_WINDOW_FRAMES} frames (360 seconds at 25 fps)"
             )
 
     pool = doc.get("pool")
@@ -365,6 +367,10 @@ def validation_errors(
             errors.append("prefill: validate annotations must not be prefilled")
         if doc.get("blind") is not True:
             errors.append("blind: validate annotations must be independently blind")
+        if role != "independent_rater":
+            errors.append("annotator_role: validate annotations require 'independent_rater'")
+    elif pool == "train" and role == "legacy_rater" and doc.get("blind") is True:
+        errors.append("blind: legacy_rater recovery must explicitly use false")
     if not isinstance(doc.get("completed"), bool):
         errors.append("completed: expected a boolean")
     elif require_completed and doc.get("completed") is not True:

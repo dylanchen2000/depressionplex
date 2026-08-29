@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <link rel="icon" href="data:,">
-  <title>DepressionPlex 原子原语标注工具 V2.1</title>
+  <title>DepressionPlex 原子原语标注工具 V2.2</title>
   <style>
     :root { --ink:#203040; --blue:#2474a6; --green:#198754; --red:#b02a37; --line:#d7dee5; --soft:#f6f8fa; }
     * { box-sizing:border-box; }
@@ -52,7 +52,7 @@
 </head>
 <body>
 <main class="container">
-  <h1>DepressionPlex 原子原语标注工具 <span class="badge">V2.1 · V2-only · 独立轨道</span></h1>
+  <h1>DepressionPlex 原子原语标注工具 <span class="badge">V2.2 · V2-only · 独立轨道</span></h1>
   <p class="subtitle">唯一权威格式：depressionplex.annotation.v2。区间 [start,end] 为闭区间；分析窗口 [start,end_exclusive) 为半开区间。</p>
 
   <section class="card">
@@ -117,7 +117,7 @@
           <button onclick="app.updateWindow()">应用半开窗口</button>
           <span id="awDuration" class="mono"></span>
         </div>
-        <div class="notice">新建/视频加载只会给出候选窗口，不会自动确认。正式 validate TST 必须由标注员显式确认恰好 9000 帧（25 fps 下 360 秒）。</div>
+        <div class="notice">新建/视频加载只会给出候选窗口，不会自动确认。正式 validate TST 必须由标注员显式确认不少于 9000 帧；可直接采用 9661/11470 等完整视频窗口。</div>
       </div>
 
       <div>
@@ -147,7 +147,7 @@
 
   <section id="agreeCard" class="card hidden">
     <h2>双人一致性（严格门禁、逐鼠、仅分析窗口）</h2>
-    <div class="notice">只接受两份 completed=true、pool=validate、blind=true、prefill=false 且 trial/video 身份一致的 V2.1 文件；标注员必须不同。</div>
+    <div class="notice">只接受两份 completed=true、pool=validate、blind=true、prefill=false 且 trial/video 身份一致的 V2.2 文件；标注员必须不同。</div>
     <div class="row"><div class="field"><label>文件 A</label><input id="agreeA" type="file" accept=".json"></div><div class="field"><label>文件 B</label><input id="agreeB" type="file" accept=".json"></div><button onclick="app.computeAgreement()">严格计算</button><button class="secondary" onclick="app.showAgreement(false)">关闭</button></div>
     <div id="agreeOutput"></div>
   </section>
@@ -158,12 +158,12 @@
 const app = {
   SCHEMA: 2,
   FORMAT: 'depressionplex.annotation.v2',
-  TOOL_VERSION: '2.1.0',
-  PRIMITIVE_SET_VERSION: 'depressionplex-primitives-v2.0.0',
-  RUBRIC_VERSION: 'depressionplex-rubrics-v2.0.0',
+  TOOL_VERSION: '2.2.0',
+  PRIMITIVE_SET_VERSION: 'depressionplex-primitives-v2.1.0',
+  RUBRIC_VERSION: 'depressionplex-rubrics-v2.1.0',
   INTERVAL_SEMANTICS: 'closed',
   WINDOW_SEMANTICS: 'half_open',
-  AUTOSAVE_KEY: 'depressionplex_annotation_v2_1_autosave',
+  AUTOSAVE_KEY: 'depressionplex_annotation_v2_2_autosave',
 
   TRACK_DEFS: {
     head_neck_motion:{label:'头颈部运动',type:'level',values:['none','subtle','marked'],assay:'TST,FST'},
@@ -178,7 +178,7 @@ const app = {
     waterline_state:{label:'水线状态',type:'cat',values:['nose_above','head_partial','head_submerged','body_submerged'],assay:'FST'},
     touch_wall:{label:'触壁/触悬挂杆',type:'bool',values:['false','true'],assay:'TST'},
     tail_grasp:{label:'前爪抓尾',type:'bool',values:['false','true'],assay:'TST'},
-    axis_orient:{label:'身体轴朝向',type:'orient',values:['down','level','up'],assay:'TST'},
+    axis_orient:{label:'身体轴朝向',type:'orient',values:['down','level','up','unknown'],assay:'TST'},
     visibility:{label:'可见性',type:'cat',values:['clear','occluded','uncertain'],assay:'TST,FST'}
   },
   ASSAY_PROFILES: {
@@ -262,7 +262,7 @@ const app = {
     };
     this.currentMouse=mice[0]; this.currentTrack=this.tracksFor(assay)[0]; this.selectedIndex=-1;
     this.showCreate(false); this.loadDocIntoUI(); this.autosave();
-    this.showStatus('已创建 canonical V2.1 文档。绑定并校验视频后方可导出。');
+    this.showStatus('已创建 canonical V2.2 文档。绑定并校验视频后方可导出。');
     return true;
   },
 
@@ -274,9 +274,53 @@ const app = {
 
   canonicalFieldsPresent(doc) {
     return typeof doc.trial==='string'&&typeof doc.assignment_id==='string'&&typeof doc.annotator==='string'&&
-      doc.annotator_role==='independent_rater'&&typeof doc.blind==='boolean'&&typeof doc.completed==='boolean'&&
+      ['independent_rater','legacy_rater'].includes(doc.annotator_role)&&typeof doc.blind==='boolean'&&typeof doc.completed==='boolean'&&
       typeof doc.metadata_repaired==='boolean'&&typeof doc.created_at==='string'&&typeof doc.updated_at==='string'&&
       typeof doc.analysis_window_confirmed==='boolean'&&Array.isArray(doc.active_mice)&&Array.isArray(doc.analysis_window)&&doc.tracks&&typeof doc.tracks==='object';
+  },
+
+  canonicalizeMigratedTracks(tracks,assay,activeMice,nFrames,repairedFields) {
+    const repairLog=[];
+    const mergeGroup=(track,mouse,items)=>{
+      const sorted=items.map(iv=>({...iv})).sort((a,b)=>a.start-b.start||a.end-b.end);
+      const merged=[];
+      sorted.forEach(iv=>{
+        const previous=merged[merged.length-1];
+        if(previous&&Number.isInteger(previous.start)&&Number.isInteger(previous.end)&&Number.isInteger(iv.start)&&Number.isInteger(iv.end)&&iv.start<=previous.end) {
+          if(iv.value!==previous.value) throw new Error('迁移硬拒：'+track+' mouse '+mouse+' 存在异值重叠 ['+previous.start+','+previous.end+']='+previous.value+' 与 ['+iv.start+','+iv.end+']='+iv.value+'。');
+          const oldEnd=previous.end; previous.end=Math.max(previous.end,iv.end);
+          repairLog.push({action:'merge_same_value_overlap_or_duplicate',track,mouse,left_end:oldEnd,merged_end:previous.end,value:iv.value});
+        } else if(previous&&Number.isInteger(previous.end)&&Number.isInteger(iv.start)&&iv.start===previous.end+1&&iv.value===previous.value) {
+          const oldEnd=previous.end; previous.end=iv.end;
+          repairLog.push({action:'merge_same_value_adjacent',track,mouse,left_end:oldEnd,merged_end:previous.end,value:iv.value});
+        } else merged.push(iv);
+      });
+      return merged;
+    };
+    this.tracksFor(assay).forEach(track=>{
+      const groups=new Map();
+      (tracks[track]||[]).forEach(iv=>{ const key=iv.mouse; if(!groups.has(key)) groups.set(key,[]); groups.get(key).push(iv); });
+      const normalized=[];
+      groups.forEach((items,mouse)=>normalized.push(...mergeGroup(track,mouse,items)));
+      tracks[track]=normalized.sort((a,b)=>a.mouse-b.mouse||a.start-b.start||a.end-b.end);
+    });
+    if(assay==='TST'&&Number.isInteger(nFrames)&&nFrames>0) {
+      const track='axis_orient',rebuilt=[];
+      activeMice.forEach(mouse=>{
+        const items=(tracks[track]||[]).filter(iv=>iv.mouse===mouse).sort((a,b)=>a.start-b.start||a.end-b.end);
+        let cursor=0; const withUnknown=[];
+        items.forEach(iv=>{
+          if(Number.isInteger(iv.start)&&iv.start>cursor) { withUnknown.push({start:cursor,end:iv.start-1,value:'unknown',mouse}); repairLog.push({action:'fill_axis_unknown_gap',track,mouse,start:cursor,end:iv.start-1}); }
+          withUnknown.push(iv); if(Number.isInteger(iv.end)) cursor=Math.max(cursor,iv.end+1);
+        });
+        if(cursor<nFrames) { withUnknown.push({start:cursor,end:nFrames-1,value:'unknown',mouse}); repairLog.push({action:'fill_axis_unknown_gap',track,mouse,start:cursor,end:nFrames-1}); }
+        rebuilt.push(...mergeGroup(track,mouse,withUnknown));
+      });
+      rebuilt.push(...(tracks[track]||[]).filter(iv=>!activeMice.includes(iv.mouse)));
+      tracks[track]=rebuilt.sort((a,b)=>a.mouse-b.mouse||a.start-b.start||a.end-b.end);
+    }
+    if(repairLog.length) repairedFields.push('tracks');
+    return repairLog;
   },
 
   migrateLegacyV2(source,sourceName,sourceSha256) {
@@ -286,13 +330,13 @@ const app = {
     if(!source.tracks||typeof source.tracks!=='object') throw new Error('旧文件不是 V2 独立轨道结构，拒绝迁移。');
     const assignment=(source.assignment_id||prompt('旧 V2 文件缺少 assignment_id，请输入迁移后的 assignment_id：','')).trim();
     if(!assignment) throw new Error('迁移必须提供非空 assignment_id。');
-    let blind=source.blind;
-    if(typeof blind!=='boolean') blind=confirm('能否确认该文件由独立标注员盲标（未看规则/模型结果）？\n“确定”记录 blind=true；“取消”记录 blind=false。');
     const repairedBy=(prompt('请输入执行本次迁移/元数据修复的人员 ID（repaired_by）：',source.annotator||'')||'').trim();
     if(!repairedBy) throw new Error('迁移必须记录非空 repaired_by。');
     const stamp=this.now();
     const assay=source.assay;
     if(!this.ASSAY_PROFILES[assay]) throw new Error('未知 assay: '+assay);
+    const extraTracks=Object.keys(source.tracks).filter(track=>!this.tracksFor(assay).includes(track));
+    if(extraTracks.length) throw new Error('legacy 源文件含有不属于 '+assay+' 的轨道，为避免静默丢数据已拒绝迁移：'+extraTracks.join(', '));
     const repairedFields=['format','tool_version','primitive_set_version','rubric_version','interval_semantics','analysis_window_semantics','analysis_window_confirmed','annotator_role','completed','metadata_repaired','provenance'];
     let active;
     if(Array.isArray(source.active_mice)&&source.active_mice.length) active=source.active_mice.map(Number);
@@ -315,6 +359,7 @@ const app = {
     this.tracksFor(assay).forEach(t=>{
       tracks[t]=(source.tracks[t]||[]).map(iv=>({start:Number(iv.start),end:Number(iv.end),value:String(iv.value),mouse:iv.mouse==null&&active.length===1?active[0]:Number(iv.mouse)}));
     });
+    const intervalRepairs=this.canonicalizeMigratedTracks(tracks,assay,[...new Set(active)].sort((a,b)=>a-b),n,repairedFields);
     let migratedVideo=null;
     if(source.video&&typeof source.video==='object') {
       const candidate={basename:source.video.basename||source.video.name,size_bytes:Number(source.video.size_bytes),duration_sec:Number(source.video.duration_sec??source.video.duration_seconds),sha256:source.video.sha256};
@@ -326,10 +371,10 @@ const app = {
       primitive_set_version:this.PRIMITIVE_SET_VERSION,rubric_version:this.RUBRIC_VERSION,
       interval_semantics:this.INTERVAL_SEMANTICS,analysis_window_semantics:this.WINDOW_SEMANTICS,analysis_window_confirmed:false,
       trial:String(source.trial||'').trim(),assignment_id:assignment,assay,
-      annotator:String(source.annotator||'').trim(),annotator_role:'independent_rater',
-      blind,pool:source.pool||'validate',prefill:Boolean(source.prefill),completed:false,completed_at:null,
+      annotator:String(source.annotator||'').trim(),annotator_role:'legacy_rater',
+      blind:false,pool:'train',prefill:Boolean(source.prefill),completed:false,completed_at:null,
       created_at:source.created_at||stamp,updated_at:stamp,metadata_repaired:true,
-      provenance:{source_format:source.format||'legacy-unversioned-schema2',source_paths:[sourceName],source_sha256:[sourceSha256],repaired_fields:repairedFields,repair_reason:'Explicit V2.1 migration; semantic fields require human re-confirmation.',repaired_by:repairedBy,repaired_at:stamp,migration_tool_version:this.TOOL_VERSION,migrated_from:'legacy-schema2',original_versions:{format:source.format||null,tool_version:source.tool_version||null,primitive_set_version:source.primitive_set_version||null,rubric_version:source.rubric_version||null}},
+      provenance:{source_format:source.format||'legacy-schema2',source_paths:[sourceName],source_sha256:[sourceSha256],repaired_fields:[...new Set(repairedFields)],repair_reason:'Explicit V2.2 zero-rework migration into train-only legacy_rater data; semantic fields remain non-blind and unconfirmed.',repaired_by:repairedBy,repaired_at:stamp,migration_tool_version:this.TOOL_VERSION,migrated_from:'legacy-schema2',interval_repairs:intervalRepairs,original_versions:{format:source.format||null,tool_version:source.tool_version||null,primitive_set_version:source.primitive_set_version||null,rubric_version:source.rubric_version||null}},
       fps:Number(source.fps)||0,n_frames:n,analysis_window:aw,active_mice:[...new Set(active)].sort((a,b)=>a-b),
       video:migratedVideo,tracks
     };
@@ -338,19 +383,21 @@ const app = {
   async loadFile(event) {
     const file=event.target.files[0]; event.target.value=''; if(!file) return;
     try {
-      const sourceText=await file.text();
+      const [sourceText,sourceSha256]=await Promise.all([file.text(),this.sha256File(file)]);
       const source=JSON.parse(sourceText);
       if(source.schema!==2) throw new Error('仅支持 schema=2；schema1/schema3 已正式退役并拒绝加载。');
       let doc=source,migrated=false;
       if(!this.isCanonicalIdentity(source)||!this.canonicalFieldsPresent(source)) {
-        if(!confirm('这是旧的/不完整的 schema2 文件。是否显式迁移为 V2.1？\n迁移会写入 provenance、metadata_repaired=true，并强制 completed=false；不会覆盖源文件。')) throw new Error('用户取消 V2.1 显式迁移。');
-        doc=this.migrateLegacyV2(source,file.name,await this.sha256Text(sourceText)); migrated=true;
+        if(!confirm('这是旧的/不完整的 schema2 文件。是否显式迁移为 V2.2 train-only legacy_rater 数据？\n迁移会写入 provenance、blind=false、metadata_repaired=true、completed=false；不会覆盖源文件。')) throw new Error('用户取消 V2.2 显式迁移。');
+        doc=this.migrateLegacyV2(source,file.name,sourceSha256); migrated=true;
       }
       const errors=this.validateDoc(doc,{requireVideo:this.isCanonicalIdentity(source)});
       if(errors.length&&!migrated) throw new Error(errors.join('\n'));
       this.doc=doc; this.currentMouse=doc.active_mice[0]; this.currentTrack=this.tracksFor(doc.assay)[0]; this.selectedIndex=-1;
       this.loadDocIntoUI(); this.autosave();
-      this.showStatus(doc.metadata_repaired?'已显式迁移为 V2.1 隔离草稿。必须绑定视频并人工修复 '+errors.length+' 项硬错误后才能保存/标记完成。':'已加载 canonical V2.1 文件：'+file.name);
+      if(migrated) this.showStatus('已显式迁移为 V2.2 train-only legacy_rater 草稿；同值区间已无损合并、TST axis 空洞已填 unknown。仍需绑定视频并处理 '+errors.length+' 项硬错误。');
+      else if(doc.metadata_repaired) this.showStatus('已加载 canonical V2.2 legacy recovery 文件：'+file.name+'；'+(this.videoSessionVerified()?'本会话源视频身份已核对。':'输出前请在本会话绑定匹配的源视频。'));
+      else this.showStatus('已加载 canonical V2.2 文件：'+file.name);
     } catch(error) { this.fail('加载失败：'+error.message); }
   },
 
@@ -389,8 +436,8 @@ const app = {
 
   saveFile() {
     if(!this.prepareOutput()) return;
-    this.download(JSON.stringify(this.doc,null,2),'application/json',this.safeName(this.doc.trial+'_'+this.doc.annotator+'_v2.1.json'));
-    this.autosave(); this.showStatus('已保存 canonical V2.1 JSON。');
+    this.download(JSON.stringify(this.doc,null,2),'application/json',this.safeName(this.doc.trial+'_'+this.doc.annotator+'_v2.2.json'));
+    this.autosave(); this.showStatus('已保存 canonical V2.2 JSON。');
   },
 
   autosave() {
@@ -406,21 +453,15 @@ const app = {
       const raw=localStorage.getItem(this.AUTOSAVE_KEY); if(!raw) return;
       const doc=JSON.parse(raw);
       if(!this.isCanonicalIdentity(doc)||!this.canonicalFieldsPresent(doc)) { localStorage.removeItem(this.AUTOSAVE_KEY); return; }
-      if(!confirm('检测到 V2.1 自动保存，是否恢复？')) return;
+      if(!confirm('检测到 V2.2 自动保存，是否恢复？')) return;
       this.doc=doc; this.currentMouse=doc.active_mice[0]; this.currentTrack=this.tracksFor(doc.assay)[0]; this.selectedIndex=-1; this.loadDocIntoUI();
-      this.showStatus('已恢复 V2.1 自动保存。');
+      this.showStatus('已恢复 V2.2 自动保存。');
     } catch(error) { console.warn('restore autosave failed',error); }
   },
 
   async sha256File(file) {
     if(!window.crypto||!window.crypto.subtle) throw new Error('当前页面环境不支持 WebCrypto SHA-256；请使用现代浏览器通过 HTTPS 或 localhost 打开。');
     const digest=await crypto.subtle.digest('SHA-256',await file.arrayBuffer());
-    return [...new Uint8Array(digest)].map(b=>b.toString(16).padStart(2,'0')).join('');
-  },
-
-  async sha256Text(text) {
-    if(!window.crypto||!window.crypto.subtle) throw new Error('迁移审计需要 WebCrypto SHA-256。');
-    const digest=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(text));
     return [...new Uint8Array(digest)].map(b=>b.toString(16).padStart(2,'0')).join('');
   },
 
@@ -461,6 +502,9 @@ const app = {
           this.doc.provenance.repaired_fields=[...new Set([...(this.doc.provenance.repaired_fields||[]),'video','n_frames'])];
           this.doc.provenance.repaired_at=this.now();
           this.doc.provenance.frame_count_repair={old_n_frames:oldN,new_n_frames:entered,browser_rough_estimate:roughFrames,authority:'operator-confirmed ffprobe/decoder',repaired_at:this.doc.provenance.repaired_at};
+          const laterRepairs=this.canonicalizeMigratedTracks(this.doc.tracks,this.doc.assay,this.doc.active_mice,this.doc.n_frames,this.doc.provenance.repaired_fields);
+          this.doc.provenance.repaired_fields=[...new Set(this.doc.provenance.repaired_fields)];
+          this.doc.provenance.interval_repairs=[...(this.doc.provenance.interval_repairs||[]),...laterRepairs];
         }
         this.doc.video=this.clone(metadata);
         if(!Array.isArray(this.doc.analysis_window)||this.doc.analysis_window[1]===0||this.doc.analysis_window[1]>this.doc.n_frames) this.doc.analysis_window=[0,this.doc.n_frames];
@@ -505,11 +549,14 @@ const app = {
     if(doc.analysis_window_semantics!==this.WINDOW_SEMANTICS) add('analysis_window_semantics 必须为 half_open。');
     if(typeof doc.analysis_window_confirmed!=='boolean') add('analysis_window_confirmed 必须是显式 boolean。');
     ['trial','assignment_id','annotator'].forEach(k=>{ if(typeof doc[k]!=='string'||!doc[k].trim()) add(k+' 必须为非空字符串。'); });
-    if(doc.annotator_role!=='independent_rater') add('annotator_role 必须为 independent_rater。');
+    if(!['independent_rater','legacy_rater'].includes(doc.annotator_role)) add('annotator_role 只能是 independent_rater 或 legacy_rater。');
     if(!this.ASSAY_PROFILES[doc.assay]) add('assay 只能是 TST 或 FST。');
     if(!['validate','train'].includes(doc.pool)) add('pool 只能是 validate 或 train。');
     ['blind','prefill','completed','metadata_repaired'].forEach(k=>{ if(typeof doc[k]!=='boolean') add(k+' 必须是显式 boolean。'); });
     if(doc.pool==='validate'&&(doc.blind!==true||doc.prefill!==false)) add('validate 池必须 blind=true 且 prefill=false。');
+    if(doc.pool==='validate'&&doc.annotator_role!=='independent_rater') add('validate 池只允许 annotator_role=independent_rater。');
+    if(doc.annotator_role==='legacy_rater'&&doc.pool!=='train') add('legacy_rater 仅允许进入 train 池。');
+    if(doc.annotator_role==='legacy_rater'&&doc.blind!==false) add('legacy_rater 必须显式 blind=false。');
     ['created_at','updated_at'].forEach(k=>{ if(!this.timestampWithZone(doc[k])) add(k+' 必须是带时区的 ISO8601 时间。'); });
     if(doc.completed===true&&!this.timestampWithZone(doc.completed_at)) add('completed=true 时 completed_at 必须是带时区的 ISO8601 时间。');
     if(doc.completed===true&&doc.analysis_window_confirmed!==true) add('completed=true 时 analysis_window_confirmed 必须为 true。');
@@ -587,7 +634,7 @@ const app = {
     }
     if((formal||doc.completed===true)&&doc.pool==='validate'&&doc.assay==='TST'&&Array.isArray(doc.analysis_window)&&doc.analysis_window.length===2) {
       if(doc.fps!==25) add('正式 validate TST 必须 fps=25。');
-      if(doc.analysis_window[1]-doc.analysis_window[0]!==9000) add('正式 validate TST 分析窗必须恰为 9000 帧（360 秒）。');
+      if(doc.analysis_window[1]-doc.analysis_window[0]<9000) add('正式 validate TST 分析窗不得少于 9000 帧；允许采用完整视频窗口。');
     }
     return [...new Set(errors)];
   },
@@ -814,7 +861,7 @@ const app = {
       });
     });
     const csv='\ufeff'+rows.map(row=>row.map(v=>this.csvEscape(v)).join(',')).join('\r\n');
-    this.download(csv,'text/csv;charset=utf-8',this.safeName(d.trial+'_'+d.annotator+'_mouse'+mouse+'_v2.1_enriched.csv'));
+    this.download(csv,'text/csv;charset=utf-8',this.safeName(d.trial+'_'+d.annotator+'_mouse'+mouse+'_v2.2_enriched.csv'));
     this.showStatus('已导出 mouse '+mouse+' 的 lossless enriched V2 CSV；没有回退到其他 mouse。');
   },
 
@@ -925,7 +972,7 @@ const app = {
 
   async computeAgreement() {
     const fileA=document.getElementById('agreeA').files[0],fileB=document.getElementById('agreeB').files[0];
-    if(!fileA||!fileB) return this.fail('请选择两份 canonical V2.1 JSON。');
+    if(!fileA||!fileB) return this.fail('请选择两份 canonical V2.2 JSON。');
     try {
       const [a,b]=await Promise.all([fileA.text().then(JSON.parse),fileB.text().then(JSON.parse)]);
       const errors=this.strictAgreementErrors(a,b); if(errors.length) throw new Error(errors.join('\n'));

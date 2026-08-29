@@ -1,72 +1,85 @@
-# Pilot 标注迁移数据质量审计（2026-08-30）
+# Pilot 标注 V2.2 恢复审计（2026-08-30）
 
-> 审计对象：`/Users/dylanchen2000/Work/heavy/depression/悬尾` 中 1 个 CSV 与 4 个 JSON
-> 权威规则：[`ANNOTATION_CONTRACT_V2.md`](ANNOTATION_CONTRACT_V2.md) 与当前
-> `depressionplex.annotations` validator / legacy CSV parser
-> 身份基线：[`PILOT_SOURCE_MANIFEST_2026-08-29.md`](PILOT_SOURCE_MANIFEST_2026-08-29.md)
-> 操作边界：只读检查；没有修改、移动、改名或重新保存任何源标注/视频。
+> 源目录：`/Users/dylanchen2000/Work/heavy/depression/悬尾`
+> 恢复契约：[`ANNOTATION_CONTRACT_V2.md`](ANNOTATION_CONTRACT_V2.md)
+> 零返工政策：[`LEGACY_RECOVERY_POLICY_V2_2.md`](LEGACY_RECOVERY_POLICY_V2_2.md)
+> SHA 基线：[`PILOT_SOURCE_MANIFEST_2026-08-29.md`](PILOT_SOURCE_MANIFEST_2026-08-29.md)
+> 操作边界：源标注和视频只读；recovery 只写入独立目录
+> `/Users/dylanchen2000/Work/heavy/depression/recovered_annotations_v2.2/tst`，不覆盖、移动或重命名原件。
 
 ## 1. 结论
 
-**当前可进入正式 pilot 的 canonical V2 文件为 0/5；正式双标 chamber-trial 为 0/12。**
+**本批 3/3 份 TST 源已按 V2.2 全长恢复，不需要同事裁剪、补机器字段或重新标注。**
 
-- 5/5 源标注文件的重新计算 SHA-256 与现有 manifest 完全一致，原始身份基线可信。
-- 共检查 885 个 interval。允许值错误 0、帧边界错误 0、JSON interval 缺 mouse 0、同值相邻
+- TST 输入明确为 1 CSV + 2 JSON；另 2 JSON 文件内容自报 FST，只是错放目录，已从 TST
+  恢复清单隔离。
+- 5/5 源标注 SHA-256 与 manifest 一致；源文件没有发生变化。
+- 共审计 885 个原始 interval。非法枚举 0、帧越界 0、JSON interval 缺 mouse 0、相邻同值
   未合并 0。
-- 4/4 JSON 都是未版本化的 legacy schema 2：`analysis_window=[0,0]`，且每份都缺少
-  15 个 canonical 必需字段，包括 video SHA-256、窗口确认和完成状态。
-- 发现 1 组完全重复与 7 组同轨重叠，导致两个文件的时间状态不唯一。
-- 旧 7 列 CSV 有 138 个数据行、9 个 TST 轨道；行级枚举、索引、闭区间时长与候选 25 fps
-  换算均一致，但它没有 trial/assay/video/mouse/window 等身份元数据。严格 importer 按设计拒绝。
-- 两份自报 `assay=FST` 的局部文件继续从 TST pilot 隔离。两份自报 TST 的 JSON 只能视为
-  **候选双标对**；其 `trial` 字符串不相等且没有 video hash，不能运行正式 agreement。
+- 三份 TST 已用实际视频 identity 和全长窗口落盘，并全部通过
+  `validate RECOVERED.json --video SOURCE.mp4`：
+  - CSV：138 → 138 intervals，无 union、无 axis fill；窗口 `[0,9661)`；
+  - 张咸明 JSON：350 → 352 intervals，新增 2 段 `axis_orient=unknown`，共 211 帧；窗口
+    `[0,11470)`；
+  - 徐乐彤 JSON：271 → 269 intervals，自动 union 1 个完全重复和 1 个同值重叠；窗口
+    `[0,11470)`。
+- 恢复结果固定为 `pool=train / annotator_role=legacy_rater / blind=false / completed=true`，
+  可训练、调试和诊断，但不计入正式盲标 pilot。正式 pilot 仍独立为 0/12。
 
-最小安全动作是：保持源文件不动；先取得权威 assignment/video/window 记录，再生成
-`metadata_repaired=true`、`analysis_window_confirmed=false`、`completed=false` 的新迁移草稿；
-所有重复/重叠必须由标注员裁决，不能自动取第一条。
+V2.2 的关键变化是：旧文件缺失的是机器审计字段，不是行为标注本身。恢复器负责生成稳定 ID、
+计算视频 SHA、保留全长、做不改变逐帧语义的 normalization；未知盲法不伪造，正式 gold truth
+仍由未来的新盲标 pilot 提供。
 
-## 2. 数据集与预期 grain
+## 2. 数据集、grain 与身份
 
 ### 2.1 预期 grain
 
-canonical interval 的预期 grain 为：
+canonical interval 的预期 grain 是：
 
 ```text
 (video.sha256, trial, mouse, annotator, track, interval)
 ```
 
-其中 `interval` 是闭区间 `[start,end]`；正式计算窗口是独立的半开区间
-`[analysis_start,analysis_end_exclusive)`。文件级 candidate key 至少需要
-`video.sha256 + trial + mouse + annotator`，同一 track/mouse 内不得存在重复或重叠 interval。
+`interval` 为闭区间 `[start,end]`，`analysis_window` 为半开区间
+`[start,end_exclusive)`。V2.2 恢复后：
 
-当前五份文件都无法建立完整 grain：四份 JSON 没有 `video`，CSV 还同时缺 trial、assay、
-annotator、mouse 和 window。文件名只用于定位原件，**不作为正式身份字段**。
+- `video` 由工具读取实际文件并计算 basename/size/duration/SHA-256；
+- `trial` 是内部稳定试次 ID，不是客户显示名称；
+- `mouse` 是画面隔间号，不是动物档案；
+- `assignment_id` 是我们生成的恢复任务审计 ID。
 
-### 2.2 文件与 SHA-256
+这些字段不要求客户补填，机器生成值会在 provenance 中明确标记。
 
-| 文件 | SHA-256 | manifest 复核 |
-|---|---|---|
-| `10mg 2周_张咸明 (1).json` | `44392d582ba98ac82163f97b4eb98a2a890766201fb5af9465754290eaf65a7b` | 一致 |
-| `10mg 2周_徐乐彤.json` | `b59528c9f31f6d3ec50b337ca09881e15c783a9b966ce5420377ef903c5636b2` | 一致 |
-| `20mg 1周_张咸明 (3).json` | `4289556ee52602f42a9f1756e7680fdfc99c94e5502f9bda8ab3258ee8da5041` | 一致 |
-| `20mg 一周_徐乐彤.json` | `2da08b46a090480b7022c376bd4ed80156bce9fc94c9cc71b21d95f2299eeace` | 一致 |
-| `10mg 2周_陈璇_mouse1.csv` | `86edaf857869f91b826a5f634a62b7a596922be89e83092f9ae728afcbafdc93` | 一致 |
+### 2.2 本批确定的 TST 恢复身份
 
-## 3. 每文件概况
+| 源 | stable trial | mouse | 绑定视频 | 视频 SHA-256 |
+|---|---|---:|---|---|
+| `10mg 2周_陈璇_mouse1.csv` | `tst-8a9770847d48-m1` | 1 | `10mg 2周.mp4` | `8a9770847d48493103fa234f13aa0790670f35150cadb8f1ed4364f6f1c3ba3b` |
+| `20mg 1周_张咸明 (3).json` | `tst-11b2361a85c2-m1` | 1 | `20mg 1周 1-3+20 2周1.mp4` | `11b2361a85c27cc5e1a023b7396b1438032524d51623aa24d47f9b77ac80fd55` |
+| `20mg 一周_徐乐彤.json` | `tst-11b2361a85c2-m1` | 1 | 同上 | 同上 |
 
-`confirmed` 和 `completed` 的“缺失”不同于 `false`：legacy 文件没有留下可审计声明。
+最后两份的 legacy `trial` 分别写“1周/一周”；恢复后不沿用字形差异，而使用同一 stable ID，
+从而建立同一 video/chamber 的诊断双标关系。
 
-| 文件 | schema | assay（文件自报） | fps | n_frames | analysis_window | confirmed | completed | tracks | intervals | 当前 validator/parser 结论 |
-|---|---:|---|---:|---:|---|---|---|---:|---:|---|
-| `10mg 2周_张咸明 (1).json` | 2 | FST | 25 | 9,562 | `[0,0]` | 缺失 | 缺失 | 10/10 | 51 | 33 个 validator errors；非正式 |
-| `10mg 2周_徐乐彤.json` | 2 | FST | 25 | 9,562 | `[0,0]` | 缺失 | 缺失 | 10/10 | 75 | 39 个 errors，含 6 个重叠；隔离 |
-| `20mg 1周_张咸明 (3).json` | 2 | TST | 25 | 11,470 | `[0,0]` | 缺失 | 缺失 | 9/9 | 350 | 33 个 validator errors；候选迁移 |
-| `20mg 一周_徐乐彤.json` | 2 | TST | 25 | 11,470 | `[0,0]` | 缺失 | 缺失 | 9/9 | 271 | 35 个 errors，含 1 重复 + 1 重叠；隔离待裁决 |
-| `10mg 2周_陈璇_mouse1.csv` | — | 缺失 | 缺失 | 缺失 | 缺失 | 缺失 | 缺失 | 9 | 138 | strict import 拒绝；diagnostic legacy parse 通过 |
+视频机器信息：
 
-四份 JSON 的 33 个共同 validator errors 中，有一部分是同一根因的“字段缺失 + 固定值不符”
-双重报告；不能把 33 当作 33 个独立业务问题。更稳定的完整性口径是：每份仅出现 11/26 个
-canonical 必需顶层字段，缺失 15/26：
+| 视频 | fps | n_frames | duration_sec | size_bytes |
+|---|---:|---:|---:|---:|
+| `10mg 2周.mp4` | 25 | 9,661 | 386.44 | 30,305,363 |
+| `20mg 1周 1-3+20 2周1.mp4` | 25 | 11,470 | 458.8 | 35,847,587 |
+
+## 3. 原始文件概况
+
+| 文件 | schema | assay（源自报） | fps | n_frames | 原 analysis_window | tracks | intervals | V2.2 处置 |
+|---|---:|---|---:|---:|---|---:|---:|---|
+| `10mg 2周_张咸明 (1).json` | 2 | FST | 25 | 9,562 | `[0,0]` | 10/10 | 51 | 非 TST；原位隔离 |
+| `10mg 2周_徐乐彤.json` | 2 | FST | 25 | 9,562 | `[0,0]` | 10/10 | 75 | 非 TST；异值冲突隔离 |
+| `20mg 1周_张咸明 (3).json` | 2 | TST | 25 | 11,470 | `[0,0]` | 9/9 | 350 | 全长自动恢复 |
+| `20mg 一周_徐乐彤.json` | 2 | TST | 25 | 11,470 | `[0,0]` | 9/9 | 271 | 同值 union 后全长恢复 |
+| `10mg 2周_陈璇_mouse1.csv` | — | legacy CSV 无字段 | 行内时长对应 25 | extent 9,661 | 无字段 | 9 | 138 | 全长自动恢复 |
+
+四份 JSON 是旧工具生成的未版本化 schema 2，共同只有 11/26 个 V2.2 必需顶层字段；每份缺少
+15 个版本/身份/审计字段：
 
 ```text
 format, tool_version, primitive_set_version, rubric_version,
@@ -75,195 +88,155 @@ annotator_role, assignment_id, video, analysis_window_confirmed,
 blind, completed, created_at, updated_at, metadata_repaired
 ```
 
-四份 JSON 都有 `pool=validate`、`prefill=false`，但没有 `blind`、独立评分角色、assignment 或
-完成时间，因此不能把“validate 文件名义”解释成已经满足盲标。
+这 15 项不再作为“退回客户补填”的清单。recovery 生成它们，并保留 source SHA、生成依据和
+normalization 统计。原文件中的 `pool=validate` 也不会被当作盲法证据；恢复统一降格为 train。
 
-### 3.1 每轨 interval 数
+### 3.1 每轨原始 interval 数
 
 | 文件 | 每轨 interval 数 |
 |---|---|
-| `10mg 2周_张咸明 (1).json` | `head_neck_motion=1; fore_motion=2; hind_motion=1; trunk_deforming=1; fore_wall_upstroke=10; body_translation=4; body_axis=14; wall_contact=10; waterline_state=7; visibility=1` |
-| `10mg 2周_徐乐彤.json` | `head_neck_motion=1; fore_motion=1; hind_motion=1; trunk_deforming=2; fore_wall_upstroke=10; body_translation=4; body_axis=15; wall_contact=17; waterline_state=23; visibility=1` |
-| `20mg 1周_张咸明 (3).json` | `head_neck_motion=77; fore_motion=72; hind_motion=73; trunk_deforming=61; whole_body_swing=24; touch_wall=0; tail_grasp=0; axis_orient=42; visibility=1` |
-| `20mg 一周_徐乐彤.json` | `head_neck_motion=58; fore_motion=47; hind_motion=47; trunk_deforming=54; whole_body_swing=29; touch_wall=1; tail_grasp=1; axis_orient=33; visibility=1` |
-| `10mg 2周_陈璇_mouse1.csv` | `head_neck_motion=24; fore_motion=26; hind_motion=20; trunk_deforming=32; whole_body_swing=32; touch_wall=1; tail_grasp=1; axis_orient=1; visibility=1` |
+| `10mg 2周_张咸明 (1).json` | `head_neck=1; fore=2; hind=1; trunk=1; fore_wall=10; translation=4; body_axis=14; wall_contact=10; waterline=7; visibility=1` |
+| `10mg 2周_徐乐彤.json` | `head_neck=1; fore=1; hind=1; trunk=2; fore_wall=10; translation=4; body_axis=15; wall_contact=17; waterline=23; visibility=1` |
+| `20mg 1周_张咸明 (3).json` | `head_neck=77; fore=72; hind=73; trunk=61; swing=24; touch_wall=0; tail_grasp=0; axis=42; visibility=1` |
+| `20mg 一周_徐乐彤.json` | `head_neck=58; fore=47; hind=47; trunk=54; swing=29; touch_wall=1; tail_grasp=1; axis=33; visibility=1` |
+| legacy CSV | `head_neck=24; fore=26; hind=20; trunk=32; swing=32; touch_wall=1; tail_grasp=1; axis=1; visibility=1` |
 
-## 4. 检查结果
+## 4. 数据质量检查
 
-### 4.1 结构与域值
+### 4.1 原始 interval 结构
 
-| 文件 | 非法枚举 | 越界/反向 interval | 重复对 | 重叠对 | 相邻同值对 | mouse 问题 |
-|---|---:|---:|---:|---:|---:|---|
+| 文件 | 非法枚举 | 越界/反向 | 同值重复 | 同值重叠 | 异值重叠 | 相邻同值 |
+|---|---:|---:|---:|---:|---:|---:|
 | `10mg 2周_张咸明 (1).json` | 0 | 0 | 0 | 0 | 0 | 0 |
-| `10mg 2周_徐乐彤.json` | 0 | 0 | 0 | 6 | 0 | 0 |
+| `10mg 2周_徐乐彤.json` | 0 | 0 | 0 | 0 | 6 | 0 |
 | `20mg 1周_张咸明 (3).json` | 0 | 0 | 0 | 0 | 0 | 0 |
 | `20mg 一周_徐乐彤.json` | 0 | 0 | 1 | 1 | 0 | 0 |
-| legacy CSV | 0 | 0 | 0 | 0 | 0 | 源 138 行全部缺 mouse 列；需外部元数据 |
+| legacy CSV | 0 | 0 | 0 | 0 | 0 | 0 |
 
-精确冲突证据：
+TST 徐乐彤的两个冲突都不改变逐帧值，可以自动 union：
 
-- `20mg 一周_徐乐彤.json`
-  - `whole_body_swing`, mouse 1：`[12,60]=true` 完全重复 2 次。
-  - `fore_motion`, mouse 1：`[3802,3860]=marked` 与 `[3858,3888]=marked` 重叠 3 帧。
-- `10mg 2周_徐乐彤.json` 的 `wall_contact`, mouse 4 有 6 组不同值重叠：
-  `[48,55]∩[50,56]`、`[81,99]∩[90,97]`、`[110,122]∩[113,120]`、
-  `[137,142]∩[142,144]`、`[154,160]∩[160,163]`、`[168,176]∩[175,176]`。
+- `whole_body_swing`, mouse 1：`[12,60]=true` 完全重复；
+- `fore_motion`, mouse 1：`[3802,3860]=marked` 与 `[3858,3888]=marked` 重叠。
 
-这些不是可安全自动合并的“同值相邻”。尤其 `wall_contact` 重叠区同时有 `body` 与
-`forepaw`，自动取第一条会改变真值。
+FST 徐乐彤的 `wall_contact` 有 6 组 `body`/`forepaw` 异值重叠：
+`[48,55]∩[50,56]`、`[81,99]∩[90,97]`、`[110,122]∩[113,120]`、
+`[137,142]∩[142,144]`、`[154,160]∩[160,163]`、`[168,176]∩[175,176]`。
+它们不能自动决定，但文件已隔离在 FST 队列，不阻塞 TST。
 
-### 4.2 categorical / orient coverage
+### 4.2 axis 与 categorical coverage
 
-因为四份 JSON 的正式窗口均无效，**无法对正式 analysis window 宣称 coverage 通过或失败**。
-下表仅用 `[0,n_frames)` 做只读诊断，不能用于选择一个有利的 9,000 帧窗口：
+- TST 张咸明 `axis_orient` 原始覆盖 11,259/11,470 帧，缺口为 `[282,425]` 和
+  `[2328,2394]`，合计 211 帧。V2.2 明确填为 2 段 `unknown`，不猜姿态、不返工。
+- TST 徐乐彤的 axis/visibility 已覆盖全长；CSV 的 axis/visibility 覆盖诊断 extent 全长。
+- 两份 FST 文件多数 categorical 轨道只覆盖最前约 201/9,562 帧，再次说明它们是局部/练习
+  文件，不应进入 TST。
 
-| 文件 | 全文件诊断 coverage |
-|---|---|
-| `10mg 2周_张咸明 (1).json` | `body_translation/body_axis/waterline_state/visibility` 各 201/9,562（2.10%）；`wall_contact` 84/9,562（0.88%） |
-| `10mg 2周_徐乐彤.json` | `body_translation/body_axis` 各 201/9,562；`waterline_state` 200/9,562；`wall_contact` 98/9,562（1.02%）；`visibility` 9,562/9,562 |
-| `20mg 1周_张咸明 (3).json` | `visibility` 11,470/11,470；`axis_orient` 11,259/11,470，缺 211 帧：`[282,425]` 与 `[2328,2394]` |
-| `20mg 一周_徐乐彤.json` | `axis_orient` 与 `visibility` 均 11,470/11,470 |
-| legacy CSV（仅诊断 extent） | `axis_orient` 与 `visibility` 均覆盖 `[0,9660]`；正式窗口和 n_frames 仍未绑定 |
+### 4.3 legacy CSV 行级质量
 
-两份 FST 文件的多数 categorical 轨道仅覆盖最前约 201 帧，支持 manifest 中“局部/练习”
-分类。TST 张咸明文件的 211 帧 axis 缺口是否落入正式窗口，只能在权威窗口确认后判断；禁止
-为了避开缺口而反推窗口。
+- 精确 7 列 header，138 个数据行、9 个轨道；标准 CSV reader 可完整读出。
+- 每轨 `interval_index` 连续，138/138 行满足 `duration_frames=end-start+1`。
+- 138/138 行的 `duration_sec` 与 25 fps 一致。
+- 旧 CSV 没有 mouse/assay/video/window 列；V2.2 恢复任务使用已确定的 mouse 1 和实际视频，
+  不从 CSV 行内伪造这些字段。
 
-### 4.3 legacy CSV 解析
+## 5. V2.2 recovery 执行结果
 
-源 CSV 是精确的 7 列 legacy header：
+本节直接使用当前 `recover_legacy_csv/recover_legacy_json`，写入新目录后用
+实际视频执行严格 validator。详细运行记录和机器可读 manifest 分别在输出目录的
+`RECOVERY_RUN_2026-08-30.md` 与 `recovery_run_manifest_v2.2.json`。
 
-```text
-track,interval_index,start,end,value,duration_frames,duration_sec
-```
+| 源 | 输入 interval | 同值 duplicate union | 同值 overlap union | axis unknown | 最终 interval | window | video 验证 |
+|---|---:|---:|---:|---:|---:|---|---|
+| CSV | 138 | 0 | 0 | 0 段 / 0 帧 | 138 | `[0,9661)` | 通过 |
+| TST 张咸明 JSON | 350 | 0 | 0 | 2 段 / 211 帧 | 352 | `[0,11470)` | 通过 |
+| TST 徐乐彤 JSON | 271 | 1 | 1 | 0 | 269 | `[0,11470)` | 通过 |
 
-- 138 个数据行，9 个轨道；末行没有换行符，但标准 CSV reader 可完整读出，不造成数据丢失。
-- `interval_index` 在每轨内均连续；`duration_frames=end-start+1` 全部 138/138 成立。
-- 以行内 `duration_sec` 反推的候选 25 fps，138/138 行均在 parser 容差内一致；源文件仍然
-  没有权威 `fps` 字段。
-- `import_csv()` 明确抛出 `LegacyCSVError`：缺少权威 trial/video/mouse/window 元数据。
-- `migrate_legacy_csv()` 在**不写文件**的 diagnostic-only envelope 下通过行级与轨道结构检查；
-  该 envelope 使用 `UNCONFIRMED` 身份、按最大 end 得到的诊断 extent 9,661，以及零 hash
-  占位，绝不构成迁移或视频绑定。正式迁移必须重新提供权威 metadata 与 repair provenance。
+三份输出均为 `completed=true`、`analysis_window_confirmed=true`，并通过 V2.2 train/legacy
+contract。这里的 completed 表示“恢复数据结构完整”，不表示 formal gold truth。
 
-## 5. 身份候选，不是绑定
+逐帧对比结果为 3/3 份 `unexpected_truth_mismatches=0`。张咸明文件中唯一新增的
+211 帧是对原缺口显式写入 `axis_orient=unknown`，没有猜填姿态。
 
-下表只记录可供人工核对的候选。候选依据不能替代 assignment 记录、视频字节 hash 与现场
-试验记录。
+### 5.1 legacy 双标诊断
 
-| 标注文件 | manifest 中的候选视频 | 机械证据 | 决策 |
+两份 11,470 帧恢复文件已生成
+`tst-11b2361a85c2-m1__legacy-diagnostic-agreement-v2.2.json`。报告固定写
+`mode=diagnostic / formal=false / gate_policy=N/A`，所有轨道门槛均为 N/A。三级精确 κ 仅作 SOP
+校准诊断：头颈 0.395、前肢 0.422、后肢 0.447；躯干 0.669、整体摆动 0.530、身体轴朝向
+0.492。这些数字不得当作正式 pilot 验收结果。
+
+## 6. 严重度与下游风险
+
+| 严重度 | 发现 | 影响 | V2.2 处置 |
 |---|---|---|---|
-| legacy CSV | `10mg 2周.mp4`, SHA `8a977084…c3ba3b` | CSV 最大 end=9,660；候选视频 ffprobe 为 9,661 帧/25 fps | **需人工确认** assay、mouse、video 与窗口；不绑定 |
-| 两份自报 TST JSON | `20mg 1周 1-3+20 2周1.mp4`, SHA `11b2361a…0fd55` | 两份均自报 11,470 帧/25 fps；候选视频也是 11,470 帧/25 fps | **需人工确认**；且 trial 分别为 `20mg 1周` / `20mg 一周`，strict preflight 不相等 |
-| 两份自报 FST JSON | 无 TST 候选 | 自报 FST/9,562 帧；7 个 manifest TST 视频帧数均不等于 9,562 | 从 TST pilot 隔离；只可候选 FST practice，需另找权威 FST 视频 |
+| **Critical（仅正式用途）** | legacy 无可证明的盲法/独立 assignment | 不能用于正式 κ gate 或替代 12 例 pilot | 强制 train/legacy_rater/blind=false；正式 pilot 分账 |
+| **High** | 2 个自报 FST 文件错放 TST 目录 | 目录 glob 可能造成 assay 污染 | 按文件内容/profile 隔离，不进入 TST 清单 |
+| **High（FST 队列）** | FST 徐乐彤 6 组异值 wall_contact 重叠 | 同一帧存在两个类别，无法确定性恢复 | 仅在未来恢复 FST 时人工裁决；不阻塞 TST |
+| **Medium** | TST 张咸明 axis 缺 211 帧 | 猜默认姿态会污染真值 | 显式填 `unknown` 并记录帧数 |
+| **Medium** | legacy 缺 15 个版本/审计字段、原 window 为 `[0,0]` | 直接按 canonical 读取会失败 | 工具计算 identity、生成审计 ID、恢复全长窗口并写 provenance |
+| **Low** | CSV 末行无换行符 | 不影响标准 parser，未丢行 | 保留原件；恢复输出使用 canonical serializer |
 
-ffprobe 只证明数值相容，不证明文件来源相同；只有 `video.sha256` 与权威 assignment 能完成
-绑定。
+**TST recovery blocker：0。**需要人工处理的异值冲突全部位于已隔离的 FST 文件。
 
-## 6. 按严重度的发现与下游风险
+## 7. recovery / quarantine 决策
 
-| 严重度 | 发现与证据 | 下游风险 | 处置 |
-|---|---|---|---|
-| **Critical** | 0/5 文件具有完整 grain；4/4 JSON 的窗口为 `[0,0]`，CSV 没有窗口；5/5 均无可用 video hash | 无法确定哪一帧、哪只鼠、哪段 360 秒属于同一 trial；评分、κ、训练 join 均不可审计 | 全部保持非正式；先取得权威身份/窗口记录 |
-| **Critical** | 1 组重复 + 7 组同轨重叠，涉及 2 个文件 | 同一 `(track,mouse,frame)` 有多个值或重复记录；展开逐帧时可能双计数或依赖“第一条”顺序 | 标注员逐条裁决；迁移器禁止自动选择 |
-| **High** | 每份 JSON 缺 15/26 个必需字段；strict validator 报 33–39 个 errors | schema=2 被误当 canonical V2.1，会绕过版本、盲法、assignment 与 provenance 门 | 只能显式 legacy migration；输出 repaired、unconfirmed、incomplete 草稿 |
-| **High** | 两份 FST 文件位于 TST pilot 源目录；其行为轨道多数只标约 201/9,562 帧 | 按目录 glob 摄取会造成 assay 污染；把局部练习当完整 trial 会严重偏置分布 | 从 TST 输入清单排除，原件原位保留 |
-| **High** | 候选 TST 双标的 `trial` 字符串不相等且均无 video hash | strict agreement 无法确认是同一 chamber-trial；强行配对可能比较不同试次 | 人工确认稳定 trial ID 和视频 SHA 后分别迁移 |
-| **High** | 候选 TST 张咸明 `axis_orient` 全文件缺 211 帧；FST categorical coverage 大面积缺失 | 若缺口进入确认窗口，completed 硬门失败；静默用默认值会制造姿态真值 | 窗口确认后重检；需要时回到标注员补标 |
-| **Medium** | legacy CSV 行级结构干净，但 138/138 行没有 mouse 字段且所有 identity 依赖文件名 | 单鼠候选看似可用，实际无法安全 join；易把命名约定当真值 | 只在权威 metadata 明确 mouse 后迁移 |
-| **Medium** | legacy schema 2 与 canonical V2.1 共用数字 `schema=2`，但旧文件无 format/version | 仅检查 schema 数字的下游会发生 schema drift | 所有入口同时校验 format + 全部版本常量 |
-
-置信度：SHA、字段缺失、枚举/边界、重复/重叠为直接字节解析，**高置信度**；视频对应关系与
-正式窗口仅是候选，**不作结论**。
-
-## 7. migration / quarantine 决策
-
-| 文件 | 当前决策 | 晋级前必须完成 |
+| 文件 | 决策 | 是否要求标注同事返工 |
 |---|---|---|
-| `10mg 2周_陈璇_mouse1.csv` | `QUARANTINE_METADATA`；结构可迁移候选 | 权威确认 trial/assay/annotator/mouse/video SHA/fps/n_frames/9,000 帧窗口/assignment/盲法；以新文件生成 repaired draft |
-| `20mg 1周_张咸明 (3).json` | `MIGRATION_CANDIDATE_AFTER_IDENTITY_CONFIRMATION` | 确认 stable trial ID、video SHA、assignment、盲法、窗口；确认窗口后复查 axis coverage |
-| `20mg 一周_徐乐彤.json` | `QUARANTINE_CONFLICT` | 除上述身份确认外，人工裁决 swing 重复与 fore overlap；禁止自动去重 |
-| `10mg 2周_张咸明 (1).json` | `QUARANTINE_NON_TST_PRACTICE` | 不进入 TST；若保留为 FST train/practice，需确认 FST 视频与局部窗口并重新标明用途 |
-| `10mg 2周_徐乐彤.json` | `QUARANTINE_NON_TST_PRACTICE_CONFLICT` | 不进入 TST；另需人工裁决 6 组 wall_contact 重叠 |
+| `10mg 2周_陈璇_mouse1.csv` | `RECOVER_V2_2_FULL_LENGTH` | 否 |
+| `20mg 1周_张咸明 (3).json` | `RECOVER_V2_2_FULL_LENGTH_WITH_AXIS_UNKNOWN` | 否 |
+| `20mg 一周_徐乐彤.json` | `RECOVER_V2_2_FULL_LENGTH_WITH_SAME_VALUE_UNION` | 否 |
+| `10mg 2周_张咸明 (1).json` | `ISOLATE_SELF_REPORTED_FST` | 否；不属于 TST 工作 |
+| `10mg 2周_徐乐彤.json` | `ISOLATE_FST_DIFFERENT_VALUE_CONFLICT` | TST 否；未来 FST 恢复才裁决 |
 
-迁移输出必须使用新文件名、保留 source path/SHA、写完整 provenance，并以
-`analysis_window_confirmed=false`、`completed=false` 开始。没有现存记录可以倒推出
-`blind=true`；若盲法证据不存在，只能进入 train/practice，不能进入正式 pilot。
+标准 360 秒结果的派生子窗选择规则仍需在 trial 输出中版本化，但这不阻塞 recovery，也不产生
+任何人工重标任务。
 
-## 8. 需要人工确认的开放项
+## 8. 可复跑方法
 
-1. CSV 的 assay、mouse、annotator ID 与对应原视频 SHA-256。
-2. 两份自报 TST JSON 是否确属同一视频/同一 chamber-trial，以及统一的 stable `trial`。
-3. 每个 TST trial 的 9,000 帧窗口起点；不能默认 `[0,9000)` 或按 coverage 选择。
-4. assignment ID、标注员是否独立、是否确实未见模型输出/对方标注。
-5. TST 徐乐彤的 2 组冲突和 FST 徐乐彤的 6 组冲突应保留哪一个值或如何重画。
-6. 两份 FST 局部文件对应的 FST 视频及其是否仅为共同练习。
-
-## 9. 可复跑方法
-
-从仓库根目录执行。以下命令均只读；validator 预期对 legacy JSON 返回非零。
-
-### 9.1 SHA 与 manifest 对照
+### 8.1 SHA 复核
 
 ```bash
 annotation_source_dir='/Users/dylanchen2000/Work/heavy/depression/悬尾'
 shasum -a 256 "$annotation_source_dir"/*.json "$annotation_source_dir"/*.csv
 ```
 
-### 9.2 当前 canonical validator
+### 8.2 V2.2 恢复 CLI
+
+metadata/provenance 由内部恢复任务生成；客户不需要填写。正式执行会写新文件且拒绝覆盖：
 
 ```bash
-annotation_source_dir='/Users/dylanchen2000/Work/heavy/depression/悬尾'
-for annotation_file in "$annotation_source_dir"/*.json; do
-  python3 -m depressionplex.cli.annotation_v2 validate "$annotation_file" --allow-draft
-done
+python3 -m depressionplex.cli.annotation_v2 recover-csv SOURCE.csv RECOVERED.json \
+  --metadata GENERATED_METADATA.json --provenance GENERATED_PROVENANCE.json
+
+python3 -m depressionplex.cli.annotation_v2 recover-json SOURCE.json RECOVERED.json \
+  --metadata GENERATED_METADATA.json --provenance GENERATED_PROVENANCE.json
 ```
 
-审计中的 error 计数直接来自：
+metadata 的恢复硬值为：
 
-```python
-from depressionplex.annotations.contract import validation_errors
-errors = validation_errors(document, require_completed=True)
+```text
+pool=train
+annotator_role=legacy_rater
+blind=false
+analysis_window=[0,n_frames]
+full_window_approved=true
+fill_axis_orient_unknown=true
 ```
 
-### 9.3 legacy CSV 严格拒绝与显式迁移入口
+### 8.3 恢复后验证与诊断一致性
 
 ```bash
-python3 -c "from depressionplex.annotations.csv_v2 import import_csv; import_csv('/Users/dylanchen2000/Work/heavy/depression/悬尾/10mg 2周_陈璇_mouse1.csv')"
+python3 -m depressionplex.cli.annotation_v2 validate RECOVERED.json --video SOURCE.mp4
+
+python3 -m depressionplex.cli.annotation_v2 agree RATER_A_RECOVERED.json \
+  RATER_B_RECOVERED.json --mouse 1 --diagnostic
 ```
 
-预期抛出 `LegacyCSVError`。只有取得人工确认的 metadata/provenance JSON 后，才允许运行：
+`--diagnostic` 输出必须标为 `formal=false`，所有 pilot gate 为 N/A。
 
-```bash
-python3 -m depressionplex.cli.annotation_v2 migrate-csv SOURCE.csv NEW_DRAFT.json \
-  --metadata AUTHORITATIVE_METADATA.json \
-  --provenance REPAIR_PROVENANCE.json
-```
+## 9. 审计边界
 
-禁止为了“让命令通过”而从文件名生成这两个输入文件。
-
-### 9.4 interval 检查算法
-
-对每份源文件按 `(track,mouse,start,end)` 排序，逐条执行：
-
-1. `value in TRACK_DEFS[track].values`；
-2. `0 <= start <= end < n_frames`；
-3. 当前 start `<=` 前一 end 为 overlap；起止完全相同为 duplicate；
-4. 当前 start `==` 前一 end `+1` 且 value 相同为 adjacent-equal；
-5. categorical/orient coverage 用 interval 与候选窗口求并集；窗口未确认时只报诊断，不验收。
-
-源视频帧数诊断使用：
-
-```bash
-ffprobe -v error -select_streams v:0 -count_frames \
-  -show_entries stream=avg_frame_rate,nb_read_frames,width,height \
-  -show_entries format=duration,size -of json SOURCE.mp4
-```
-
-## 10. 审计边界
-
-- 本报告没有生成迁移文件，没有改变源 SHA，也没有运行正式 agreement。
-- 未使用文件名推断正式 assay、mouse、video 或 analysis window。
-- categorical coverage 的全文件数字只用于发现风险，不代表正式窗口覆盖率。
-- 当前目录没有时间分区或可靠采集时间字段，因此未做趋势分析；本次暴露的是格式版本漂移，
-  不是时间序列漂移。
+- 本报告没有覆盖或移动任何源文件；recovery 输出只落盘到上述独立目录。
+- stable trial/video/mouse 映射来自本项目 V2.2 内部恢复决策，不要求客户重新提供。
+- 严格 validator 验证 recovery 的结构与视频身份；不把 legacy 数据提升为 blind validation truth。
+- 标准 360 秒子窗尚未派生；全长标注是保留信息最多的上游真值层。

@@ -31,7 +31,9 @@ _MATCH_FIELDS = (
 )
 
 
-def agreement_preflight(a: Mapping[str, Any], b: Mapping[str, Any]) -> None:
+def agreement_preflight(
+    a: Mapping[str, Any], b: Mapping[str, Any], *, diagnostic: bool = False
+) -> None:
     """Validate both documents and enforce identity/independence invariants."""
 
     validate_document(a)
@@ -43,14 +45,31 @@ def agreement_preflight(a: Mapping[str, Any], b: Mapping[str, Any]) -> None:
         )
     if a["annotator"] == b["annotator"]:
         raise AgreementPreflightError("agreement requires two different annotators")
-    if a["pool"] != "validate" or b["pool"] != "validate":
-        raise AgreementPreflightError("agreement is restricted to the validate pool")
-    if not a["blind"] or not b["blind"] or a["prefill"] or b["prefill"]:
-        raise AgreementPreflightError("agreement requires two blind, non-prefilled annotations")
     if not a["completed"] or not b["completed"]:
         raise AgreementPreflightError("agreement requires completed annotations")
     if not a["analysis_window_confirmed"] or not b["analysis_window_confirmed"]:
         raise AgreementPreflightError("agreement requires a confirmed analysis_window")
+    if diagnostic:
+        return
+    if a["pool"] != "validate" or b["pool"] != "validate":
+        raise AgreementPreflightError("agreement is restricted to the validate pool")
+    if a["annotator_role"] != "independent_rater" or b["annotator_role"] != "independent_rater":
+        raise AgreementPreflightError("formal agreement requires independent_rater roles")
+    if not a["blind"] or not b["blind"] or a["prefill"] or b["prefill"]:
+        raise AgreementPreflightError("agreement requires two blind, non-prefilled annotations")
+
+
+def _disable_gate(report: dict[str, Any]) -> None:
+    """Mark every diagnostic metric as explicitly non-gating."""
+
+    report["passes_common_threshold"] = None
+    report["gate_status"] = "N/A"
+    occurrence = report.get("occurrence")
+    if isinstance(occurrence, dict):
+        occurrence["gate_status"] = "N/A"
+    full_window = report.get("full_window")
+    if isinstance(full_window, dict):
+        _disable_gate(full_window)
 
 
 def _confusion(
@@ -242,6 +261,7 @@ def agreement_report(
     mouse: int | None = None,
     rare_threshold: float = 0.05,
     common_kappa_threshold: float = 0.80,
+    diagnostic: bool = False,
 ) -> dict[str, Any]:
     """Return per-mouse agreement with no cross-mouse mixing.
 
@@ -249,7 +269,7 @@ def agreement_report(
     ``clear``.  The visibility track itself uses the complete confirmed window.
     """
 
-    agreement_preflight(a, b)
+    agreement_preflight(a, b, diagnostic=diagnostic)
     if not 0.0 < rare_threshold < 1.0:
         raise ValueError("rare_threshold must be between 0 and 1")
     if not 0.0 <= common_kappa_threshold <= 1.0:
@@ -269,6 +289,9 @@ def agreement_report(
         "annotators": [a["annotator"], b["annotator"]],
         "rare_threshold": rare_threshold,
         "common_kappa_threshold": common_kappa_threshold,
+        "mode": "diagnostic" if diagnostic else "formal",
+        "formal": not diagnostic,
+        "gate_policy": "N/A" if diagnostic else "canonical V2.2 pilot gates",
         "mice": {},
     }
     total_frames = a["analysis_window"][1] - a["analysis_window"][0]
@@ -313,6 +336,8 @@ def agreement_report(
             if full_window_report is not None:
                 full_window_report["scope"] = "full_window"
                 main_report["full_window"] = full_window_report
+            if diagnostic:
+                _disable_gate(main_report)
             track_reports.append(main_report)
         output["mice"][str(mouse_id)] = {
             "window_frames": total_frames,

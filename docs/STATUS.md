@@ -3,8 +3,10 @@
 > 快照，不是日志。永远只反映当前状态。历史在 git commit 与 Obsidian 里。
 > 最后更新：2026-08-30
 >
-> 当前决策：**V2 独立轨道 HTML 是唯一正式标注工具；V1/V3 retired，不再采用。**
-> 规范见 [`ANNOTATION_CONTRACT_V2.md`](ANNOTATION_CONTRACT_V2.md)。
+> 当前决策：**V2.2 独立轨道 HTML 是唯一正式标注工具；V1/V3 retired。历史标注按零返工
+> 政策恢复，全长保留，不要求同事裁剪或重标。**规范见
+> [`ANNOTATION_CONTRACT_V2.md`](ANNOTATION_CONTRACT_V2.md) 与
+> [`LEGACY_RECOVERY_POLICY_V2_2.md`](LEGACY_RECOVERY_POLICY_V2_2.md)。
 
 ## 主线目标
 
@@ -227,27 +229,29 @@ Noise Thresh / Min Length 会把它滤掉。故门判 p90，max 仅作诊断量�
 
 ## 正在进行
 
-1. **P0 工程收口已完成**：V2 独立轨道是唯一 canonical 格式；版本、时间窗、视频身份、
-   逐鼠校验、盲标、enriched CSV、agreement 和 rubric 派生硬门均已固化到权威 HTML 与
-   Python 入口。`visibility != clear` 的派生结果统一为 `unknown`。
-2. **存量标注进入显式迁移阶段**：视频及原始标注 SHA-256 基线已写入
-   `PILOT_SOURCE_MANIFEST_2026-08-29.md`，逐文件质量与 quarantine 决策已写入
-   `PILOT_MIGRATION_AUDIT_2026-08-30.md`；原件保持只读。待由权威记录/标注员确认计分窗，
-   并裁决 1 组重复与 7 组重叠 interval 后，才能生成合规新文件。
-3. **P1 pilot 暂不扩量**：当前为 0/12 个契约合规双标 TST chamber-trial；另有 1 对
-   legacy 双标仅可诊断，且常见原语 κ 尚未达到 0.80。先对齐 `subtle/marked` 与整体摆动 SOP。
+1. **P0 V2.2 收口**：版本升级为 tool 2.2.0 / primitives 2.1.0 / rubrics 2.1.0；正式 TST
+   窗口允许 `>=9000` 帧，legacy 的 9,661/11,470 帧全长直接保留。标准 360 秒结果以后由
+   软件派生，不改人工标注。
+2. **TST 零返工恢复已执行**：1 CSV + 2 JSON 已生成 3 份 canonical V2.2
+   train/legacy JSON，分别保留 9,661/11,470/11,470 帧全长。同值冲突已无损 union，
+   axis 缺口 211 帧已填 `unknown`，逐帧意外差异为 0；源 SHA 未变。输出在
+   `/Users/dylanchen2000/Work/heavy/depression/recovered_annotations_v2.2/tst`。
+3. **FST 隔离**：另 2 个 JSON 文件内容自报 FST，只是错放 `悬尾/`；不进入 TST 恢复，
+   其异值 `wall_contact` 冲突也不阻塞 TST。
+4. **诊断与正式 pilot 独立记账**：legacy 双标诊断报告已生成，并固定为
+   `formal=false / gate=N/A`。恢复数据可训练和诊断，但不计入 12 例正式盲标 pilot；
+   正式计数仍为 0/12。
 
 ## 下一步（按优先级）
 
-1. 取得下列人工开放项后，依据已冻结的 manifest 不覆盖原件地生成迁移草稿与逐文件执行记录；
-   `analysis_window`、mouse 与范式等语义字段必须人工/权威确认，不能猜。
-2. 做 1 例共同练习（不计数），先对齐 `none/subtle/marked`、`trunk_deforming` 与
+1. 用已恢复双标中的诊断差异定位 SOP 分歧，做 1 例新的共同练习（不计数），
+   对齐 `none/subtle/marked`、`trunk_deforming` 与
    `whole_body_swing` 边界。
-3. 完成两名独立标注员、至少 3 个视频、12 个唯一 chamber-trial 的盲标 pilot；常见原语
+2. 完成两名独立标注员、至少 3 个视频、12 个唯一 chamber-trial 的盲标 pilot；常见原语
    κ ≥ 0.80 后才扩量。
-4. 把现有 rules + bouts 串成 trial 级 `result.json/review.json`，人工真值到位前所有阈值
-   保持 provisional。
-5. `flow.py` 继续降优先级；只在有纹理素材或 FST 水下场景出现明确需要时再评估。
+3. 把现有 rules + bouts 串成 trial 级 `result.json/review.json`；需要标准 360 秒时从全长
+   annotation 派生版本化子窗，人工真值到位前所有阈值保持 provisional。
+4. `flow.py` 继续降优先级；只在有纹理素材或 FST 水下场景出现明确需要时再评估。
 
 ## 阻塞
 

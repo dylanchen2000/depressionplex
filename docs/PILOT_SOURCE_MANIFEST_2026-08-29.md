@@ -20,9 +20,23 @@ SHA-256 使用原文件字节计算。迁移、修复或归档禁止覆盖这些
 | `10mg 2周_张咸明 (1).json` | `44392d582ba98ac82163f97b4eb98a2a890766201fb5af9465754290eaf65a7b` | FST 局部/练习标注；错放 TST 目录 |
 | `10mg 2周_徐乐彤.json` | `b59528c9f31f6d3ec50b337ca09881e15c783a9b966ce5420377ef903c5636b2` | FST 局部/练习标注；错放 TST 目录 |
 
-## 正式迁移门
+## V2.2 恢复附录（2026-08-30；取代原“正式迁移门”）
 
-- 未确认的 `analysis_window` 禁止从视频长度或文件名静默推测。
-- 两份 FST 文件只在新 manifest 中更正归属，原文件不移动、不改名。
-- 含重复/重叠的 JSON 必须由标注员裁决，迁移器不选“第一条”。
-- 所有迁移结果使用新文件名，写 `metadata_repaired=true` 和完整 `provenance`，并重新计算 SHA-256。
+本文件的 SHA-256 表仍是原始字节身份基线，不对任何一行做改写。表内 2026-08-29 的
+“待显式迁移”等分类文字仅记录当时状态；当前处置以
+[`LEGACY_RECOVERY_POLICY_V2_2.md`](LEGACY_RECOVERY_POLICY_V2_2.md) 和
+[`PILOT_MIGRATION_AUDIT_2026-08-30.md`](PILOT_MIGRATION_AUDIT_2026-08-30.md) 为准：
+
+- 本批 TST 恢复源为 1 CSV + 2 JSON；另 2 JSON 内容自报 `assay=FST`，只从
+  TST 队列隔离，原文件不移动、不改名。
+- 恢复器绑定已核验的实际视频后，使用全长 `[0,n_frames)` 作为窗口：本批为
+  9,661 或 11,470 帧。不要求标注员裁剪或重标；如需标准 360 秒，由软件以版本化
+  规则从全长结果派生 9,000 帧子窗。
+- 同一 track/mouse 中同值的完全重复、重叠或相邻 interval 由恢复器确定性 union；
+  只有异值重叠需人工裁决。本批异值冲突仅位于已隔离的 FST 文件，不阻塞 TST。
+- 恢复结果必须使用新文件名，写 `metadata_repaired=true` 和完整 `provenance`，
+  并引用本表的 source SHA-256；禁止覆盖原件。
+- legacy 恢复结果固定为 `pool=train`、`annotator_role=legacy_rater`、`blind=false`，
+  可用于训练与诊断，不计入 12 例正式独立盲标 pilot。
+- 2026-08-30 已将 3/3 份 TST 源恢复到
+  `/Users/dylanchen2000/Work/heavy/depression/recovered_annotations_v2.2/tst`；本表中源 SHA 复核未变。

@@ -9,6 +9,10 @@ Examples::
     python3 -m depressionplex.cli.annotation_v2 import-csv out.csv roundtrip.json
     python3 -m depressionplex.cli.annotation_v2 migrate-csv old.csv draft.json \
         --metadata metadata.json --provenance repair.json
+    python3 -m depressionplex.cli.annotation_v2 recover-csv old.csv recovered.json \
+        --metadata metadata.json --provenance repair.json
+    python3 -m depressionplex.cli.annotation_v2 recover-json old.json recovered.json \
+        --metadata metadata.json --provenance repair.json
 """
 
 from __future__ import annotations
@@ -22,6 +26,7 @@ from typing import Any
 from ..annotations.agreement import agreement_report
 from ..annotations.contract import validate_document
 from ..annotations.csv_v2 import export_csv, import_csv, migrate_legacy_csv
+from ..annotations.recovery import recover_legacy_csv, recover_legacy_json
 
 
 def _load_json(path: str | Path) -> dict[str, Any]:
@@ -62,7 +67,8 @@ def cmd_validate(args: argparse.Namespace) -> int:
         "completed": doc["completed"],
         "analysis_window_confirmed": doc["analysis_window_confirmed"],
         "formal_eligible": bool(
-            args.video is not None
+            not args.allow_draft
+            and args.video is not None
             and doc["pool"] == "validate"
             and doc["blind"] is True
             and doc["prefill"] is False
@@ -85,6 +91,7 @@ def cmd_agree(args: argparse.Namespace) -> int:
         mouse=args.mouse,
         rare_threshold=args.rare_threshold,
         common_kappa_threshold=args.kappa_threshold,
+        diagnostic=args.diagnostic,
     )
     if args.out:
         _write_json(args.out, report, force=args.force)
@@ -123,6 +130,55 @@ def cmd_migrate_csv(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_recover(args: argparse.Namespace, *, source_kind: str) -> int:
+    if Path(args.file).resolve() == Path(args.out).resolve():
+        raise ValueError("recovery never overwrites the original source artifact")
+    metadata = _load_json(args.metadata)
+    provenance = _load_json(args.provenance)
+    recover = recover_legacy_csv if source_kind == "csv" else recover_legacy_json
+    doc = recover(
+        args.file,
+        metadata=metadata,
+        repair_provenance=provenance,
+    )
+    _write_json(args.out, doc)
+    recovery = doc["provenance"]["recovery"]
+    print(
+        json.dumps(
+            {
+                "recovered": True,
+                "source_kind": source_kind,
+                "output": str(args.out),
+                "formal": False,
+                "pool": doc["pool"],
+                "annotator_role": doc["annotator_role"],
+                "completed": doc["completed"],
+                "analysis_window": doc["analysis_window"],
+                "union": recovery["union"]["totals"],
+                "axis_orient_unknown_fill": recovery[
+                    "axis_orient_unknown_fill"
+                ],
+                "video_verification_required": True,
+                "next_step": (
+                    "python3 -m depressionplex.cli.annotation_v2 validate "
+                    f"{args.out} --video SOURCE_VIDEO.mp4"
+                ),
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
+    return 0
+
+
+def cmd_recover_csv(args: argparse.Namespace) -> int:
+    return _cmd_recover(args, source_kind="csv")
+
+
+def cmd_recover_json(args: argparse.Namespace) -> int:
+    return _cmd_recover(args, source_kind="json")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="DepressionPlex canonical V2 annotation contract"
@@ -148,6 +204,14 @@ def build_parser() -> argparse.ArgumentParser:
     command.add_argument("--mouse", type=int)
     command.add_argument("--rare-threshold", type=float, default=0.05)
     command.add_argument("--kappa-threshold", type=float, default=0.80)
+    command.add_argument(
+        "--diagnostic",
+        action="store_true",
+        help=(
+            "compare completed train/legacy annotations diagnostically; "
+            "the report is formal=false and every pilot gate is N/A"
+        ),
+    )
     command.add_argument("--out")
     command.add_argument("--force", action="store_true")
     command.set_defaults(function=cmd_agree)
@@ -176,6 +240,23 @@ def build_parser() -> argparse.ArgumentParser:
     command.add_argument("--provenance", required=True)
     command.add_argument("--force", action="store_true")
     command.set_defaults(function=cmd_migrate_csv)
+
+    for source_kind, function in (
+        ("csv", cmd_recover_csv),
+        ("json", cmd_recover_json),
+    ):
+        command = sub.add_parser(
+            f"recover-{source_kind}",
+            help=(
+                "explicitly recover legacy data as completed diagnostic train truth; "
+                "never formal agreement truth"
+            ),
+        )
+        command.add_argument("file")
+        command.add_argument("out")
+        command.add_argument("--metadata", required=True)
+        command.add_argument("--provenance", required=True)
+        command.set_defaults(function=function)
     return parser
 
 

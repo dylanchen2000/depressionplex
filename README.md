@@ -107,12 +107,20 @@ TST 金标准要求排除「因先前挣扎惯性产生的钟摆式摆动」。C
 ## 开发状态
 
 见 `docs/STATUS.md`。标注层只采用 `docs/ANNOTATION_CONTRACT_V2.md` 中定义的
-V2 独立轨道契约；V1 共享 bout 与 V3 共享 segment 均已 retired。权威浏览器工具为
+V2.2 独立轨道契约（tool 2.2.0 / primitives 2.1.0 / rubrics 2.1.0）；V1 共享 bout 与
+V3 共享 segment 均已 retired。权威浏览器工具为
 `tools/annotation/DepressionPlex_annotation_tool_v2.html`。
+
+历史标注执行 `docs/LEGACY_RECOVERY_POLICY_V2_2.md`：保留 9,661/11,470 帧全长时间轴，
+不要求同事裁成 360 秒或重新标注；标准 360 秒指标如有需要，由软件从全长标注派生。
+恢复结果固定为 train/legacy_rater/non-blind，可训练和诊断，但与正式 12 例盲标 pilot 分账。
 
 存量标注的只读身份与迁移结论分别见
 `docs/PILOT_SOURCE_MANIFEST_2026-08-29.md` 和
-`docs/PILOT_MIGRATION_AUDIT_2026-08-30.md`。
+`docs/PILOT_MIGRATION_AUDIT_2026-08-30.md`；恢复规则见
+`docs/LEGACY_RECOVERY_POLICY_V2_2.md`。
+本批 3 份已恢复的 TST JSON、provenance、运行 manifest 与非正式一致性报告保存在
+`/Users/dylanchen2000/Work/heavy/depression/recovered_annotations_v2.2/tst`。
 
 V2 机器校验入口：
 
@@ -120,8 +128,12 @@ V2 机器校验入口：
 python3 -m depressionplex.cli.annotation_v2 validate annotation.json --video source.mp4
 python3 -m depressionplex.cli.annotation_v2 agree rater-a.json rater-b.json
 python3 -m depressionplex.cli.annotation_v2 export-csv annotation.json annotation.csv --mouse 1
-python3 -m depressionplex.cli.annotation_v2 migrate-csv legacy.csv candidate.json \
-  --metadata metadata.json --provenance provenance.json
+python3 -m depressionplex.cli.annotation_v2 recover-csv legacy.csv recovered.json \
+  --metadata generated-metadata.json --provenance generated-provenance.json
+python3 -m depressionplex.cli.annotation_v2 recover-json legacy.json recovered.json \
+  --metadata generated-metadata.json --provenance generated-provenance.json
+python3 -m depressionplex.cli.annotation_v2 agree recovered-a.json recovered-b.json \
+  --mouse 1 --diagnostic
 ```
 
 完整规划的源文档保留在工作区根目录

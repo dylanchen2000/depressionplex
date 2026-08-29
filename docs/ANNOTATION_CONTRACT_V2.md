@@ -1,7 +1,7 @@
-# DepressionPlex 标注契约 V2
+# DepressionPlex 标注契约 V2.2
 
 > 状态：**P0 规范性文件（Normative）**
-> 生效日期：2026-08-29
+> 生效日期：2026-08-30
 > 唯一正式工具：`tools/annotation/DepressionPlex_annotation_tool_v2.html`
 > 源模型：仓库外 `annotation_tool(2).html` 的 V2 独立轨道设计（原文件只读保留）
 > 关键字：**必须**、**禁止**、**应**、**可以**分别表示硬约束、硬禁令、默认要求和可选项。
@@ -14,9 +14,9 @@
 |---|---|
 | `schema` | `2` |
 | `format` | `depressionplex.annotation.v2` |
-| `tool_version` | `2.1.0` |
-| `primitive_set_version` | `depressionplex-primitives-v2.0.0` |
-| `rubric_version` | `depressionplex-rubrics-v2.0.0` |
+| `tool_version` | `2.2.0` |
+| `primitive_set_version` | `depressionplex-primitives-v2.1.0` |
+| `rubric_version` | `depressionplex-rubrics-v2.1.0` |
 
 本文件同时覆盖 TST 与 FST；当前 pilot 只验收 TST。原语是真值层，academic / CSI / ours
 等 rubric 是派生层。标注员只标原语，禁止在原语标注中直接写最终行为类别或软件预测分数。
@@ -26,8 +26,8 @@
 - **V2 正式采用**：不同原语各自拥有独立时间轨道，区间边界互不绑定。
 - **V1 retired**：schema 1、旧 `cli/annotate.py` 和共享 bout 原语格式不得再产生正式标注。
 - **V3 retired**：共享 segment/共享边界的 `annotation_tool.html` 不采用，不得导入正式 pilot。
-- retired 格式只可作为只读历史输入；迁移后也必须保留原文件，且迁移结果通过本契约全部硬门后
-  才能进入分析池。
+- retired 格式只可作为只读历史输入；任何档案转换都必须保留原文件，并固定降格为
+  train/legacy 用途，不得进入正式 pilot。本批 V2.2 恢复只处理 V2 独立轨道 legacy 文件。
 
 ## 2. 时间与独立轨道语义
 
@@ -39,17 +39,18 @@
   `end_exclusive - start`。
 - JSON 必须同时写 `analysis_window_semantics: "half_open"`。`[0, 0]`、空窗口及未显式
   确认的默认窗口均为硬错误。
-- JSON 必须写 `analysis_window_confirmed`。新建或迁移时默认 `false`；只有标注员依据试验
-  方案显式设置并确认窗口后才能改为 `true`。草稿可以保存，但 completed、统计导出和
-  agreement 均要求该值为 `true`。
+- JSON 必须写 `analysis_window_confirmed`。新标注由标注员显式确认；legacy 恢复由工具在绑定
+  实际视频、核对帧数并采用全长 `[0,n_frames)` 后作机器确认。草稿可以保存，但 completed、
+  统计导出和 agreement 均要求该值为 `true`。
 - 所有帧号基于原视频、从 0 开始；interval 必须满足
   `0 <= start <= end < n_frames`，窗口必须满足
   `0 <= start < end_exclusive <= n_frames`。
 - 统计、κ 和评分只使用 interval 与 `analysis_window` 的交集。窗口外标注可以保留，但不得
   进入正式统计。
 
-当前批次为 25 fps；正式 TST pilot 的 6 分钟计分窗必须恰为 9000 帧。窗口起点必须由试验
-方案或人工确认并写入，禁止从文件长度静默猜测。
+当前批次为 25 fps；正式 TST 窗口必须 **不少于 9,000 帧**。已标注的 9,661/11,470 帧
+历史时间轴完整保留，不要求裁剪或重标。若下游需要标准 360 秒结果，软件从已确认的全长窗口
+派生一个版本化的 9,000 帧子窗并记录选择方法；派生子窗不是新的人工标注。
 
 ### 2.2 独立轨道
 
@@ -79,7 +80,7 @@
 | `whole_body_swing` | 整体钟摆摆动 | bool | `false`, `true` | `false` |
 | `touch_wall` | 触壁/触悬挂杆 | bool | `false`, `true` | `false` |
 | `tail_grasp` | 前爪抓尾 | bool | `false`, `true` | `false` |
-| `axis_orient` | 身体轴朝向 | orient | `down`, `level`, `up` | 无，必须覆盖 |
+| `axis_orient` | 身体轴朝向 | orient | `down`, `level`, `up`, `unknown` | 无，必须覆盖 |
 | `visibility` | 可见性 | cat | `clear`, `occluded`, `uncertain` | 无，必须覆盖 |
 
 ### 3.2 FST
@@ -111,9 +112,9 @@ JSON 是权威记录。下例只展示字段结构；正式文件的 `tracks` �
 {
   "schema": 2,
   "format": "depressionplex.annotation.v2",
-  "tool_version": "2.1.0",
-  "primitive_set_version": "depressionplex-primitives-v2.0.0",
-  "rubric_version": "depressionplex-rubrics-v2.0.0",
+  "tool_version": "2.2.0",
+  "primitive_set_version": "depressionplex-primitives-v2.1.0",
+  "rubric_version": "depressionplex-rubrics-v2.1.0",
   "interval_semantics": "closed",
   "trial": "stable-trial-id",
   "assay": "TST",
@@ -150,15 +151,17 @@ JSON 是权威记录。下例只展示字段结构；正式文件的 `tracks` �
 
 硬约束：
 
-- `trial` 必须是稳定 ID，显示名称变化不得改变它；同一视频不同隔间由 `mouse` 区分。
-- `annotator_role` 在 V2.1 中固定为 `independent_rater`；`pool=train` 可以有预填或非盲练习，
-  但不得借此改写角色字段或进入正式 agreement。
+- `trial` 必须是稳定 ID，显示名称变化不得改变它；同一视频不同隔间由 `mouse` 区分。legacy
+  恢复可由工具根据 `video.sha256 + mouse` 确定性生成，不要求客户填写。
+- `annotator_role` 允许正式盲标的 `independent_rater` 与历史恢复的 `legacy_rater`。
+  `legacy_rater` 必须同时使用 `pool=train`、`blind=false`，不得进入正式 agreement/pilot。
 - `video.sha256` 必须由实际加载的视频字节计算；`n_frames` 和 `fps` 必须经解码器/ffprobe
   核对。仅凭浏览器 `duration * fps` 向下取整不具权威性。
 - `active_mice` 必须非空、去重、升序，只能使用当前四隔间布局中的整数 `1..4`；interval
   中的 `mouse` 必须属于它。
-- `analysis_window_confirmed` 必须为布尔值；新建/迁移默认 `false`。点击显式设窗并确认后
-  才能为 `true`；后续修改 fps、n_frames、视频身份或窗口任一端点必须自动重置为 `false`。
+- `analysis_window_confirmed` 必须为布尔值。新标注由界面显式确认；legacy 全长恢复在工具用
+  实际视频核对 fps/n_frames 并设置 `[0,n_frames)` 后可以为 `true`。后续修改 fps、n_frames、
+  视频身份或窗口任一端点必须自动重置为 `false`。
 - `assay` 只能为 `TST` 或 `FST`，`tracks` 必须与对应 profile 完全一致；禁止混入另一范式
   的轨道。
 - 时间为带时区的 ISO 8601。`completed=true` 时必须有 `completed_at`，且全部结构硬门通过；
@@ -197,7 +200,8 @@ created_at,updated_at,completed_at,metadata_repaired,provenance
    `completed=true`；缺一即拒绝。
 2. 两名标注员不得是规则设计者；不得接触软件事件、模型分数、对方文件或对方顺序。
 3. `assignment_id` 必须能关联到任务分配清单；两人独立顺序由分配清单审计。
-4. 训练池可以预填，但任何 `prefill=true` 或 `pool=train` 文件都不得计算正式 κ。
+4. 训练池可以预填；任何 `prefill=true`、`pool=train` 或 `legacy_rater` 文件都不得计算正式
+   κ。legacy 可运行明确标为 diagnostic 的非正式一致性报告。
 5. agreement 入口在计算前必须验证：schema/format/全部版本字段、video SHA-256、trial、assay、
    mouse、fps、n_frames、analysis window、`analysis_window_confirmed=true`、pool、blind、
    prefill、completed 全部匹配/合规。
@@ -215,8 +219,9 @@ created_at,updated_at,completed_at,metadata_repaired,provenance
 - `analysis_window` 为空、越界、仍为 `[0,0]`、没有 `half_open` 声明或
   `analysis_window_confirmed` 不是 `true`；
 - interval 非整数、越界、`start>end`、value 不在枚举内、mouse 未声明；
-- 同 mouse/track 重叠或重复；
-- `cat`/`orient` 在计分窗内有空洞；
+- canonical 输出中仍存在同 mouse/track 重叠或重复；legacy 恢复器可先将同值区间
+  deterministic union，不同值重叠必须人工裁决；
+- `cat`/`orient` 在计分窗内有空洞；legacy TST 的 `axis_orient` 空洞可显式填 `unknown`；
 - assay 与轨道 profile 不一致；
 - JSON、视频解码和声明的 fps/n_frames/时长互相矛盾。
 
@@ -248,8 +253,8 @@ pilot 必须满足以下全部条件：
 
 1. 两名独立盲标员；共同练习 1 例不计数。
 2. **12 个不重复 chamber-trial**，唯一键为 `(video.sha256, mouse)`，来自至少 3 个视频。
-3. 每例使用相同且已确认的 6 分钟计分窗；样本同时覆盖明显活动段和静止段，并包含至少
-   1 个已知 detached 例。
+3. 每例使用双方相同且已确认的 TST 窗口，长度不少于 9,000 帧；样本同时覆盖明显活动段和
+   静止段，并包含至少 1 个已知 detached 例。标准 360 秒指标由软件从该窗口派生。
 4. 12 例均有两份通过全部结构硬门的 canonical JSON；不得用 legacy CSV 或局部练习替代。
 5. 对 union prevalence `>=5%` 的常见原语，κ 必须 `>=0.80`。`level` 轨道的三级 κ 与
    active 二级 κ 均必须达标；任一未达标即暂停扩量，先修订 SOP 并重做受影响样本。
@@ -277,33 +282,36 @@ pilot 必须满足以下全部条件：
    }
    ```
 
-3. assay、mouse、计分窗、视频身份等语义字段只能由权威记录或人工确认补齐，禁止从文件名或
-   区间分布静默猜测。迁移文件必须以 `analysis_window_confirmed=false` 开始；不能确认的文件
-   进入 quarantine，不进入 pilot。
-4. 重叠/重复区间不得自动选择“第一条”；必须输出冲突清单，由标注员裁决。
-5. V1/V3 转换只能生成候选迁移文件，不能改变其 retired 身份；通过 V2 校验与人工确认后才
-   能晋级为正式数据。
+3. V2.2 的 legacy 恢复不要求客户补机器字段：`video` 由工具计算，`trial` 可由
+   `video.sha256 + mouse` 生成，`assignment_id` 由恢复任务生成；`mouse` 是隔间号，不是动物
+   档案。生成值必须与原始值在 provenance 中分开记录。
+4. legacy 恢复统一写 `pool=train`、`annotator_role=legacy_rater`、`blind=false`；可训练/诊断，
+   但不能计入正式盲标 pilot。未知盲法不得伪造为 true。
+5. 已标全长直接作为 `[0,n_frames)` 恢复，不裁剪。相同值的重复、重叠、相邻 interval 取并集；
+   TST `axis_orient` 空洞填 `unknown`；只有异值重叠才需要人工裁决。
+6. V1/V3 仍 retired；本批恢复只处理 V2 独立轨道 legacy 文件。详细政策见
+   [`LEGACY_RECOVERY_POLICY_V2_2.md`](LEGACY_RECOVERY_POLICY_V2_2.md)。
 
-## 9. 当前数据基线（2026-08-29）
+## 9. 当前数据基线（2026-08-30）
 
 以下是迁移起点，不是合规认证；逐文件证据与处置见
 `PILOT_MIGRATION_AUDIT_2026-08-30.md`：
 
 - `悬尾/` 有 7 个 TST 视频、4 隔间，共 28 个 chamber-trial。
-- 目前只有 1 个完整双标 TST chamber-trial，可用于诊断但不满足 12 例 pilot；另有 1 个
-  单人 V2 CSV。
+- 本批 TST 恢复源是 1 个 CSV + 2 个 JSON：1 个单标和 1 对 legacy 双标。另 2 个 JSON
+  文件内容自报 FST，只是错放目录并从 TST 隔离。
 - 当前双标按旧工具“非 none 即 active”折叠后的 κ：头颈 0.663、前肢 0.714、后肢
   0.693、躯干 0.669、整体摆动 0.530，全部低于 0.80。三级运动 κ 更低，说明
   `subtle/marked` 边界必须先校准。
-- 现有 schema 2 JSON 的 `analysis_window` 为 `[0,0]`；现有 HTML 加载视频时更新文档值但
-  未同步运行态起止变量，保存时会写回 `[0,0]`。这些文件在窗口被权威修复前一律不合规。
-- 已发现完全重复和同轨重叠 interval；旧工具只警告、不阻止完成。
+- 现有 schema 2 JSON 的 `analysis_window=[0,0]` 是旧工具状态 bug。V2.2 恢复器绑定实际视频后
+  直接保留 9,661/11,470 帧全长，不要求同事裁剪或重标。
+- TST 文件中的完全重复/重叠均为同值，可自动 union；TST axis 空洞填 `unknown`。两份 FST
+  中的异值 `wall_contact` 冲突留在隔离队列，不阻塞 TST 恢复。
 - 现有单人 7 列 CSV 的 interval 结构可读，但缺少 assay、video SHA-256、mouse、计分窗和
-  版本等身份字段，必须按第 8 节迁移。
+  版本等身份字段，由 V2.2 恢复任务生成并记录 provenance，不要求客户手填。
 - `悬尾/` 中两份自报 FST、只标约 8 秒的 `10mg 2周` JSON 属错目录/练习数据，不计入
   TST pilot。
 
-因此当前状态是 **P0 契约、权威工具、机器校验/importer/agreement 与 rubric 派生实现已收口，
-存量数据仍待显式迁移；P1 契约合规正式样本为 0/12（另有 1 对 legacy 双标可作诊断）**。
-κ 达标前禁止扩大正式标注规模；这不妨碍继续完善 trial 级输出骨架，但所有模型阈值仍须保持
-provisional。
+因此当前状态是 **V2.2 零返工恢复政策已定：3/3 TST 源可在不重标的前提下恢复为
+train/legacy 数据；正式盲标 pilot 仍独立为 0/12**。恢复不伪造 gold truth，也不阻塞继续完善
+trial 级输出；所有模型阈值仍须保持 provisional。

@@ -32,6 +32,7 @@ from .rubrics import (
     rubric_names,
     summarize_frame_results,
 )
+from .recovery import LegacyRecoveryError, recover_legacy_csv, recover_legacy_json
 
 __all__ = [
     "ANALYSIS_WINDOW_SEMANTICS",
@@ -57,4 +58,7 @@ __all__ = [
     "derive_rubric_report",
     "rubric_names",
     "summarize_frame_results",
+    "LegacyRecoveryError",
+    "recover_legacy_csv",
+    "recover_legacy_json",
 ]
