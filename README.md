@@ -121,6 +121,12 @@ V3 共享 segment 均已 retired。权威浏览器工具为
 `docs/LEGACY_RECOVERY_POLICY_V2_2.md`。
 本批 3 份已恢复的 TST JSON、provenance、运行 manifest 与非正式一致性报告保存在
 `/Users/dylanchen2000/Work/heavy/depression/recovered_annotations_v2.2/tst`。
+同一目录下的 `disagreement_review_v1/` 是首轮双标分歧复核包：11 个 mouse1 短片
+共 66.00 秒，覆盖五个优先 SOP 轨道的 11/11 个实际分歧**无向**标签对；这不等于
+对全部 17 个 A→B 方向逐一验收。同事只需填写 `review_decisions.csv`，其中
+`boundary_reviewable=no` 的 4 行只裁语义/强度，不裁起止边界；不改原标注、不重看
+11,470 帧。该包仍为 legacy 诊断，
+`formal=false / gate=N/A`。
 
 V2 机器校验入口：
 
@@ -134,7 +140,16 @@ python3 -m depressionplex.cli.annotation_v2 recover-json legacy.json recovered.j
   --metadata generated-metadata.json --provenance generated-provenance.json
 python3 -m depressionplex.cli.annotation_v2 agree recovered-a.json recovered-b.json \
   --mouse 1 --diagnostic
+python3 -m depressionplex.cli.annotation_review \
+  --annotation-a recovered-a.json --annotation-b recovered-b.json \
+  --agreement-report diagnostic-agreement.json --video source.mp4 \
+  --output-dir disagreement_review_v1
 ```
+
+`annotation_review` 会生成完整分歧清单、首轮分层抽样队列、逐帧精确 MP4、可填写裁决表、
+已执行分析笔记本和 SQLite 快照。需要自包含 `report.html` 时，再传
+`--report-builder /path/to/deliver_portable_artifact.mjs`；报告输入始终是同包内 canonical
+`artifact.json`，不是另写一套 HTML。
 
 完整规划的源文档保留在工作区根目录
 `DepressionPlex_算法模型规划与研发路线图_v0.5.docx`。

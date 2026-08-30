@@ -241,17 +241,28 @@ Noise Thresh / Min Length 会把它滤掉。故门判 p90，max 仅作诊断量�
 4. **诊断与正式 pilot 独立记账**：legacy 双标诊断报告已生成，并固定为
    `formal=false / gate=N/A`。恢复数据可训练和诊断，但不计入 12 例正式盲标 pilot；
    正式计数仍为 0/12。
+5. **首轮 SOP 分歧复核包已生成**：逐帧核对发现任一轨道有分歧的帧为
+   8,226/11,470（71.72%），主要是 `none/subtle/marked` 档位口径的系统差异，不能靠
+   全量改边界解决。已按五个优先轨道的 11 个实际无向标签对分层，生成 11 个 mouse1
+   短片、共 66.00 秒（比完整视频少 85.61%）；axis 的 211 帧历史 `unknown` 已从
+   抽样与短片窗口排除。11/11 不代表全部 17 个 A→B 方向逐一验收；4 个长分歧只截
+   中段，已标为只裁语义/强度、完整边界留第二轮。
+   复核包、可填写裁决表、已执行 notebook 与 QA 通过的自包含报告在
+   `/Users/dylanchen2000/Work/heavy/depression/recovered_annotations_v2.2/tst/disagreement_review_v1`。
 
 ## 下一步（按优先级）
 
-1. 用已恢复双标中的诊断差异定位 SOP 分歧，做 1 例新的共同练习（不计数），
-   对齐 `none/subtle/marked`、`trunk_deforming` 与
-   `whole_body_swing` 边界。
-2. 完成两名独立标注员、至少 3 个视频、12 个唯一 chamber-trial 的盲标 pilot；常见原语
+1. 两位同事按 `review_queue.csv` 共同观看首轮 11 个短片，只填写
+   `review_decisions.csv` 的共识标签与 SOP 例句；仅对 `boundary_reviewable=yes` 的 7 行
+   填边界裁决，预填 N/A 的 4 行不改。原标注保持只读。若 11 个无向标签对仍有未定规则，
+   再用完整 652 段清单自动扩第二轮，不返工全片。
+2. 把共同裁决写入 SOP 正例/反例库，随后做 1 例新的共同练习（不计数），确认
+   `none/subtle/marked`、`trunk_deforming` 与 `whole_body_swing` 已对齐。
+3. 完成两名独立标注员、至少 3 个视频、12 个唯一 chamber-trial 的盲标 pilot；常见原语
    κ ≥ 0.80 后才扩量。
-3. 把现有 rules + bouts 串成 trial 级 `result.json/review.json`；需要标准 360 秒时从全长
+4. 把现有 rules + bouts 串成 trial 级 `result.json/review.json`；需要标准 360 秒时从全长
    annotation 派生版本化子窗，人工真值到位前所有阈值保持 provisional。
-4. `flow.py` 继续降优先级；只在有纹理素材或 FST 水下场景出现明确需要时再评估。
+5. `flow.py` 继续降优先级；只在有纹理素材或 FST 水下场景出现明确需要时再评估。
 
 ## 阻塞
 
