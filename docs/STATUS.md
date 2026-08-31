@@ -259,23 +259,23 @@ Noise Thresh / Min Length 会把它滤掉。故门判 p90，max 仅作诊断量�
    25 fps、312×798 与 SHA 均验收通过。输出在
    `/Users/dylanchen2000/Work/heavy/depression/recovered_annotations_v2.2/tst/boundary_review_round2_v1`。
    当前共同裁决口径与例库已整理为 `docs/SOP_TST_共同裁决校准_v0.1.md`。
-8. **备注栏补充结果已规范化**：C003/C008/C011 因边界栏不可填写，把多个阳性区间写在
-   备注栏；已逐段解析到 `adjudicated_intervals_v1.json` 和最终工作簿的
-   `规范化区间（机器）` 页，同事无需重新抄写。C010 已确认完整分歧段
-   `[7241,7619)` 为 false。C003/C008/C011 的区间起止均恰好贴住首轮短片边缘，故当前
-   状态保守记为 `partial_outer_boundary_unconfirmed`，避免把截断边界误当完整真值。
+8. **备注栏补充结果已规范化并关闭**：C003/C008/C011 因边界栏不可填写，把多个阳性区间
+   写在备注栏；已逐段解析到 `adjudicated_intervals_v1.json` 和最终工作簿的
+   `规范化区间（机器）` 页。同事确认这些区间是在原标注页面对原视频逐帧判断所得，
+   帧位置来自标注页面而非视频画面叠字，因此 7 条区间记录均升级为
+   `original_annotation_page_full_video / final`。C010 已确认完整分歧段
+   `[7241,7619)` 为 false。C003/C008/C010/C011 均已关闭，无需重新抄写或重新观看。
 
 ## 下一步（按优先级）
 
-1. 无需重新填写任何表格。只需确认 C003/C008/C011 备注中的区间是否来自扩展片完整复核：
-   若是，回复“确认为完整边界”即可升级；若不是，只看扩展片两端上下文补外边界，不重看全片。
-2. 回收第二轮表后锁定 SOP v0.2，随后做 1 例新的共同练习（不计数），确认
+1. 用最终 V2 工具做 1 例新的共同练习（不计数）：两人先独立标注、互不可见、无预填，
+   完成后再共同对照，确认
    `none/subtle/marked`、`trunk_deforming` 与 `whole_body_swing` 已对齐。
-3. 完成两名独立标注员、至少 3 个视频、12 个唯一 chamber-trial 的盲标 pilot；常见原语
+2. 完成两名独立标注员、至少 3 个视频、12 个唯一 chamber-trial 的盲标 pilot；常见原语
    κ ≥ 0.80 后才扩量。
-4. 把现有 rules + bouts 串成 trial 级 `result.json/review.json`；需要标准 360 秒时从全长
+3. 把现有 rules + bouts 串成 trial 级 `result.json/review.json`；需要标准 360 秒时从全长
    annotation 派生版本化子窗，人工真值到位前所有阈值保持 provisional。
-5. `flow.py` 继续降优先级；只在有纹理素材或 FST 水下场景出现明确需要时再评估。
+4. `flow.py` 继续降优先级；只在有纹理素材或 FST 水下场景出现明确需要时再评估。
 
 ## 阻塞
 
