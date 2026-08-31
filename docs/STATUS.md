@@ -249,14 +249,23 @@ Noise Thresh / Min Length 会把它滤掉。故门判 p90，max 仅作诊断量�
    中段，已标为只裁语义/强度、完整边界留第二轮。
    复核包、可填写裁决表、已执行 notebook 与 QA 通过的自包含报告在
    `/Users/dylanchen2000/Work/heavy/depression/recovered_annotations_v2.2/tst/disagreement_review_v1`。
+6. **首轮共同裁决已回收（2026-08-31）**：11/11 共识标签、7/7 可裁边界结论、
+   4/4 预留第二轮 N/A、11/11 SOP 例句均已填写并同步到 canonical
+   `review_decisions.csv`。同事回传工作簿的中文主表完整，但机器回填页出现 `#NAME?`；
+   已生成不覆盖原件的修复副本并通过 0 个公式错误验收。C002 的正式边界写成
+   `[1183,1208)`，备注却分别描述 1183–1190 轻微与 1202–1208 明显，需一句话确认
+   是连续区间还是拆段，不需要返工全片。
+7. **第二轮完整边界包已生成**：C003/C008/C010/C011 共 4 个扩展片段、63.60 秒，
+   每段覆盖完整分歧范围并前后各加 50 帧，右上角烧录原视频绝对帧号；逐片帧数、
+   25 fps、312×798 与 SHA 均验收通过。输出在
+   `/Users/dylanchen2000/Work/heavy/depression/recovered_annotations_v2.2/tst/boundary_review_round2_v1`。
+   当前共同裁决口径与例库已整理为 `docs/SOP_TST_共同裁决校准_v0.1.md`。
 
 ## 下一步（按优先级）
 
-1. 两位同事按 `review_queue.csv` 共同观看首轮 11 个短片，只填写
-   `review_decisions.csv` 的共识标签与 SOP 例句；仅对 `boundary_reviewable=yes` 的 7 行
-   填边界裁决，预填 N/A 的 4 行不改。原标注保持只读。若 11 个无向标签对仍有未定规则，
-   再用完整 652 段清单自动扩第二轮，不返工全片。
-2. 把共同裁决写入 SOP 正例/反例库，随后做 1 例新的共同练习（不计数），确认
+1. 两位同事只看第二轮包中的 4 个扩展片段，补齐 C003/C008/C010/C011 完整边界；
+   同时针对 C002 回复“连续区间”或“拆分后的多个半开区间”。不改原 JSON，不重看全片。
+2. 回收第二轮表后锁定 SOP v0.2，随后做 1 例新的共同练习（不计数），确认
    `none/subtle/marked`、`trunk_deforming` 与 `whole_body_swing` 已对齐。
 3. 完成两名独立标注员、至少 3 个视频、12 个唯一 chamber-trial 的盲标 pilot；常见原语
    κ ≥ 0.80 后才扩量。

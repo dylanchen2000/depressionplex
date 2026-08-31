@@ -128,6 +128,12 @@ V3 共享 segment 均已 retired。权威浏览器工具为
 11,470 帧。该包仍为 legacy 诊断，
 `formal=false / gate=N/A`。
 
+首轮共同裁决已于 2026-08-31 回收。当前校准口径与 11 个例子见
+`docs/SOP_TST_共同裁决校准_v0.1.md`。其中 C003、C008、C010、C011 的完整边界复核包在
+`/Users/dylanchen2000/Work/heavy/depression/recovered_annotations_v2.2/tst/boundary_review_round2_v1`：
+共 4 个片段、63.60 秒，前后各带 50 帧上下文，右上角显示原视频绝对帧号；同事无需
+重看整段视频。C002 另需确认一次“连续区间还是拆成轻微/明显两个区间”。
+
 V2 机器校验入口：
 
 ```bash
