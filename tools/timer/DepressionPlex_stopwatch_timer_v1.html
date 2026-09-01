@@ -14,6 +14,11 @@
     "重评×N"，审计 JSON 保留第一轮完整答案与重做发生位置。SOP 第四节
     不推荐整段重来（向印象靠拢），故此功能限"确认记录错误"时使用，
     且只能在未开始观看当前试次前发起。
+  - v1.3：可见「暂停/继续」按钮（P 键等效；区间模型下暂停不加秒）；
+    「导出当前进度」随时可导出已完成试次的 CSV+审计（文件名带
+    _partial<k>of<n> 标记，只作中途保存，最终分析以全部完成后的导出为准）；
+    审计为每场记录 holds（每次按住的起止秒），供事后量化按下/松手
+    反应延迟——刻意不做任何自动裁剪，不发明修正常数（§7）。
   - 本文件不含任何"查看软件结果"的入口：清单 schema 里没有结果列，页面上没有。
 
   威胁模型（诚实声明）：本工具防的是"评分过程中读数反馈造成的偏差"，
@@ -80,7 +85,11 @@
      <button class="rate" id="rate025" type="button">0.25×</button>
      <span class="hint">慢放只是放慢画面，秒数按视频时间计，不会虚增。</span></p>
   <p><button id="beginBtn" class="primary" type="button">开始本试次播放</button>
-     <button id="redoBtn" type="button">重做已完成试次…</button></p>
+     <button id="pauseBtn" type="button" disabled>暂停 (P)</button>
+     <button id="redoBtn" type="button">重做已完成试次…</button>
+     <button id="exportBtn" type="button">导出当前进度</button></p>
+  <p class="hint">「导出当前进度」随时保存已评完的试次（文件名标 partial），中途休息、换机续评都靠它；
+     全部评完后的最终导出才是送分析的版本。</p>
   <p id="redoPanel" hidden>选择要重做的试次（仅限确认之前记录有误；第一轮答案会留痕进审计）：
      <select id="redoSel"></select>
      <button id="redoGo" type="button">确认重做</button>
@@ -128,12 +137,21 @@ function mobileAccumulator() {
     }
     ivals = m;
   }
+  const holdLog = [];   // 审计用：每次按住的起止（视频秒）。反应延迟分析靠它，不用于任何自动修正
+  let holdFrom = null;
   return {
-    startHold() { holding = true; },
-    endHold() { holding = false; },
+    startHold(t) { holding = true; holdFrom = t; },
+    endHold(t) {
+      if (holding) {
+        if (holdFrom !== null && t > holdFrom) holdLog.push([Math.round(holdFrom * 100) / 100, Math.round(t * 100) / 100]);
+        holding = false; holdFrom = null;
+      }
+    },
     get holding() { return holding; },
     add(a, b) { merge(a, b); },
     get value() { let t = 0; for (const [a, b] of ivals) t += b - a; return t; },
+    get holds() { return holdLog.slice(); },
+    get bursts() { return holdLog.length; },
   };
 }
 
@@ -190,6 +208,12 @@ document.addEventListener("DOMContentLoaded", () => {
   $("redoBtn").onclick = openRedoPanel;
   $("redoCancel").onclick = () => { $("redoPanel").hidden = true; };
   $("redoGo").onclick = startRedo;
+  $("exportBtn").onclick = () => exportSnapshot(false);
+  $("pauseBtn").onclick = () => {
+    const v = $("vid");
+    if (!state.started) return;
+    v.paused ? v.play() : v.pause();
+  };
 });
 
 function setRate(r) {
@@ -318,6 +342,8 @@ function loadTrial(t) {
   v.preload = "auto";
   /* 换源后浏览器会重置倍速：元数据就绪时重新应用当前速率 */
   v.onloadedmetadata = () => { v.playbackRate = state.rate; };
+  v.onplay = () => { $("pauseBtn").disabled = !state.started; $("pauseBtn").textContent = "暂停 (P)"; };
+  v.onpause = () => { $("pauseBtn").textContent = "继续 (P)"; };
   v.onended = onVideoEnded;
   v.ontimeupdate = () => {
     const cur = v.currentTime, dur = v.duration || 1;
@@ -345,7 +371,8 @@ function bindKeys() {
     if (e.code === "Space") {
       e.preventDefault();
       if (state.started && !e.repeat && !state.acc.holding) {
-        state.acc.startHold();
+        if (v.paused) v.play();   // 暂停中按键视为恢复评分：空格是唯一的"在动"信号源
+        state.acc.startHold(v.currentTime);
         v.classList.add("hold");
       }
     } else if (e.code === "ArrowLeft" || e.code === "KeyJ") {
@@ -366,7 +393,7 @@ function bindKeys() {
       const v = $("vid");
       if (state.acc && state.acc.holding) {
         if (state.started && v.currentTime > (state.lastTime || 0)) state.acc.add(state.lastTime, v.currentTime);
-        state.acc.endHold();
+        state.acc.endHold(v.currentTime);
       }
       v.classList.remove("hold");
     }
@@ -375,9 +402,11 @@ function bindKeys() {
 
 function onVideoEnded() {
   const v = $("vid");
-  if (state.acc.holding) state.acc.add(state.lastTime || 0, v.duration || state.maxT);
-  state.acc.endHold();
+  const dur = v.duration || state.maxT;
+  if (state.acc.holding) state.acc.add(state.lastTime || 0, dur);
+  state.acc.endHold(dur);
   state.started = false;
+  $("pauseBtn").disabled = true;
   v.classList.remove("hold");
   $("beginBtn").hidden = true;
   $("quiz").hidden = false;
@@ -399,8 +428,10 @@ function nextTrial() {
     const d = state.done[state.redoIdx];
     if (!d.first_pass) {
       d.first_pass = { mobile_seconds: d.mobile_seconds, tail_climbing: d.tail_climbing,
-                       unscoreable: d.unscoreable, note: d.note, scored_at: d.scored_at };
+                       unscoreable: d.unscoreable, note: d.note, scored_at: d.scored_at,
+                       holds: d.holds, playback_rate: d.playback_rate };
     }
+    d.holds = state.acc.holds;
     d.mobile_seconds = mobile; d.tail_climbing = $("qTail").checked;
     d.unscoreable = unsc; d.note = note;
     d.scored_at = new Date().toISOString().slice(0, 10);
@@ -420,6 +451,7 @@ function nextTrial() {
     unscoreable: unsc,
     note,
     playback_rate: state.rate,
+    holds: state.acc.holds,   // 审计侧记录，CSV 十列 schema 不变
     presentation_order: state.idx + 1,
     scored_at: new Date().toISOString().slice(0, 10),
   });
@@ -453,16 +485,23 @@ function download(name, text, mime) {
   document.body.appendChild(a); a.click(); a.remove();
 }
 
-function finishSession() {
-  $("scoring").hidden = true; $("finish").hidden = false;
+function exportSnapshot(final) {
   const date = new Date().toISOString().slice(0, 10);
-  download("human_scores_" + state.scorer + "_" + date + ".csv", csvFromDone(), "text/csv");
-  download("timer_audit_" + state.scorer + "_" + date + ".json", JSON.stringify({
+  const n = state.done.length, m = state.order.length;
+  const suffix = final ? "" : "_partial" + n + "of" + m;
+  download("human_scores_" + state.scorer + "_" + date + suffix + ".csv", csvFromDone(), "text/csv");
+  download("timer_audit_" + state.scorer + "_" + date + suffix + ".json", JSON.stringify({
     format: "depressionplex.stopwatch-audit.v1",
+    partial: !final, done_count: n, total_trials: m,
     scorer_id: state.scorer, seed: state.seed,
     delivered_order: state.order.map(o => o.trial_id),
-    tool_version: "v1.2", finished_at: new Date().toISOString(), records: state.done,
+    tool_version: "v1.3", exported_at: new Date().toISOString(), records: state.done,
   }, null, 2), "application/json");
+}
+
+function finishSession() {
+  $("scoring").hidden = true; $("finish").hidden = false;
+  exportSnapshot(true);
   try { localStorage.removeItem(LS()); } catch (e) {}
   $("finishMsg").textContent = "全部 " + state.done.length + " 个试次已评分，CSV 与审计文件已自动下载。"
     + "请原样交回两份文件，不要手工改动 CSV（改动会被 §2.1 校验拒收）。";
