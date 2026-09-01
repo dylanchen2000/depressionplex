@@ -7,6 +7,9 @@
     （金标准 Can et al. 2012 亦建议遮住秒表读数——看着累计时间会引入判断偏差）。
   - 视频播完自动落盘 §2.1 CSV（含 presentation_order），消灭转抄错误。
   - 每位评分员的试次顺序由本工具用种子随机生成并记录在审计文件里。
+  - 慢放（0.5× / 0.25×）是反应时间补救：秒表累计一律按「视频时间」折算
+    （墙上时长 × 倍速），慢放不会虚增"在动秒数"；每场使用的倍速自动
+    写入 CSV 备注列与审计 JSON。（v1.1；SOP/SPEC 对播放速度无规定。）
   - 本文件不含任何"查看软件结果"的入口：清单 schema 里没有结果列，页面上没有。
 
   威胁模型（诚实声明）：本工具防的是"评分过程中读数反馈造成的偏差"，
@@ -33,6 +36,7 @@
   button, input[type=text], input[type=number] { font: inherit; padding: 6px 12px; border-radius: 6px;
           border: 1px solid #9996; background: transparent; color: inherit; }
   button.primary { background: #4a86e8; color: #fff; border: none; }
+  button.rate.active { background: #4a86e8; color: #fff; border-color: #4a86e8; }
   .hint { opacity: .7; font-size: 13px; }
   .err { color: #c0392b; white-space: pre-wrap; }
   fieldset { border: 1px solid #9995; border-radius: 8px; margin: 12px 0; }
@@ -65,6 +69,11 @@
   <div class="bar-shell"><div class="bar" id="prog"></div></div>
   <video id="vid"></video>
   <p class="hint">按住 <b>空格</b> = 在动 · 松开 = 停。播放中不可拖动/快进/回看整段（防读数与重评偏差）。</p>
+  <p>播放速度
+     <button class="rate" id="rate1" type="button">1×</button>
+     <button class="rate" id="rate05" type="button">0.5×</button>
+     <button class="rate" id="rate025" type="button">0.25×</button>
+     <span class="hint">秒数按<b>视频时间</b>折算（0.25× 下按住 4 真实秒 = 计 1 秒），慢放不虚增；换倍速请松开空格后再点。</span></p>
   <p><button id="beginBtn" class="primary" type="button">开始本试次播放</button></p>
 
   <fieldset id="quiz" hidden>
@@ -88,13 +97,16 @@
  * 不写入 DOM、不写 innerText/textContent、不进 localStorage 的任何镜像显示。
  * 唯一出口是最终导出的 CSV 数值列。
  * ===================================================================== */
+/* 慢放正确性关键：hold() 记住按下时的倍速，release 按 视频时间=墙上时间×rate 折算，
+ * 否则 0.25× 慢放会把"在动秒数"虚增 4 倍，人工 vs 软件直接失真。 */
 function mobileAccumulator() {
-  let total = 0, holdStart = null;
+  let total = 0, holdStart = null, holdRate = 1;
   return {
-    hold()   { if (holdStart === null) holdStart = performance.now(); },
+    hold(now, rate) { if (holdStart === null) { holdStart = now; holdRate = rate || 1; } },
     release(now) {
-      if (holdStart !== null) { total += (now - holdStart) / 1000; holdStart = null; }
+      if (holdStart !== null) { total += (now - holdStart) / 1000 * holdRate; holdStart = null; }
     },
+    get holding() { return holdStart !== null; },
     /** 视频结束等场景：闭合未松手的按住 */
     closeAt(now) { this.release(now); },
     get value() { return total; },
@@ -120,7 +132,7 @@ function shuffled(arr, rand) {
 }
 
 const $ = (id) => document.getElementById(id);
-const state = { scorer: "", seed: 0, order: [], idx: 0, done: [], files: null, acc: null };
+const state = { scorer: "", seed: 0, order: [], idx: 0, done: [], files: null, acc: null, rate: 1 };
 const TRIAL_ID_RE = /^(.+)-ch([1-9][0-9]*)$/;
 
 /* localStorage 续评：完成即锁定，不可重评（重评=向印象靠拢，SOP 明令禁止） */
@@ -143,9 +155,24 @@ document.addEventListener("DOMContentLoaded", () => {
   $("copySeed").onclick = () => navigator.clipboard.writeText($("seed").value);
   $("startBtn").onclick = onStart;
   $("resumeBtn").onclick = onResume;
-  $("beginBtn").onclick = () => { $("vid").play(); };
+  $("beginBtn").onclick = () => { state.started = true; $("vid").play(); };
   $("nextBtn").onclick = nextTrial;
+  for (const [id, r] of [["rate1", 1], ["rate05", 0.5], ["rate025", 0.25]]) {
+    $(id).onclick = () => setRate(r);
+  }
+  setRate(1);
 });
+
+function setRate(r) {
+  /* 换速瞬间闭合当前按住（按旧倍速折算），绝不让一段跨两种倍速 */
+  if (state.acc && state.acc.holding) state.acc.release(performance.now());
+  state.rate = r;
+  const v = $("vid");
+  v.playbackRate = r; v.defaultPlaybackRate = r;
+  for (const [id, x] of [["rate1", 1], ["rate05", 0.5], ["rate025", 0.25]]) {
+    $(id).classList.toggle("active", x === r);
+  }
+}
 
 function parseManifest(text) {
   const lines = text.replace(/^﻿/, "").split(/\r?\n/).filter(l => l.trim());
@@ -230,6 +257,8 @@ function loadTrial() {
   v.controls = false;
   v.src = URL.createObjectURL(t.file);
   v.preload = "auto";
+  /* 换源后浏览器会重置倍速：元数据就绪时重新应用当前速率 */
+  v.onloadedmetadata = () => { v.playbackRate = state.rate; };
   v.onended = onVideoEnded;
   v.ontimeupdate = () => {
     const dur = v.duration || 1;
@@ -248,7 +277,7 @@ function bindKeys() {
     if (e.code === "Space") {
       e.preventDefault();
       if (state.started && !e.repeat) {
-        state.acc.hold();
+        state.acc.hold(performance.now(), state.rate);
         $("vid").classList.add("hold");
       }
     } else { e.preventDefault(); }
@@ -263,6 +292,7 @@ function bindKeys() {
 }
 
 function onVideoEnded() {
+  state.started = false;
   state.acc.closeAt(performance.now());   // 闭合未松手的按住
   $("beginBtn").hidden = true;
   $("quiz").hidden = false;
@@ -276,12 +306,15 @@ function nextTrial() {
   if (mobile !== null && (mobile < 0 || mobile > 360 + 0.5)) {
     alert("内部错误：秒数越界，请联系开发"); return;
   }
+  const userNote = $("qNote").value.trim();
   state.done.push({
     trial_id: t.trial_id,
     mobile_seconds: mobile,
     tail_climbing: $("qTail").checked,
     unscoreable: unsc,
-    note: $("qNote").value.trim(),
+    // 倍速≠1 时自动写入备注：分析侧 §5.6/复核可见，审计 JSON 另有 playback_rate 字段
+    note: state.rate !== 1 ? (userNote ? userNote + "; " : "") + "慢放" + state.rate + "x" : userNote,
+    playback_rate: state.rate,
     presentation_order: state.idx + 1,
     scored_at: new Date().toISOString().slice(0, 10),
   });
@@ -321,7 +354,7 @@ function finishSession() {
     format: "depressionplex.stopwatch-audit.v1",
     scorer_id: state.scorer, seed: state.seed,
     delivered_order: state.order.map(o => o.trial_id),
-    tool_version: "v1", finished_at: new Date().toISOString(), records: state.done,
+    tool_version: "v1.1", finished_at: new Date().toISOString(), records: state.done,
   }, null, 2), "application/json");
   try { localStorage.removeItem(LS()); } catch (e) {}
   $("finishMsg").textContent = "全部 " + state.done.length + " 个试次已评分，CSV 与审计文件已自动下载。"
