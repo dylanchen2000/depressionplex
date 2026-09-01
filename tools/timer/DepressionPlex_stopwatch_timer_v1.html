@@ -1,0 +1,332 @@
+<!doctype html>
+<!--
+  DepressionPlex · TST 人工评分计时工具 v1（SPEC_人工比对与验收_v1 §8）
+
+  规矩与它为什么存在：
+  - 评分员「在动就按住键、松开即停」；界面只显示进度条，永不显示累计秒数
+    （金标准 Can et al. 2012 亦建议遮住秒表读数——看着累计时间会引入判断偏差）。
+  - 视频播完自动落盘 §2.1 CSV（含 presentation_order），消灭转抄错误。
+  - 每位评分员的试次顺序由本工具用种子随机生成并记录在审计文件里。
+  - 本文件不含任何"查看软件结果"的入口：清单 schema 里没有结果列，页面上没有。
+
+  威胁模型（诚实声明）：本工具防的是"评分过程中读数反馈造成的偏差"，
+  不防蓄意作弊——累计秒数只存在于 JS 闭包（不渲染进 DOM、不进任何可视元素），
+  但开发者工具理论上可自查。这一层由流程控制（独立评分、禁止交流）与
+  分析侧 §2.1 校验（含预填痕迹拒收）兜底，不宣称密码学级防护。
+
+  离线单文件，file:// 直接打开，零网络、零依赖。
+-->
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TST 人工计时 v1</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font-family: -apple-system, "PingFang SC", sans-serif; margin: 0 auto;
+         max-width: 860px; padding: 24px; line-height: 1.6; }
+  h1 { font-size: 20px; }
+  .bar-shell { height: 14px; background: #8884; border-radius: 7px; overflow: hidden; margin: 10px 0; }
+  .bar { height: 100%; width: 0%; background: #4a86e8; }
+  .hold { outline: 3px solid #e8a13a; }
+  video { width: 100%; background: #000; border-radius: 8px; }
+  button, input[type=text], input[type=number] { font: inherit; padding: 6px 12px; border-radius: 6px;
+          border: 1px solid #9996; background: transparent; color: inherit; }
+  button.primary { background: #4a86e8; color: #fff; border: none; }
+  .hint { opacity: .7; font-size: 13px; }
+  .err { color: #c0392b; white-space: pre-wrap; }
+  fieldset { border: 1px solid #9995; border-radius: 8px; margin: 12px 0; }
+  #trialTag { font-weight: 600; }
+  .done-trial { opacity: .55; }
+</style>
+</head>
+<body>
+<h1>TST 人工计时（秒表法）· 只评"在动"，看不见任何软件结果</h1>
+
+<!-- ============ 设置 ============ -->
+<section id="setup">
+  <p class="hint">依据 SOP_悬尾实验人工评分_v1：全程 6 分钟都计分；在动按<b>空格</b>（按住=在动，松开=停）；
+     拿不准按"不算在动"。开始前先做两人共同校准，练习视频不在此工具计数。</p>
+  <p>评分员编号 <input type="text" id="scorerId" placeholder="如 张三 或 R1"></p>
+  <p>试次清单 CSV（列头 <code>trial_id,video_filename</code>）
+     <input type="file" id="manifestFile" accept=".csv,text/csv"></p>
+  <p>视频文件（全部一起选） <input type="file" id="videoFiles" accept="video/*" multiple></p>
+  <p>随机种子 <input type="number" id="seed" style="width:120px">
+     <button id="copySeed" type="button">复制种子</button>
+     <span class="hint">顺序按此种子随机生成并记入审计文件</span></p>
+  <p><button class="primary" id="startBtn" type="button">开始评分</button></p>
+  <p class="err" id="setupErr"></p>
+  <p id="resumeBox" hidden><button id="resumeBtn" type="button">继续上次未完成的评分（同一评分员）</button></p>
+</section>
+
+<!-- ============ 计分 ============ -->
+<section id="scoring" hidden>
+  <p><span id="trialTag"></span> · 进度 <span id="trialCount"></span></p>
+  <div class="bar-shell"><div class="bar" id="prog"></div></div>
+  <video id="vid"></video>
+  <p class="hint">按住 <b>空格</b> = 在动 · 松开 = 停。播放中不可拖动/快进/回看整段（防读数与重评偏差）。</p>
+  <p><button id="beginBtn" class="primary" type="button">开始本试次播放</button></p>
+
+  <fieldset id="quiz" hidden>
+    <legend>本试次收尾必答</legend>
+    <label><input type="checkbox" id="qTail"> 出现过爬自己的尾巴</label><br>
+    <label><input type="checkbox" id="qUnsc"> 无法评分（脱落/遮挡等）</label><br>
+    <label>备注 <input type="text" id="qNote" style="width:60%" placeholder="如：第90秒胶带脱落"></label><br>
+    <button id="nextBtn" class="primary" type="button">下一个试次</button>
+  </fieldset>
+</section>
+
+<!-- ============ 完成 ============ -->
+<section id="finish" hidden>
+  <p id="finishMsg"></p>
+</section>
+
+<script>
+"use strict";
+/* =====================================================================
+ * 累计"在动"秒数只活在 mobileAccumulator() 闭包里：
+ * 不写入 DOM、不写 innerText/textContent、不进 localStorage 的任何镜像显示。
+ * 唯一出口是最终导出的 CSV 数值列。
+ * ===================================================================== */
+function mobileAccumulator() {
+  let total = 0, holdStart = null;
+  return {
+    hold()   { if (holdStart === null) holdStart = performance.now(); },
+    release(now) {
+      if (holdStart !== null) { total += (now - holdStart) / 1000; holdStart = null; }
+    },
+    /** 视频结束等场景：闭合未松手的按住 */
+    closeAt(now) { this.release(now); },
+    get value() { return total; },
+  };
+}
+
+/* 种子随机（mulberry32）+ Fisher-Yates：顺序可复现、可审计 */
+function mulberry32(a) {
+  return function () {
+    a |= 0; a = (a + 0x6D2B79F5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+function shuffled(arr, rand) {
+  const a = arr.slice();
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(rand() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
+
+const $ = (id) => document.getElementById(id);
+const state = { scorer: "", seed: 0, order: [], idx: 0, done: [], files: null, acc: null };
+const TRIAL_ID_RE = /^(.+)-ch([1-9][0-9]*)$/;
+
+/* localStorage 续评：完成即锁定，不可重评（重评=向印象靠拢，SOP 明令禁止） */
+const LS = () => "dpst:v1:" + state.scorer;
+function saveProgress() {
+  try {
+    localStorage.setItem(LS(), JSON.stringify({
+      seed: state.seed, order: state.order.map(t => t.trial_id),
+      done: state.done, ts: Date.now(),
+    }));
+  } catch (e) { /* 隐私模式等：无存档继续，导出不受影响 */ }
+}
+
+/* ---------------- 设置 ---------------- */
+document.addEventListener("DOMContentLoaded", () => {
+  $("seed").value = String(Math.floor(Math.random() * 1e9));
+  for (const s of Object.keys(localStorage)) {
+    if (s.startsWith("dpst:v1:")) { $("resumeBox").hidden = false; }
+  }
+  $("copySeed").onclick = () => navigator.clipboard.writeText($("seed").value);
+  $("startBtn").onclick = onStart;
+  $("resumeBtn").onclick = onResume;
+  $("beginBtn").onclick = () => { $("vid").play(); };
+  $("nextBtn").onclick = nextTrial;
+});
+
+function parseManifest(text) {
+  const lines = text.replace(/^﻿/, "").split(/\r?\n/).filter(l => l.trim());
+  const head = lines.shift().split(",").map(s => s.trim());
+  const iT = head.indexOf("trial_id"), iV = head.indexOf("video_filename");
+  if (iT < 0 || iV < 0) throw "清单缺少列头 trial_id,video_filename";
+  return lines.map(l => {
+    const c = l.split(",");
+    const tid = c[iT].trim(), fn = c[iV].trim();
+    if (!TRIAL_ID_RE.test(tid)) throw "trial_id 格式应为 <video>-ch<N>，得到：" + tid;
+    if (/[",;]/.test(fn)) throw "video_filename 不支持引号/分号：" + fn;
+    return { trial_id: tid, filename: fn };
+  });
+}
+
+function onStart() {
+  const err = [];
+  state.scorer = $("scorerId").value.trim();
+  if (!state.scorer) err.push("请填写评分员编号");
+  const mf = $("manifestFile").files[0];
+  const vids = Array.from($("videoFiles").files || []);
+  if (!mf) err.push("请选择试次清单 CSV");
+  if (!vids.length) err.push("请选择视频文件");
+  if (!/^\d+$/.test($("seed").value)) err.push("种子必须是非负整数");
+  if (err.length) { $("setupErr").textContent = err.join("\n"); return; }
+  mf.text().then((text) => {
+    let manifest;
+    try { manifest = parseManifest(text); } catch (e) { $("setupErr").textContent = String(e); return; }
+    const byName = new Map(vids.map(v => [v.name, v]));
+    const missing = manifest.filter(m => !byName.has(m.filename)).map(m => m.trial_id + " ← " + m.filename);
+    if (missing.length) { $("setupErr").textContent = "缺视频：\n" + missing.join("\n"); return; }
+    const extra = vids.filter(v => !manifest.some(m => m.filename === v.name)).map(v => v.name);
+    if (extra.length) { $("setupErr").textContent = "多余视频（不在清单）：\n" + extra.join("\n"); return; }
+    state.seed = Number($("seed").value);
+    const rand = mulberry32(state.seed);
+    const manifestHash = manifest.map(m => m.trial_id).join("|");
+    state.order = shuffled(manifest, rand).map(m => ({ ...m, file: byName.get(m.filename) }));
+    state.idx = 0; state.done = []; state.files = vids;
+    try { localStorage.removeItem("dpst:v1:" + state.scorer); } catch (e) {}
+    beginSession();
+  });
+}
+
+function onResume() {
+  state.scorer = $("scorerId").value.trim();
+  if (!state.scorer) { $("setupErr").textContent = "续评请先填同一评分员编号"; return; }
+  let saved = null;
+  try { saved = JSON.parse(localStorage.getItem(LS()) || "null"); } catch (e) {}
+  if (!saved || !saved.order) { $("setupErr").textContent = "没有可恢复的进度"; return; }
+  const mf = $("manifestFile").files[0];
+  const vids = Array.from($("videoFiles").files || []);
+  if (!mf || !vids.length) { $("setupErr").textContent = "续评需重新选择同一清单与全部视频"; return; }
+  mf.text().then((text) => {
+    let manifest;
+    try { manifest = parseManifest(text); } catch (e) { $("setupErr").textContent = String(e); return; }
+    const byName = new Map(vids.map(v => [v.name, v]));
+    const tid2m = new Map(manifest.map(m => [m.trial_id, m]));
+    if (saved.order.some(t => !tid2m.has(t))) { $("setupErr").textContent = "清单与上次不一致，无法续评"; return; }
+    state.seed = saved.seed; state.order = saved.order.map(t => ({ ...tid2m.get(t), file: byName.get(tid2m.get(t).filename) }));
+    state.done = saved.done || []; state.idx = state.done.length; state.files = vids;
+    beginSession();
+  });
+}
+
+/* ---------------- 计分 ---------------- */
+function beginSession() {
+  $("setup").hidden = true; $("scoring").hidden = false;
+  $("setupErr").textContent = "";
+  bindKeys();
+  loadTrial();
+}
+
+function loadTrial() {
+  const t = state.order[state.idx];
+  $("trialTag").textContent = "试次 " + t.trial_id;
+  $("trialCount").textContent = (state.idx + 1) + " / " + state.order.length;
+  state.acc = mobileAccumulator();
+  state.started = false;
+  $("quiz").hidden = true; $("beginBtn").hidden = false;
+  $("qTail").checked = false; $("qUnsc").checked = false; $("qNote").value = "";
+  const v = $("vid");
+  v.controls = false;
+  v.src = URL.createObjectURL(t.file);
+  v.preload = "auto";
+  v.onended = onVideoEnded;
+  v.ontimeupdate = () => {
+    const dur = v.duration || 1;
+    $("prog").style.width = (100 * Math.min(1, v.currentTime / dur)) + "%";
+    /* 封锁手动 seek：进度只许随播放单向小步前进 */
+    if (state.lastTime !== undefined && v.currentTime > state.lastTime + 0.51) {
+      v.currentTime = state.lastTime;
+    }
+    state.lastTime = v.currentTime;
+  };
+}
+
+function bindKeys() {
+  document.addEventListener("keydown", (e) => {
+    if ($("scoring").hidden) return;
+    if (e.code === "Space") {
+      e.preventDefault();
+      if (state.started && !e.repeat) {
+        state.acc.hold();
+        $("vid").classList.add("hold");
+      }
+    } else { e.preventDefault(); }
+  });
+  document.addEventListener("keyup", (e) => {
+    if (e.code === "Space") {
+      e.preventDefault();
+      state.acc.release(performance.now());
+      $("vid").classList.remove("hold");
+    }
+  });
+}
+
+function onVideoEnded() {
+  state.acc.closeAt(performance.now());   // 闭合未松手的按住
+  $("beginBtn").hidden = true;
+  $("quiz").hidden = false;
+  $("qTail").focus();
+}
+
+function nextTrial() {
+  const t = state.order[state.idx];
+  const unsc = $("qUnsc").checked;
+  const mobile = unsc ? null : Math.round(state.acc.value * 100) / 100;
+  if (mobile !== null && (mobile < 0 || mobile > 360 + 0.5)) {
+    alert("内部错误：秒数越界，请联系开发"); return;
+  }
+  state.done.push({
+    trial_id: t.trial_id,
+    mobile_seconds: mobile,
+    tail_climbing: $("qTail").checked,
+    unscoreable: unsc,
+    note: $("qNote").value.trim(),
+    presentation_order: state.idx + 1,
+    scored_at: new Date().toISOString().slice(0, 10),
+  });
+  state.idx += 1;
+  saveProgress();
+  if (state.idx >= state.order.length) { finishSession(); return; }
+  loadTrial();
+}
+
+/* ---------------- 完成与导出 ---------------- */
+function csvFromDone() {
+  const cols = ["scorer_id", "trial_id", "mobile_seconds", "tail_climbing",
+                "unscoreable", "note", "scored_at", "presentation_order"];
+  const esc = (s) => /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+  const rows = state.done.map(d => [
+    state.scorer, d.trial_id,
+    d.mobile_seconds === null ? "" : d.mobile_seconds.toFixed(1),
+    d.tail_climbing ? "true" : "false",
+    d.unscoreable ? "true" : "false",
+    esc(d.note), d.scored_at, d.presentation_order,
+  ].join(","));
+  return "﻿" + [cols.join(","), ...rows].join("\r\n") + "\r\n";
+}
+
+function download(name, text, mime) {
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([text], { type: mime }));
+  a.download = name;
+  document.body.appendChild(a); a.click(); a.remove();
+}
+
+function finishSession() {
+  $("scoring").hidden = true; $("finish").hidden = false;
+  const date = new Date().toISOString().slice(0, 10);
+  download("human_scores_" + state.scorer + "_" + date + ".csv", csvFromDone(), "text/csv");
+  download("timer_audit_" + state.scorer + "_" + date + ".json", JSON.stringify({
+    format: "depressionplex.stopwatch-audit.v1",
+    scorer_id: state.scorer, seed: state.seed,
+    delivered_order: state.order.map(o => o.trial_id),
+    tool_version: "v1", finished_at: new Date().toISOString(), records: state.done,
+  }, null, 2), "application/json");
+  try { localStorage.removeItem(LS()); } catch (e) {}
+  $("finishMsg").textContent = "全部 " + state.done.length + " 个试次已评分，CSV 与审计文件已自动下载。"
+    + "请原样交回两份文件，不要手工改动 CSV（改动会被 §2.1 校验拒收）。";
+}
+</script>
+</body>
+</html>
