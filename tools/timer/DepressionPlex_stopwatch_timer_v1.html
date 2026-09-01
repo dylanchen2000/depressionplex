@@ -7,9 +7,13 @@
     （金标准 Can et al. 2012 亦建议遮住秒表读数——看着累计时间会引入判断偏差）。
   - 视频播完自动落盘 §2.1 CSV（含 presentation_order），消灭转抄错误。
   - 每位评分员的试次顺序由本工具用种子随机生成并记录在审计文件里。
-  - 慢放（0.5× / 0.25×）是反应时间补救：秒表累计一律按「视频时间」折算
-    （墙上时长 × 倍速），慢放不会虚增"在动秒数"；每场使用的倍速自动
-    写入 CSV 备注列与审计 JSON。（v1.1；SOP/SPEC 对播放速度无规定。）
+  - v1.2 计时模型：在动秒数 = 视频时间轴上按住区间的并集。回看（←键，
+    SOP 第四节明确允许"回看那几秒"）与暂停（P 键）都不会重复计数或虚增；
+    慢放 0.5×/0.25× 天然正确。倍速仍写入审计与备注供 §5.6 复核。
+  - 重做已完成试次：允许，但全程留痕——CSV 用最新一次值，备注自动标
+    "重评×N"，审计 JSON 保留第一轮完整答案与重做发生位置。SOP 第四节
+    不推荐整段重来（向印象靠拢），故此功能限"确认记录错误"时使用，
+    且只能在未开始观看当前试次前发起。
   - 本文件不含任何"查看软件结果"的入口：清单 schema 里没有结果列，页面上没有。
 
   威胁模型（诚实声明）：本工具防的是"评分过程中读数反馈造成的偏差"，
@@ -68,13 +72,20 @@
   <p><span id="trialTag"></span> · 进度 <span id="trialCount"></span></p>
   <div class="bar-shell"><div class="bar" id="prog"></div></div>
   <video id="vid"></video>
-  <p class="hint">按住 <b>空格</b> = 在动 · 松开 = 停。播放中不可拖动/快进/回看整段（防读数与重评偏差）。</p>
+  <p class="hint">按住 <b>空格</b> = 在动 · 松开 = 停 · <b>←</b> = 回看 5 秒 · <b>P</b> = 暂停/继续。
+     同一段看几遍都只计一次（区间并集），但不能跳到没看过的地方。</p>
   <p>播放速度
      <button class="rate" id="rate1" type="button">1×</button>
      <button class="rate" id="rate05" type="button">0.5×</button>
      <button class="rate" id="rate025" type="button">0.25×</button>
-     <span class="hint">秒数按<b>视频时间</b>折算（0.25× 下按住 4 真实秒 = 计 1 秒），慢放不虚增；换倍速请松开空格后再点。</span></p>
-  <p><button id="beginBtn" class="primary" type="button">开始本试次播放</button></p>
+     <span class="hint">慢放只是放慢画面，秒数按视频时间计，不会虚增。</span></p>
+  <p><button id="beginBtn" class="primary" type="button">开始本试次播放</button>
+     <button id="redoBtn" type="button">重做已完成试次…</button></p>
+  <p id="redoPanel" hidden>选择要重做的试次（仅限确认之前记录有误；第一轮答案会留痕进审计）：
+     <select id="redoSel"></select>
+     <button id="redoGo" type="button">确认重做</button>
+     <button id="redoCancel" type="button">取消</button></p>
+  <p class="err" id="redoErr"></p>
 
   <fieldset id="quiz" hidden>
     <legend>本试次收尾必答</legend>
@@ -97,19 +108,32 @@
  * 不写入 DOM、不写 innerText/textContent、不进 localStorage 的任何镜像显示。
  * 唯一出口是最终导出的 CSV 数值列。
  * ===================================================================== */
-/* 慢放正确性关键：hold() 记住按下时的倍速，release 按 视频时间=墙上时间×rate 折算，
- * 否则 0.25× 慢放会把"在动秒数"虚增 4 倍，人工 vs 软件直接失真。 */
+/* v1.2 计时模型：累计的是「视频时间轴上的在动区间并集」。
+ * - 回看同一段 → 区间重叠自动去重，秒数不翻倍（SOP 允许"回看那几秒"）
+ * - 暂停 → currentTime 不走 → 不加秒
+ * - 慢放 0.5×/0.25× → 天然正确，无需折算系数
+ * 墙上时钟不再参与计时。区间与合计只活在闭包里，不渲染。 */
 function mobileAccumulator() {
-  let total = 0, holdStart = null, holdRate = 1;
+  let ivals = [];
+  let holding = false;
+  function merge(a, b) {
+    if (!(b > a)) return;
+    ivals.push([a, b]);
+    ivals.sort((p, q) => p[0] - q[0]);
+    const m = [];
+    for (const s of ivals) {
+      const last = m[m.length - 1];
+      if (last && s[0] <= last[1] + 1e-6) last[1] = Math.max(last[1], s[1]);
+      else m.push([s[0], s[1]]);
+    }
+    ivals = m;
+  }
   return {
-    hold(now, rate) { if (holdStart === null) { holdStart = now; holdRate = rate || 1; } },
-    release(now) {
-      if (holdStart !== null) { total += (now - holdStart) / 1000 * holdRate; holdStart = null; }
-    },
-    get holding() { return holdStart !== null; },
-    /** 视频结束等场景：闭合未松手的按住 */
-    closeAt(now) { this.release(now); },
-    get value() { return total; },
+    startHold() { holding = true; },
+    endHold() { holding = false; },
+    get holding() { return holding; },
+    add(a, b) { merge(a, b); },
+    get value() { let t = 0; for (const [a, b] of ivals) t += b - a; return t; },
   };
 }
 
@@ -132,11 +156,13 @@ function shuffled(arr, rand) {
 }
 
 const $ = (id) => document.getElementById(id);
-const state = { scorer: "", seed: 0, order: [], idx: 0, done: [], files: null, acc: null, rate: 1 };
+const state = { scorer: "", seed: 0, order: [], idx: 0, done: [], files: null, acc: null, rate: 1, redoIdx: null };
 const TRIAL_ID_RE = /^(.+)-ch([1-9][0-9]*)$/;
 
-/* localStorage 续评：完成即锁定，不可重评（重评=向印象靠拢，SOP 明令禁止） */
-const LS = () => "dpst:v1:" + state.scorer;
+/* localStorage 续评。v1.2 起记录含重做留痕；前缀升 v2 使旧版半成品存档失效
+ * （旧存档没有 first_pass 字段结构，混用会污染审计）。
+ * 重做受控：CSV 用最新值，第一轮答案永久留在审计 JSON，备注自动标"重评×N"。 */
+const LS = () => "dpst:v2:" + state.scorer;
 function saveProgress() {
   try {
     localStorage.setItem(LS(), JSON.stringify({
@@ -150,7 +176,7 @@ function saveProgress() {
 document.addEventListener("DOMContentLoaded", () => {
   $("seed").value = String(Math.floor(Math.random() * 1e9));
   for (const s of Object.keys(localStorage)) {
-    if (s.startsWith("dpst:v1:")) { $("resumeBox").hidden = false; }
+    if (s.startsWith("dpst:v2:")) { $("resumeBox").hidden = false; }
   }
   $("copySeed").onclick = () => navigator.clipboard.writeText($("seed").value);
   $("startBtn").onclick = onStart;
@@ -161,11 +187,13 @@ document.addEventListener("DOMContentLoaded", () => {
     $(id).onclick = () => setRate(r);
   }
   setRate(1);
+  $("redoBtn").onclick = openRedoPanel;
+  $("redoCancel").onclick = () => { $("redoPanel").hidden = true; };
+  $("redoGo").onclick = startRedo;
 });
 
 function setRate(r) {
-  /* 换速瞬间闭合当前按住（按旧倍速折算），绝不让一段跨两种倍速 */
-  if (state.acc && state.acc.holding) state.acc.release(performance.now());
+  /* 区间并集模型下换速无需闭合按住：墙上时间根本不参与计时 */
   state.rate = r;
   const v = $("vid");
   v.playbackRate = r; v.defaultPlaybackRate = r;
@@ -211,7 +239,8 @@ function onStart() {
     const manifestHash = manifest.map(m => m.trial_id).join("|");
     state.order = shuffled(manifest, rand).map(m => ({ ...m, file: byName.get(m.filename) }));
     state.idx = 0; state.done = []; state.files = vids;
-    try { localStorage.removeItem("dpst:v1:" + state.scorer); } catch (e) {}
+    try { localStorage.removeItem("dpst:v2:" + state.scorer);
+          localStorage.removeItem("dpst:v1:" + state.scorer); } catch (e) {}
     beginSession();
   });
 }
@@ -241,17 +270,47 @@ function onResume() {
 function beginSession() {
   $("setup").hidden = true; $("scoring").hidden = false;
   $("setupErr").textContent = "";
+  state.redoIdx = null;
   bindKeys();
   loadTrial();
 }
 
-function loadTrial() {
-  const t = state.order[state.idx];
-  $("trialTag").textContent = "试次 " + t.trial_id;
+/* ---------------- 重做（受控、全程留痕） ---------------- */
+function openRedoPanel() {
+  $("redoErr").textContent = "";
+  if (!state.done.length) { $("redoErr").textContent = "还没有已完成的试次"; return; }
+  if (state.started || $("beginBtn").hidden) {
+    $("redoErr").textContent = "请先答完当前试次（还没点开始的请先点开始）"; return;
+  }
+  const sel = $("redoSel");
+  sel.innerHTML = "";
+  state.done.forEach((d, i) => {
+    const o = document.createElement("option");
+    o.value = String(i);
+    o.textContent = d.trial_id + (d.redo_count ? "（已重做 " + d.redo_count + " 次）" : "");
+    sel.appendChild(o);
+  });
+  $("redoPanel").hidden = false;
+  $("redoGo").focus();
+}
+function startRedo() {
+  const i = Number($("redoSel").value);
+  if (!Number.isInteger(i) || i < 0 || i >= state.done.length) return;
+  state.redoIdx = i;
+  $("redoPanel").hidden = true;
+  loadTrial(state.order[i]);   // done[i] 与 order[i] 一一对应（重做不新增条目）
+}
+
+function loadTrial(t) {
+  t = t || state.order[state.idx];
+  const redoing = state.redoIdx !== null && state.redoIdx !== undefined;
+  $("trialTag").textContent = "试次 " + t.trial_id + (redoing ? "（重做中）" : "");
   $("trialCount").textContent = (state.idx + 1) + " / " + state.order.length;
   state.acc = mobileAccumulator();
   state.started = false;
+  state.lastTime = undefined; state.maxT = 0;
   $("quiz").hidden = true; $("beginBtn").hidden = false;
+  $("redoPanel").hidden = true; $("redoErr").textContent = "";
   $("qTail").checked = false; $("qUnsc").checked = false; $("qNote").value = "";
   const v = $("vid");
   v.controls = false;
@@ -261,59 +320,105 @@ function loadTrial() {
   v.onloadedmetadata = () => { v.playbackRate = state.rate; };
   v.onended = onVideoEnded;
   v.ontimeupdate = () => {
-    const dur = v.duration || 1;
-    $("prog").style.width = (100 * Math.min(1, v.currentTime / dur)) + "%";
-    /* 封锁手动 seek：进度只许随播放单向小步前进 */
-    if (state.lastTime !== undefined && v.currentTime > state.lastTime + 0.51) {
-      v.currentTime = state.lastTime;
+    const cur = v.currentTime, dur = v.duration || 1;
+    $("prog").style.width = (100 * Math.min(1, cur / dur)) + "%";
+    if (state.lastTime !== undefined && cur > state.lastTime && state.acc.holding && state.started) {
+      state.acc.add(state.lastTime, cur);   // 只加视频时间；重叠区间自动去重
     }
-    state.lastTime = v.currentTime;
+    /* 封锁向前跳到没看过的地方；回看（cur < maxT）与随后顺放合法 */
+    if (state.lastTime !== undefined && cur > state.maxT + 0.51) {
+      v.currentTime = state.maxT; return;
+    }
+    state.lastTime = cur;
+    if (cur > state.maxT) state.maxT = cur;
   };
 }
 
+let keysBound = false;
 function bindKeys() {
+  if (keysBound) return;   /* 重做换试次时不重复挂监听 */
+  keysBound = true;
   document.addEventListener("keydown", (e) => {
     if ($("scoring").hidden) return;
+    if (!$("quiz").hidden) return;   // 答问卷时键盘归问卷（空格勾选等），不拦
+    const v = $("vid");
     if (e.code === "Space") {
       e.preventDefault();
-      if (state.started && !e.repeat) {
-        state.acc.hold(performance.now(), state.rate);
-        $("vid").classList.add("hold");
+      if (state.started && !e.repeat && !state.acc.holding) {
+        state.acc.startHold();
+        v.classList.add("hold");
       }
+    } else if (e.code === "ArrowLeft" || e.code === "KeyJ") {
+      e.preventDefault();
+      if (state.started) v.currentTime = Math.max(0, v.currentTime - 5);   // SOP 允许的"回看那几秒"
+    } else if (e.code === "ArrowRight" || e.code === "KeyK") {
+      e.preventDefault();
+      if (state.started) v.currentTime = Math.min(state.maxT, v.currentTime + 5); // 只许在已看过的范围内挪
+    } else if (e.code === "KeyP") {
+      e.preventDefault();
+      if (state.started) { v.paused ? v.play() : v.pause(); }
     } else { e.preventDefault(); }
   });
   document.addEventListener("keyup", (e) => {
     if (e.code === "Space") {
+      if (!$("quiz").hidden) return;
       e.preventDefault();
-      state.acc.release(performance.now());
-      $("vid").classList.remove("hold");
+      const v = $("vid");
+      if (state.acc && state.acc.holding) {
+        if (state.started && v.currentTime > (state.lastTime || 0)) state.acc.add(state.lastTime, v.currentTime);
+        state.acc.endHold();
+      }
+      v.classList.remove("hold");
     }
   });
 }
 
 function onVideoEnded() {
+  const v = $("vid");
+  if (state.acc.holding) state.acc.add(state.lastTime || 0, v.duration || state.maxT);
+  state.acc.endHold();
   state.started = false;
-  state.acc.closeAt(performance.now());   // 闭合未松手的按住
+  v.classList.remove("hold");
   $("beginBtn").hidden = true;
   $("quiz").hidden = false;
   $("qTail").focus();
 }
 
 function nextTrial() {
-  const t = state.order[state.idx];
   const unsc = $("qUnsc").checked;
   const mobile = unsc ? null : Math.round(state.acc.value * 100) / 100;
   if (mobile !== null && (mobile < 0 || mobile > 360 + 0.5)) {
     alert("内部错误：秒数越界，请联系开发"); return;
   }
   const userNote = $("qNote").value.trim();
+  const note = state.rate !== 1 ? (userNote ? userNote + "; " : "") + "慢放" + state.rate + "x" : userNote;
+
+  if (state.redoIdx !== null) {
+    /* 重做：覆盖最新值，第一轮答案与重做位置永久留痕于审计（first_pass/redo_log）。
+     * presentation_order 保持首轮位置不变——它记录的是"第一次呈现"。 */
+    const d = state.done[state.redoIdx];
+    if (!d.first_pass) {
+      d.first_pass = { mobile_seconds: d.mobile_seconds, tail_climbing: d.tail_climbing,
+                       unscoreable: d.unscoreable, note: d.note, scored_at: d.scored_at };
+    }
+    d.mobile_seconds = mobile; d.tail_climbing = $("qTail").checked;
+    d.unscoreable = unsc; d.note = note;
+    d.scored_at = new Date().toISOString().slice(0, 10);
+    d.redo_count = (d.redo_count || 0) + 1;
+    d.redo_log = (d.redo_log || []).concat([{ redone_after_position: state.idx + 1, playback_rate: state.rate }]);
+    state.redoIdx = null;
+    saveProgress();
+    loadTrial();                       // 回到当前未完成的试次
+    return;
+  }
+
+  const t = state.order[state.idx];
   state.done.push({
     trial_id: t.trial_id,
     mobile_seconds: mobile,
     tail_climbing: $("qTail").checked,
     unscoreable: unsc,
-    // 倍速≠1 时自动写入备注：分析侧 §5.6/复核可见，审计 JSON 另有 playback_rate 字段
-    note: state.rate !== 1 ? (userNote ? userNote + "; " : "") + "慢放" + state.rate + "x" : userNote,
+    note,
     playback_rate: state.rate,
     presentation_order: state.idx + 1,
     scored_at: new Date().toISOString().slice(0, 10),
@@ -334,7 +439,9 @@ function csvFromDone() {
     d.mobile_seconds === null ? "" : d.mobile_seconds.toFixed(1),
     d.tail_climbing ? "true" : "false",
     d.unscoreable ? "true" : "false",
-    esc(d.note), d.scored_at, d.presentation_order,
+    // 重做标记随导出生成（不污染存储的 note 本体，重复重做不会堆叠"重评×N"）
+    esc(d.redo_count ? (d.note ? d.note + "; " : "") + "重评×" + d.redo_count : d.note),
+    d.scored_at, d.presentation_order,
   ].join(","));
   return "﻿" + [cols.join(","), ...rows].join("\r\n") + "\r\n";
 }
@@ -354,7 +461,7 @@ function finishSession() {
     format: "depressionplex.stopwatch-audit.v1",
     scorer_id: state.scorer, seed: state.seed,
     delivered_order: state.order.map(o => o.trial_id),
-    tool_version: "v1.1", finished_at: new Date().toISOString(), records: state.done,
+    tool_version: "v1.2", finished_at: new Date().toISOString(), records: state.done,
   }, null, 2), "application/json");
   try { localStorage.removeItem(LS()); } catch (e) {}
   $("finishMsg").textContent = "全部 " + state.done.length + " 个试次已评分，CSV 与审计文件已自动下载。"
