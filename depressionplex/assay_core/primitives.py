@@ -20,6 +20,7 @@ import numpy as np
 # kind: "bool" | "cat:up/level/down" 等。assay: 适用范式。
 
 PRIMITIVES: dict[str, dict] = {
+    "head_neck_active": {"label": "头颈部有动作", "assay": "FST,TST", "kind": "bool"},
     "fore_active":   {"label": "前肢有动作", "assay": "FST,TST", "kind": "bool"},
     "hind_active":   {"label": "后肢有动作", "assay": "FST,TST", "kind": "bool"},
     "trunk_deform":  {"label": "躯干形变", "assay": "FST,TST", "kind": "bool"},
