@@ -14,6 +14,11 @@
     "重评×N"，审计 JSON 保留第一轮完整答案与重做发生位置。SOP 第四节
     不推荐整段重来（向印象靠拢），故此功能限"确认记录错误"时使用，
     且只能在未开始观看当前试次前发起。
+  - v1.4：分批评功能。每次会话可只选清单的一个子集视频（清单 CSV 全量），
+    presentation_order 恒取种子序全局位置（跨批不重不漏，续评自动接上），
+    本批评完自动导出 partial 审计与 CSV。审计 delivered_order 恒为全量
+    种子序。换电脑不共享 localStorage——固定一台机评到底，或每次导出
+    partial 后由本人下一台机器重开（重开=新会话，会重评旧场次，不建议）。
   - v1.3：可见「暂停/继续」按钮（P 键等效；区间模型下暂停不加秒）；
     「导出当前进度」随时可导出已完成试次的 CSV+审计（文件名带
     _partial<k>of<n> 标记，只作中途保存，最终分析以全部完成后的导出为准）；
@@ -60,6 +65,9 @@
 <section id="setup">
   <p class="hint">依据 SOP_悬尾实验人工评分_v1：全程 6 分钟都计分；在动按<b>空格</b>（按住=在动，松开=停）；
      拿不准按"不算在动"。开始前先做两人共同校准，练习视频不在此工具计数。</p>
+  <p class="hint"><b>可以分批评！</b>每次只选部分视频文件（清单 CSV 始终选全量那份），
+     评完本批自动导出 partial 进度；下次回来用「继续上次未完成的评分」接上。
+     顺序、呈现号按种子全局固定，与分几批无关。分批只能分"天"，不能分"人"。</p>
   <p>评分员编号 <input type="text" id="scorerId" placeholder="如 张三 或 R1"></p>
   <p>试次清单 CSV（列头 <code>trial_id,video_filename</code>）
      <input type="file" id="manifestFile" accept=".csv,text/csv"></p>
@@ -174,7 +182,12 @@ function shuffled(arr, rand) {
 }
 
 const $ = (id) => document.getElementById(id);
-const state = { scorer: "", seed: 0, order: [], idx: 0, done: [], files: null, acc: null, rate: 1, redoIdx: null };
+/* v1.4 分批模型：fullOrder=该评分员种子序下的全部场次(含 pos 全局呈现序)，
+ * queue=本次会话实际可评的子集(已选视频 ∧ 未评完)。presentation_order 恒取 pos，
+ * 跨批次不重不漏；done 按 trial_id 索引，与队列解耦。 */
+const state = { scorer: "", seed: 0, fullOrder: [], queue: [], qidx: 0, done: [],
+                files: null, acc: null, rate: 1, redoTrialId: null,
+                started: false, lastTime: undefined, maxT: 0, confirmBatch: null };
 const TRIAL_ID_RE = /^(.+)-ch([1-9][0-9]*)$/;
 
 /* localStorage 续评。v1.2 起记录含重做留痕；前缀升 v2 使旧版半成品存档失效
@@ -184,7 +197,7 @@ const LS = () => "dpst:v2:" + state.scorer;
 function saveProgress() {
   try {
     localStorage.setItem(LS(), JSON.stringify({
-      seed: state.seed, order: state.order.map(t => t.trial_id),
+      seed: state.seed, order: state.fullOrder.map(t => t.trial_id),
       done: state.done, ts: Date.now(),
     }));
   } catch (e) { /* 隐私模式等：无存档继续，导出不受影响 */ }
@@ -254,19 +267,40 @@ function onStart() {
     let manifest;
     try { manifest = parseManifest(text); } catch (e) { $("setupErr").textContent = String(e); return; }
     const byName = new Map(vids.map(v => [v.name, v]));
-    const missing = manifest.filter(m => !byName.has(m.filename)).map(m => m.trial_id + " ← " + m.filename);
-    if (missing.length) { $("setupErr").textContent = "缺视频：\n" + missing.join("\n"); return; }
     const extra = vids.filter(v => !manifest.some(m => m.filename === v.name)).map(v => v.name);
-    if (extra.length) { $("setupErr").textContent = "多余视频（不在清单）：\n" + extra.join("\n"); return; }
-    state.seed = Number($("seed").value);
-    const rand = mulberry32(state.seed);
-    const manifestHash = manifest.map(m => m.trial_id).join("|");
-    state.order = shuffled(manifest, rand).map(m => ({ ...m, file: byName.get(m.filename) }));
-    state.idx = 0; state.done = []; state.files = vids;
+    if (extra.length) { $("setupErr").textContent = "多余视频（不在清单）：\n" + extra.join("\n"); state.confirmBatch = null; return; }
+    const seed = Number($("seed").value);
+    const full = shuffled(manifest, mulberry32(seed)).map(m => ({
+      trial_id: m.trial_id, filename: m.filename, file: byName.get(m.filename) || null, pos: 0 }));
+    full.forEach((m, i) => { m.pos = i + 1; });
+    const missing = full.filter(m => !m.file);
+    if (missing.length) {
+      const fp = full.map(m => m.trial_id).join("|");
+      if (!state.confirmBatch || state.confirmBatch.fp !== fp) {
+        state.confirmBatch = { fp, nHave: full.length - missing.length, nMiss: missing.length };
+        $("setupErr").textContent =
+          "选了 " + full.length + " 场的清单，但只选到 " + (full.length - missing.length) + " 个视频。\n"
+          + "再点一次「开始评分」= 本批只评已有的 " + (full.length - missing.length) + " 场"
+          + "（剩余 " + missing.length + " 场下次分批续评，进度自动保存）。\n"
+          + "未选中的试次：" + missing.slice(0, 8).map(m => m.trial_id).join("、")
+          + (missing.length > 8 ? " 等" : "");
+        return;
+      }
+      state.confirmBatch = null;   // 二次点击确认
+    }
+    state.seed = seed; state.fullOrder = full;
+    state.done = []; state.files = vids;
+    rebuildQueue();
     try { localStorage.removeItem("dpst:v2:" + state.scorer);
           localStorage.removeItem("dpst:v1:" + state.scorer); } catch (e) {}
     beginSession();
   });
+}
+
+function rebuildQueue() {
+  const doneTids = new Set(state.done.map(d => d.trial_id));
+  state.queue = state.fullOrder.filter(m => m.file && !doneTids.has(m.trial_id));
+  state.qidx = 0;
 }
 
 function onResume() {
@@ -277,24 +311,33 @@ function onResume() {
   if (!saved || !saved.order) { $("setupErr").textContent = "没有可恢复的进度"; return; }
   const mf = $("manifestFile").files[0];
   const vids = Array.from($("videoFiles").files || []);
-  if (!mf || !vids.length) { $("setupErr").textContent = "续评需重新选择同一清单与全部视频"; return; }
+  if (!mf || !vids.length) { $("setupErr").textContent = "续评需重新选择同一清单与本次要评的视频（可选子集）"; return; }
   mf.text().then((text) => {
     let manifest;
     try { manifest = parseManifest(text); } catch (e) { $("setupErr").textContent = String(e); return; }
     const byName = new Map(vids.map(v => [v.name, v]));
     const tid2m = new Map(manifest.map(m => [m.trial_id, m]));
     if (saved.order.some(t => !tid2m.has(t))) { $("setupErr").textContent = "清单与上次不一致，无法续评"; return; }
-    state.seed = saved.seed; state.order = saved.order.map(t => ({ ...tid2m.get(t), file: byName.get(tid2m.get(t).filename) }));
-    state.done = saved.done || []; state.idx = state.done.length; state.files = vids;
+    state.seed = saved.seed;
+    state.fullOrder = saved.order.map((t, i) => ({ trial_id: t, filename: tid2m.get(t).filename,
+      file: byName.get(tid2m.get(t).filename) || null, pos: i + 1 }));
+    state.done = saved.done || []; state.files = vids;
+    rebuildQueue();
     beginSession();
   });
 }
 
 /* ---------------- 计分 ---------------- */
 function beginSession() {
+  if (!state.queue.length) {
+    if (state.fullOrder.length && state.done.length >= state.fullOrder.length) {
+      $("setup").hidden = true; finishSession(); return;   // 全部已评完：直接补出最终文件
+    }
+    $("setupErr").textContent = "本次所选视频都已评过或不在剩余清单里——请换一批未评的视频"; return;
+  }
   $("setup").hidden = true; $("scoring").hidden = false;
   $("setupErr").textContent = "";
-  state.redoIdx = null;
+  state.redoTrialId = null;
   bindKeys();
   loadTrial();
 }
@@ -302,15 +345,20 @@ function beginSession() {
 /* ---------------- 重做（受控、全程留痕） ---------------- */
 function openRedoPanel() {
   $("redoErr").textContent = "";
-  if (!state.done.length) { $("redoErr").textContent = "还没有已完成的试次"; return; }
+  const fileTids = new Set(state.fullOrder.filter(m => m.file).map(m => m.trial_id));
+  const redoable = state.done.filter(d => fileTids.has(d.trial_id));
+  if (!redoable.length) {
+    $("redoErr").textContent = state.done.length
+      ? "本批可重做的试次为 0（已完成的场次其视频本次未选）" : "还没有已完成的试次"; return;
+  }
   if (state.started || $("beginBtn").hidden) {
     $("redoErr").textContent = "请先答完当前试次（还没点开始的请先点开始）"; return;
   }
   const sel = $("redoSel");
   sel.innerHTML = "";
-  state.done.forEach((d, i) => {
+  redoable.forEach(d => {
     const o = document.createElement("option");
-    o.value = String(i);
+    o.value = d.trial_id;
     o.textContent = d.trial_id + (d.redo_count ? "（已重做 " + d.redo_count + " 次）" : "");
     sel.appendChild(o);
   });
@@ -318,18 +366,20 @@ function openRedoPanel() {
   $("redoGo").focus();
 }
 function startRedo() {
-  const i = Number($("redoSel").value);
-  if (!Number.isInteger(i) || i < 0 || i >= state.done.length) return;
-  state.redoIdx = i;
+  const tid = $("redoSel").value;
+  const m = state.fullOrder.find(x => x.trial_id === tid && x.file);
+  if (!m || !state.done.some(d => d.trial_id === tid)) return;
+  state.redoTrialId = tid;
   $("redoPanel").hidden = true;
-  loadTrial(state.order[i]);   // done[i] 与 order[i] 一一对应（重做不新增条目）
+  loadTrial({ trial_id: m.trial_id, file: m.file });   // 重做不动队列，按 trial_id 找回记录
 }
 
 function loadTrial(t) {
-  t = t || state.order[state.idx];
-  const redoing = state.redoIdx !== null && state.redoIdx !== undefined;
+  t = t || state.queue[state.qidx];
+  const redoing = state.redoTrialId !== null;
   $("trialTag").textContent = "试次 " + t.trial_id + (redoing ? "（重做中）" : "");
-  $("trialCount").textContent = (state.idx + 1) + " / " + state.order.length;
+  $("trialCount").textContent = "总 " + state.done.length + "/" + state.fullOrder.length
+    + " · 本批剩 " + Math.max(0, state.queue.length - state.qidx);
   state.acc = mobileAccumulator();
   state.started = false;
   state.lastTime = undefined; state.maxT = 0;
@@ -422,10 +472,10 @@ function nextTrial() {
   const userNote = $("qNote").value.trim();
   const note = state.rate !== 1 ? (userNote ? userNote + "; " : "") + "慢放" + state.rate + "x" : userNote;
 
-  if (state.redoIdx !== null) {
+  if (state.redoTrialId !== null) {
     /* 重做：覆盖最新值，第一轮答案与重做位置永久留痕于审计（first_pass/redo_log）。
      * presentation_order 保持首轮位置不变——它记录的是"第一次呈现"。 */
-    const d = state.done[state.redoIdx];
+    const d = state.done.find(x => x.trial_id === state.redoTrialId);
     if (!d.first_pass) {
       d.first_pass = { mobile_seconds: d.mobile_seconds, tail_climbing: d.tail_climbing,
                        unscoreable: d.unscoreable, note: d.note, scored_at: d.scored_at,
@@ -436,29 +486,43 @@ function nextTrial() {
     d.unscoreable = unsc; d.note = note;
     d.scored_at = new Date().toISOString().slice(0, 10);
     d.redo_count = (d.redo_count || 0) + 1;
-    d.redo_log = (d.redo_log || []).concat([{ redone_after_position: state.idx + 1, playback_rate: state.rate }]);
-    state.redoIdx = null;
+    const cur = state.queue[state.qidx];
+    d.redo_log = (d.redo_log || []).concat([{ redone_after_position: cur ? cur.pos : null,
+                                              playback_rate: state.rate }]);
+    state.redoTrialId = null;
     saveProgress();
     loadTrial();                       // 回到当前未完成的试次
     return;
   }
 
-  const t = state.order[state.idx];
+  const q = state.queue[state.qidx];
   state.done.push({
-    trial_id: t.trial_id,
+    trial_id: q.trial_id,
     mobile_seconds: mobile,
     tail_climbing: $("qTail").checked,
     unscoreable: unsc,
     note,
     playback_rate: state.rate,
-    holds: state.acc.holds,   // 审计侧记录，CSV 十列 schema 不变
-    presentation_order: state.idx + 1,
+    holds: state.acc.holds,   // 审计侧记录，CSV 八列 schema 不变
+    presentation_order: q.pos,          // 全局呈现序（跨批次不重不漏）
     scored_at: new Date().toISOString().slice(0, 10),
   });
-  state.idx += 1;
+  state.qidx += 1;
   saveProgress();
-  if (state.idx >= state.order.length) { finishSession(); return; }
+  if (state.qidx >= state.queue.length) {
+    if (state.done.length >= state.fullOrder.length) { finishSession(); return; }
+    batchDone(); return;                // 本批评完但还有未评场次：自动导出 partial
+  }
   loadTrial();
+}
+
+function batchDone() {
+  $("scoring").hidden = true; $("finish").hidden = false;
+  exportSnapshot(false);
+  $("finishMsg").textContent = "本批完成：共 " + state.done.length + "/" + state.fullOrder.length
+    + " 场已评，进度已自动导出（文件名带 partial）。下次：打开本文件 → 填同一评分员编号 →"
+    + " 选同一清单 CSV → 只选接下来要评的那几场视频 → 「继续上次未完成的评分」。"
+    + "注意：分批只能分“天”，不能分“人”——每场都必须由两位评分员各自盲评。";
 }
 
 /* ---------------- 完成与导出 ---------------- */
@@ -466,7 +530,8 @@ function csvFromDone() {
   const cols = ["scorer_id", "trial_id", "mobile_seconds", "tail_climbing",
                 "unscoreable", "note", "scored_at", "presentation_order"];
   const esc = (s) => /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
-  const rows = state.done.map(d => [
+  // 分批后 done 是完成序——导出前按呈现序排，报表更好读（§2.1 校验本来就不依赖行序）
+  const rows = state.done.slice().sort((a, b) => a.presentation_order - b.presentation_order).map(d => [
     state.scorer, d.trial_id,
     d.mobile_seconds === null ? "" : d.mobile_seconds.toFixed(1),
     d.tail_climbing ? "true" : "false",
@@ -487,15 +552,15 @@ function download(name, text, mime) {
 
 function exportSnapshot(final) {
   const date = new Date().toISOString().slice(0, 10);
-  const n = state.done.length, m = state.order.length;
+  const n = state.done.length, m = state.fullOrder.length;
   const suffix = final ? "" : "_partial" + n + "of" + m;
   download("human_scores_" + state.scorer + "_" + date + suffix + ".csv", csvFromDone(), "text/csv");
   download("timer_audit_" + state.scorer + "_" + date + suffix + ".json", JSON.stringify({
     format: "depressionplex.stopwatch-audit.v1",
     partial: !final, done_count: n, total_trials: m,
     scorer_id: state.scorer, seed: state.seed,
-    delivered_order: state.order.map(o => o.trial_id),
-    tool_version: "v1.3", exported_at: new Date().toISOString(), records: state.done,
+    delivered_order: state.fullOrder.map(o => o.trial_id),   // 恒为该种子序全量，含未评场次
+    tool_version: "v1.4", exported_at: new Date().toISOString(), records: state.done,
   }, null, 2), "application/json");
 }
 
