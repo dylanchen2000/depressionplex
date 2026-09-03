@@ -13,12 +13,22 @@
 *.npy
 
 # 数据与产出目录
-data/
+# 注意用 data/* 而不是 data/ —— 带斜杠的目录规则会让 git 根本不进入该目录，
+# 后面的 ! 例外全部失效（已实测：写成 data/ 时 data/human_scores/*.json 仍被忽略）
+data/*
 videos/
 masks/
 result_packages/
 runs/
 outputs/
+
+# 例外：人工评分是验收真值 + 冻结参数快照是审计链，必须进版本控制（GLP 可追溯）
+# 都是几十 KB 的纯文本，不违反"大文件不进仓库"
+# 只 unignore 目录、不在里面再加 ** 规则 —— 加了 ** 会重新挡住子目录，
+# git 就不再向下走（已实测：data/human_scores/raw/*.csv 会被挡掉）。
+# 大文件的防线是上面那批扩展名规则，它们在这两个目录里同样生效。
+!data/human_scores/
+!data/frozen/
 
 # Python
 __pycache__/
