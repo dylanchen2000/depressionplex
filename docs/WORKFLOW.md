@@ -3,9 +3,25 @@
 > 起因：2026-09-03 道俊要求「涉及到代码和 commit 以及推送的要分支、issue、ignore 搞清楚」。
 > 本文是硬规矩，不是建议。改本文需在 `docs/ISSUES.md` 留记录。
 
+## 0. 开工第一条：先 fetch，再判断现状（2026-09-03 补，起因是真事故）
+
+**任何出派工单、写 STATUS、判断"下一步做什么"之前，必须先：**
+
+```bash
+git fetch origin && git log --oneline origin/main | head -30 && git show origin/main:docs/STATUS.md
+```
+
+起因（DP-023）：2026-09-03 我用 8-24 的**本地快照**当项目现状，出了一份派工单，
+把 **DP-020（胶带走廊标定）列为"主线首要任务"——而它 8-24 就已经做完并合入 `main` 了**，
+远端还另有 21 个我没有的 commit（rules.py、原语标注工具、单位不变量、盲法约束、
+7 视频跨视频泛化全部已完成）。本地 `master` 与远端 `main` 分叉 4 : 22。
+
+**本地仓库不是现状，远端 `main` 才是现状。** 沙箱与 Mac 是两个工作副本，
+只有 GitHub 上那份是共同事实。
+
 ## 1. 分支
 
-`master` **只接受合并，不直接提交**。任何改动先开分支：
+**默认分支是 `main`（不是 `master`）**，`main` **只接受合并，不直接提交**。任何改动先开分支：
 
 | 前缀 | 用途 | 例 |
 |---|---|---|
@@ -18,12 +34,12 @@
 
 ## 2. Issue
 
-**仓库还没有 GitHub remote**（沙箱无 SSH key、无 `gh`，见 `docs/STATUS.md`），
-所以 issue 暂时用**仓库内文件** `docs/ISSUES.md` 管理，一条一行表格。
+**GitHub remote 一直可用**（`dylanchen2000/depressionplex`，私有，8-24 建）。
+`docs/ISSUES.md` 作为**中文台账**与 GitHub PR 并行使用——台账记决策与理由，PR 记代码评审。
 
 - 每条有稳定编号 `DP-###`，**编号只增不复用**
 - commit message 首行必须带编号：`feat(DP-012): 人工评分校验器 + 并集重算`
-- 仓库上 GitHub 后，`DP-###` 一次性迁成 GitHub issue，编号沿用，本文件改为只留映射表
+- 提 PR 时在描述里引 `DP-###`，两边可对上
 
 ## 3. Commit
 
@@ -54,10 +70,21 @@ git check-ignore -q <路径> && echo IGNORED || echo tracked-ok
 ignore 规则失效的表现同样是**静默**：文件看着在磁盘上，commit 里没有，
 等到要复现验收结果时才发现真值文件从未入库。
 
-## 5. 推送
+## 5. 推送（2026-09-03 全部更正）
 
-沙箱**无法 push**（无 SSH 私钥、`~/.config` 损坏故 `gh` 不可用）。
-交付方式：`git bundle create outputs/depressionplex-<n>.bundle --all`，含完整历史。
-道俊在 Mac 上 `git clone`/`git fetch` 该 bundle 后再推 GitHub 私有仓库。
+**沙箱可以 push。** 之前"无法 push"的记录是错的，已实测：
 
-**不要在沙箱里反复试 push / 试 gh，已确认无解。**
+| 通道 | 状态 | 说明 |
+|---|---|---|
+| **HTTPS + `~/.git-credentials`** | **可用** | 存有 `ghp_` token，scope 含 `repo`/`delete_repo`/`workflow`，读写皆可。**这是默认通道** |
+| GitHub API (`curl` + 同一 token) | 可用 | 建仓、开 PR、改 issue 都能做 |
+| `git ls-remote` / `fetch` / `push` HTTPS | 可用 | 已实测 |
+| SSH（22 端口） | **不可用** | TCP 通（能拿到 banner）但 `ssh` 客户端握手超时。私钥文件本身可读，8-24 记的"I/O error"已不成立 |
+| `gh` CLI | **不可用** | `~/.config` 是文件不是目录 ⇒ `open ~/.config/gh/config.yml: not a directory`。用 `curl` 打 API 代替 |
+
+```bash
+git remote add origin https://github.com/dylanchen2000/depressionplex.git
+git push -u origin <分支>
+```
+
+`git bundle` 保留为**离线备份**手段，不再是主交付通道。
