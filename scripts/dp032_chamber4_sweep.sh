@@ -113,10 +113,11 @@ done
   if [ "$bad" -gt 0 ]; then
     echo "[!] 有 $bad 个视频没跑出第 5 节结果——先查 $OUT/v*/probe.txt，**不要**用下面的计数定案"
   fi
-  echo "隔间 4 被判'非 valid' 的视频数 = $hit（其中 never_occupied=$n_never / detached=$n_det / 其他=$n_other）"
+  echo "隔间 4 被判'非 valid' 的视频数 = ${hit}（其中 never_occupied=${n_never} / detached=${n_det} / 其他=${n_other}）"
   echo "  '被判无动物' = never_occupied 计数；detached 是悬挂失效/中途脱落（G10b，实验失败须上报），两支**不得合并计数**"
   echo "  = 1  ⇒ 读法①成立（且应是 20mg_3周），DP-032 关闭，无假阳性"
-  echo "  = 2  ⇒ 若两个都是 never_occupied ⇒ 与 DP-005 复核一致（v4 为尾级应为 detached）；"
+  echo "  = 2  ⇒ 若两个都是 never_occupied ⇒ 与 DP-005/DP-026 复核一致"
+  echo "         （v4=20mg_3周、v7=30mg_2周 都是空场；2026-09-04 拆分后代码实测重跑正是此情形）；"
   echo "         若其一是 detached/valid 而被算进'无动物' ⇒ 有活鼠被判空 = **G10 假阳性**，必须修"
   echo " >= 3  ⇒ 与道俊目检（只有 20mg_3周-ch4 是空的）冲突，先别改代码，回来对口径"
   echo
