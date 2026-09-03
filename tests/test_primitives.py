@@ -97,3 +97,19 @@ def test_agreement_report_common_primitive_no_pabak() -> None:
     assert rep["rare"] is False
     assert "pabak" not in rep
     assert rep["kappa"] == 1.0
+
+
+def test_zero_prevalence_kappa_is_undefined_not_one() -> None:
+    """出现率 0 时 κ 数学上退化为 1.0，但那不是一致性证据，必须标 undefined。
+
+    2026-09-03 实证：道俊目检确认没有一只鼠够到自己的尾巴 ⇒ `tail_grasp`
+    在本批素材上出现率就是 0。若报 κ=1.000，会被读成「两人在抓尾上完全一致」。
+    """
+    import numpy as np
+
+    z = np.zeros(100, dtype=bool)
+    rep = P.agreement_report(z, z)
+    assert rep["prevalence"] == 0.0
+    assert rep["undefined_no_positives"] is True
+    assert np.isnan(rep["kappa"])
+    assert rep["raw_agreement"] == 1.0  # 原始一致率仍是 1，且仍要报

@@ -217,7 +217,15 @@ def agreement_report(a: np.ndarray, b: np.ndarray) -> dict:
         "rate_a": float(a.mean()) if n else 0.0,
         "rate_b": float(b.mean()) if n else 0.0,
         "rare": prev < RARE_PREVALENCE,
+        # 出现率恰为 0（两人都从未勾过）时 κ 在数学上退化为 1.0，但那**不是一致性证据**
+        # ——没有正样本就没有可被一致或不一致的东西。照 κ=1.000 报出去会被读成
+        # 「两人在该原语上完全一致」，是错的结论。故显式标 undefined。
+        # 2026-09-03 实证：道俊目检确认**没有一只鼠够到自己的尾巴**，`tail_grasp`
+        # 在本批素材上出现率就是 0，这条不是假设。
+        "undefined_no_positives": prev == 0.0,
     }
+    if rep["undefined_no_positives"]:
+        rep["kappa"] = float("nan")
     if rep["rare"]:
         rep["pabak"] = 2.0 * po - 1.0
     return rep

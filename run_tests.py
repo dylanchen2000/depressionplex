@@ -18,7 +18,7 @@ sys.path.insert(0, str(ROOT / "tests"))
 
 TEST_MODULES = ("test_bouts", "test_rad", "test_geometry", "test_segment",
                 "test_rules", "test_validity", "test_primitives",
-                "test_annotate")
+                "test_annotate", "test_scorer_disagreement")
 
 
 def main() -> int:
