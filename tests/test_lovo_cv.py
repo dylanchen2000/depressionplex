@@ -9,6 +9,7 @@ bout 参数是否真的没被拟合。合成数据上的 r / CV 数值本身不�
 from __future__ import annotations
 
 import dataclasses
+import math
 import sys
 from pathlib import Path
 
@@ -209,3 +210,101 @@ def test_pearson_degenerate_raises() -> None:
         assert False, "零方差时 r 无定义——必须报错而不是返回 0"
     except ValueError:
         pass
+
+
+# ---------------------------------------------------------------- DP-037 目标函数
+
+
+def test_default_objective_is_total_immobility_untouched() -> None:
+    """默认口径 = total_immobility，加 onset 后一个字都没变（口径断裂护栏）。"""
+    assert L.OBJECTIVE_TOTAL == "total_immobility"
+    samples = L.synthetic_lovo_trials(window_s=30.0, fps=10.0, seed=23)
+    implicit = L.lovo_cv(samples, theta_grid=_grid())
+    explicit = L.lovo_cv(samples, theta_grid=_grid(), objective=L.OBJECTIVE_TOTAL)
+    assert implicit.theta_values == explicit.theta_values
+    assert implicit.pooled_pearson_r == explicit.pooled_pearson_r
+    assert implicit.objective == L.OBJECTIVE_TOTAL
+    assert "total_immobility" in implicit.summary()
+    fit = L.fit_theta_mob(samples, grid=_grid())
+    assert fit.objective == L.OBJECTIVE_TOTAL, "ThetaFit 必须记录用的哪个目标"
+    try:
+        L.lovo_cv(samples, objective="software_output")   # 未知目标必须拒
+        assert False, "未知目标函数不许静默接受"
+    except ValueError:
+        pass
+
+
+def test_onset_target_requires_truth_segs_no_silent_fallback() -> None:
+    """onset 缺 truth_mobile_segs ⇒ 报错，绝不静默退化成总量差目标。"""
+    s = L.synthetic_lovo_trials(window_s=10.0, fps=10.0, seed=5)[0]
+    bare = dataclasses.replace(s, truth_mobile_segs=None)
+    try:
+        L.fit_theta_mob([bare], grid=_grid(), objective=L.OBJECTIVE_ONSET)
+        assert False, "缺真值段的 onset 目标未定义——必须拒跑"
+    except ValueError as e:
+        assert "truth_mobile_segs" in str(e)
+
+
+def test_onset_match_error_semantics() -> None:
+    # 完美对齐 ⇒ 0
+    assert L.onset_match_error([(1.0, 3.0)], [(1.0, 3.0)]) == 0.0
+    # 起始差被量到；**结束差被无视**（这正是目标：人只在起始侧可靠）
+    assert abs(L.onset_match_error([(1.0, 3.0)], [(2.0, 3.0)]) - 1.0) < 1e-12
+    w = [(0.0, 10.0), (20.0, 22.0)]
+    c = [(1.0, 12.0), (21.0, 30.0)]   # 两对起始差都是 1，结束差 −2/−8 各不同
+    assert abs(L.onset_match_error(w, c) - 1.0) < 1e-12
+    # 互为最佳（不是一对多）：长软件段只配它的最佳真值段，别的不计入
+    err = L.onset_match_error([(0.0, 10.0)], [(1.0, 4.0), (6.0, 20.0)])
+    assert abs(err - 6.0) < 1e-12, "一对多匹配会把未最佳段也平均进来（834% 虚高教训）"
+    # 无配对 ⇒ inf（最坏行为必须被看见），不是 NaN
+    assert math.isinf(L.onset_match_error([(0.0, 1.0)], [(5.0, 6.0)]))
+    assert math.isinf(L.onset_match_error([], [(5.0, 6.0)]))
+    # 真值无运动：软件也无 ⇒ 0（判对不罚）；软件凭空判出 ⇒ inf（幻影更糟）
+    assert L.onset_match_error([], []) == 0.0
+    assert math.isinf(L.onset_match_error([(1.0, 2.0)], []))
+
+
+def test_truth_segs_validation() -> None:
+    base = L.synthetic_lovo_trials(window_s=10.0, fps=10.0, seed=5)[0]
+    for bad, why in (
+        (((0.0, 0.0),), "零长段"),
+        (((5.0, 3.0),), "负长段"),
+        (((2.0, 4.0), (1.0, 2.5)), "重叠/未排序"),
+        (((0.0, 10.5),), "越窗"),
+    ):
+        try:
+            dataclasses.replace(base, truth_mobile_segs=bad)
+            assert False, f"{why}的真值段必须拒收"
+        except ValueError:
+            pass
+
+
+def test_lovo_onset_runs_and_reports() -> None:
+    samples = L.synthetic_lovo_trials(window_s=30.0, fps=10.0, seed=29)
+    assert all(s.truth_mobile_segs is not None for s in samples), \
+        "合成生成器必须同时产出真值段（onset 目标的原料）"
+    res = L.lovo_cv(samples, theta_grid=_grid(), objective=L.OBJECTIVE_ONSET)
+    assert len(res.theta_values) == 7
+    assert all(L.THETA_SEARCH_MIN <= t <= L.THETA_SEARCH_MAX
+               for t in res.theta_values), "onset 目标的 θ 也必须在声明网格内"
+    assert res.objective == L.OBJECTIVE_ONSET
+    assert "onset_match" in res.summary()
+    th = np.asarray(res.theta_values)
+    assert res.theta_cv_pct == round(100.0 * th.std(ddof=1) / th.mean(), 2), \
+        "onset 组也带自己的 G2，口径与 total 组一致"
+
+
+def test_objective_comparison_prints_both_G2s() -> None:
+    samples = L.synthetic_lovo_trials(window_s=30.0, fps=10.0, seed=31)
+    comp = L.lovo_cv_objective_comparison(samples, theta_grid=_grid())
+    assert set(comp) == set(L.OBJECTIVES)
+    direct = L.lovo_cv(samples, theta_grid=_grid())
+    assert comp[L.OBJECTIVE_TOTAL].theta_values == direct.theta_values, \
+        "对照里的 total 组必须与单独跑 total 完全一致（同函数同参，不是第二套实现）"
+    txt = L.format_objective_comparison(comp)
+    for needle in (L.OBJECTIVE_TOTAL, L.OBJECTIVE_ONSET, "G2", "Δmean", "判读"):
+        assert needle in txt
+    assert "θ=" in txt
+    # 再跑一遍必须逐位一致（确定性）
+    assert L.format_objective_comparison(
+        L.lovo_cv_objective_comparison(samples, theta_grid=_grid())) == txt
