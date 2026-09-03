@@ -24,3 +24,6 @@
 | DP-017 | open | 道俊 | — | 陈璇后 7 个试次自行改用 **1.0x** 实时速（前 6 个 0.5x）。同一评分员批内倍速变更，须定：接受并单列，还是重评 |
 | DP-018 | open | Capy | `spike/hysteresis-bouts` | 评估 bout 判定改为**双阈值滞回**（θ_enter/θ_exit，参考 TopScan 开始规则/停止规则分离）。代价是自由参数从 1 个变 2 个，会削弱 G2 |
 | DP-019 | open | Capy | — | 与 EthoPlex 事件规则编辑器对齐规则表达式契约（AND/OR/N-of-M + 时长约束 + 滞回），三产品线共用一套 schema |
+| DP-020 | open | 实现 agent | `feat/tape-corridor-calibration` | **主线首要任务**：胶带走廊做成标定几何，取代每帧启发式。这是隔间 2/4 在 t≈24 s 挣扎期不稳的正解。规格 `docs/SPEC_胶带走廊标定_v1.md`，验收 A1–A3 / B1–B2 / C1–C3。前置：需要真实帧图（沙箱无 cv2 不能解码视频，见 DP-022） |
+| DP-021 | done | Capy | `chore/repo-hygiene` | SOP v1.1 补按键颗粒度规则 + 倍速一致性 + 导出方式。**不追溯已评 43 个试次**，适用 FST/新批次/重评 |
+| DP-022 | **blocked** | 道俊 | — | 从 Mac `~/Work/heavy/depression/悬尾/` 抽帧上传（PNG/JPG，沙箱 PIL 可读）：A 批 t≈24 s 挣扎期 8 帧 + B 批 t≥240 s 静止期 8 帧，含 4 隔间全幅。**DP-020 的唯一输入依赖** |
