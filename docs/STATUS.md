@@ -271,19 +271,26 @@ v1 的 `r ≥ 0.95` **下架**。技术理由不只是成本——参照物噪�
 
 ## 正在进行
 
-分支 `chore/human-scores-sop-workflow`：人工评分原始数据入库 + SOP v1.1 + 仓库规程 + issue 台账更正。
-已与 `origin/main` 合并，**测试通过 100 失败 0**。
+分支 `feat/human-agreement`（派工单 v2 口径，从 `main` 开）：**DP-012 d8f8861 + DP-013 bd64f8a
+已推送，待道俊评审合并**。测试通过 **121 失败 0**（基线 100 + DP-012 11 例 + DP-013 10 例）。
+上一分支 `chore/human-scores-sop-workflow`（评分数据入库 + SOP v1.1 + 规程）已并入 `main`。
 
 ## 下一步（按优先级，2026-09-03 重排）
 
 前四项（S1 硬门、胶带走廊、静止期噪声门、`rules.py`）**已全部完成**，历史见上文各节。
 
-1. **DP-012**：人工评分校验器 + 并集重算（`union(sorted(holds))`、丢弃 `mobile_seconds`、
-   拒收 `mobile==0 && holds==[] && unscoreable==false`、零长段记账）。**这个 PR 不算任何一致性指标。**
-2. **DP-013**：LOVO-CV 框架（7 折，**只拟合 θ_mob 一个标量**，bout 参数保持 FROZEN），
-   先用合成真值跑通。必须输出**每折的 θ_mob 值本身**——7 个值的变异系数就是 **G2**，
-   是本项目对 CSI「阈值需逐视频试错」唯一零成本的反证。
+1. ~~**DP-012**~~ **done-on-branch（待评审）**：`depressionplex/human_agreement.py`——四条硬规则
+   （并集重算丢 `mobile_seconds`、排序后并集、三联拒收、零长段记账）全部实现并钉进测试；
+   重算表 `data/human_scores/recomputed/human_scores_recomputed_DP-012.csv`（43 行）入库，
+   审计基线逐条复现（12 乱序、虚高最大 +54.78 s、每按键 0.1202 s、四人 mobile 均值、seed 分组）。
+   **没算任何一致性指标**——按派工单。
+2. ~~**DP-013**~~ **done-on-branch（待评审）**：`depressionplex/lovo_cv.py`——LOVO-CV 7 折，
+   **只拟合 θ_mob 一个标量**（bout 参数 FROZEN、拟合值不回写出货默认值、真值白名单堵死
+   循环论证），每折 θ 输出 + G2=跨折 CV 直接打印，分母随行（G9 口径）。合成真值跑通：
+   27 试次、r=0.954、BA 偏差 +0.35 s、CV=16.9%——**合成数字只是管道演示，不是 G2 证据**；
+   且合成里有一折 θ=0.025（留出最高量级视频后平台整体右移），说明框架如实反映折间异质性。
 3. 把 `rules.py` 与 `bouts.py` 串成 trial 级输出（含分母：可评分帧/总帧、`unknown` 占比、`TrialValidity`）。
+   ——`lovo_cv.evaluate_trial` 已覆盖其中大半（raw+pipeline 双报、分母随行），剩 `TrialValidity` 接线。
 4. **DP-024**：目检 7 个视频第 1 帧，定 `t_suspend` 口径（几分钟，解 DP-004 科学侧）。
 5. `band_range` 从 `TapeCorridor` 移到隔间级容器（已记账，不阻塞）。
 6. **DP-014**：正式 G1–G10 报告。前置：DP-004 科学侧 + 张重导（B 组现只有 3 对，出不了第二个 ICC）。

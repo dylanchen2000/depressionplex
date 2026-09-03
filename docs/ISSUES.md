@@ -19,8 +19,8 @@
 | DP-009 | open | 工具作者 | — | 秒表工具：补 `completed_at`，使实际作业顺序可查（`presentation_order` ≠ 实际观看顺序） |
 | DP-010 | open | 工具作者 | — | 秒表工具：导出失败时不要回退到内部状态。张的导出报错后只能贴 localStorage，**且在 4096 字符处被截断**。抢救已做完（`cli/salvage_truncated_audit.py` → `human_scores_张_..._SALVAGED_3of14.csv`）：**完整记录只有 3 条**（全 0.25x），第 4 条 `20mg_3周-ch4` 被截在 holds 中途、**已丢弃不修补**，`order` 里另外 23 个本次导出中完全无记录。**数据到此为止，恢复不了更多**——工具侧仍需修，避免下一批重演 |
 | DP-011 | open | 工具作者 | — | 秒表工具：`mobile==0 且 holds==[] 且 unscoreable==false` 必须拒绝导出（区分「没评」与「评出 0」） |
-| DP-012 | open | 实现 agent | `feat/human-agreement` | PR 1：人工评分校验器 + 并集重算。**不算任何一致性指标**。见 `SPEC_人工比对与验收_v2.md` §9 |
-| DP-013 | open | 实现 agent | `feat/human-agreement` | PR 2：LOVO-CV 框架（7 折，只拟合 θ_mob 一个标量），先用合成真值跑通 |
+| DP-012 | **doing（分支已交付，待评审）** | 实现 agent | `feat/human-agreement` d8f8861 | PR 1：人工评分校验器 + 并集重算。**不算任何一致性指标**。见 `SPEC_人工比对与验收_v2.md` §9。实现：`depressionplex/human_agreement.py` + `cli/recompute_human_scores.py`，43 试次重算表入库 `data/human_scores/recomputed/`；四条硬规则全部落到测试（12 乱序/零长 徐1张3/虚高 +54.78 s/每按键 0.1202 s/拒绝入库三联 徐乐彤-20mg_3周-ch4）。**待道俊处理**：`20mg_3周-ch4` 是补评还是正式剔除（剔除则 26 试次口径要写死） |
+| DP-013 | **doing（分支已交付，待评审）** | 实现 agent | `feat/human-agreement` bd64f8a | PR 2：LOVO-CV 框架（7 折，只拟合 θ_mob 一个标量），先用合成真值跑通。实现：`depressionplex/lovo_cv.py` + `cli/lovo_cv_demo.py`，每折 θ 输出、G2=跨折 CV 直接打印；bout 全程 FROZEN；真值白名单堵死循环论证。合成冒烟 r=0.954、G2(CV)=16.9%——**仅为管道验证，不构成 G2 证据**，真 G2 等 DP-014 人工真值。 |
 | DP-014 | open | 实现 agent | `feat/human-agreement` | PR 3：正式 G1–G10 报告。前置：DP-004 + 配对数据齐 |
 | DP-015 | done | Capy | `chore/repo-hygiene` | 分支/issue/ignore 规程；修 `.gitignore` 让人工评分文件能入库 |
 | DP-016 | open | 道俊 | — | 评分口径不统一是当前最大噪声源：4 位评分员在动段中位 1.08–3.36 s，总时长 115–196 s，**同 13 个试次 ICC 仅 0.818**。要不要做一次统一口径的校准会 |
