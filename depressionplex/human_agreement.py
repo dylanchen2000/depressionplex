@@ -1,0 +1,583 @@
+"""DP-012：人工评分校验器 + holds 并集重算。
+
+四条硬规则（SPEC_人工比对与验收_v2 §1/§2、派工单 v2 §2；均源自真实事故）：
+
+1. **一律丢弃 `mobile_seconds`**，改用 `union(sorted(holds))` 重算。工具每按键
+   多算约 0.121 s 墙钟时间（7 个独立估计 0.110–0.131），进入视频时间时被倍速
+   缩放——`mobile_seconds` 不可采信，只作为记账列保留（`mobile_seconds_DISCARDED`）。
+2. **读 holds 必须先排序再取并集。** 43 个试次里 12 个数组乱序自嵌套（朴素求和
+   最多虚高 +54.8 s / +30%）。乱序出现位置随机，不存在"只看最后一个"的捷径。
+3. **拒绝入库**：`mobile_seconds == 0` 且 `len(holds) == 0` 且 `unscoreable == false`
+   ⇒ 报错。这是"没评"不是"评出 0"；按 0 入库会变成 immobility = 360 s（物理上限），
+   单点拉歪 r 与 Bland-Altman。
+4. **零长段记账**：并集口径下自动为 0，无害，但必须报出来（不静默）。
+
+**本模块不做任何一致性指标**——r / ICC / Bland-Altman 属于 DP-013（框架）与
+DP-014（正式报告）。在这里出现任何"谁和谁相关了多少"都是越界。
+
+纪律（全项目硬规矩）：
+- 禁止静默兜底：拿不到合理结果就报警（warnings 列 / 拒绝状态 / 非零退出码），
+  不 clamp、不补 0、不猜。
+- 时间一律秒。窗长 360 s 是 TST 全程计分口径（DP-004 已关闭：工具在 360 s
+  硬收口，39 个有 holds 的试次无一超过 360.00 s）。
+- 只用标准库；不碰 assay_core。
+"""
+
+from __future__ import annotations
+
+import csv
+import io
+import json
+import re
+from dataclasses import dataclass, field, asdict
+from pathlib import Path
+from typing import Any, Iterable, Sequence
+
+AUDIT_FORMAT = "depressionplex.stopwatch-audit.v1"
+
+#: TST 全程计分窗口（秒）。FST 才是 6 min 里只计后 4 min，两范式不得抹平。
+TST_WINDOW_S = 360.0
+#: 时间戳的录制分辨率（工具以 0.01 s 落盘）。这是数据格式属性，不是判定阈值。
+TIMESTAMP_RESOLUTION_S = 0.01
+#: 乱序/自嵌套下 naive 求和与并集的偏差达到该量级（秒）时在报告里点名。
+#: 单位是秒（时间），不是像素/帧。
+NAIVE_INFLATION_FLAG_S = 5.0
+
+#: 配套 `human_scores_*.csv` 的 mobile_seconds 只落 1 位小数，JSON 落 2 位。
+#: 对账容差 = 量化半步长 + 浮点余量。这是落盘格式的分辨率属性（噪底台账
+#: 一类），**不是判定阈值**。
+SUMMARY_CSV_MOBILE_TOL_S = 0.05 + 1e-9
+
+#: 抢救 CSV 无 scorer_id 列，从文件名解析：human_scores_<评分员>_<日期>_SALVAGED_*
+_SCORER_IN_NAME_RE = re.compile(r"^human_scores_(.+?)_\d{4}-\d{2}-\d{2}")
+
+TRIAL_ID_RE = re.compile(r"^(?P<video>.+)-ch(?P<chamber>[1-9][0-9]*)$")
+
+_TRUES = {"true", "1", "yes", "是"}
+_FALSES = {"false", "0", "no", "否"}
+
+STATUS_ACCEPTED = "accepted"
+STATUS_REJECTED = "rejected"
+STATUS_UNSCOREABLE = "unscoreable"
+
+REJECT_UNSCORED_TRIPLE = (
+    "mobile_seconds==0 且 holds==[] 且 unscoreable==false —— "
+    "这是『没评』不是『评出 0』，按 0 入库会得到 immobility=360 s（物理上限）"
+)
+
+
+class TrialRejected(Exception):
+    """试次违反拒绝入库规则（rule 3）。strict 消费方（DP-013/014）应捕此异常。"""
+
+    def __init__(self, scorer_id: str, trial_id: str, reason: str) -> None:
+        super().__init__(f"[{scorer_id}] {trial_id}: {reason}")
+        self.scorer_id = scorer_id
+        self.trial_id = trial_id
+        self.reason = reason
+
+
+# ---------------------------------------------------------------- 布尔/数值解析
+
+
+def parse_bool(value: Any) -> bool | None:
+    """把 JSON/CSV 里的布尔杂形态解析为 True/False；解析不了返回 None（不猜）。"""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        v = value.strip().lower()
+        if v in _TRUES:
+            return True
+        if v in _FALSES:
+            return False
+        if v == "":
+            return None
+    if isinstance(value, (int, float)) and value in (0, 1):
+        return bool(value)
+    return None
+
+
+def _f(value: Any) -> float | None:
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return None
+    return v
+
+
+# ---------------------------------------------------------------- 规则 1+2+4：并集
+
+
+@dataclass(frozen=True)
+class UnionStats:
+    total_s: float          # union(sorted(holds)) 时长（唯一可采信的 mobile）
+    n_segments: int         # 按键段数
+    unsorted: bool          # holds 数组是否乱序（后段起点 < 前段起点）
+    zero_length: int        # 零长/负长段个数（按键抖动），并集口径下自动为 0
+    naive_sum_s: float      # Σ max(b-a,0)：乱序自嵌套时虚高，仅记账用
+
+
+def union_holds(holds: Sequence[Sequence[float]]) -> UnionStats:
+    """排序取并集。**必须先排序**：见模块头规则 2。
+
+    与 `cli/salvage_truncated_audit.union_seconds` 语义一致（后者已在 DP-010
+    抢救里实证），两者等价由 tests/test_human_agreement.py 钉住，防止分叉。
+    """
+    pairs = [(float(a), float(b)) for a, b in holds]
+    unsorted = any(pairs[i][0] > pairs[i + 1][0] for i in range(len(pairs) - 1))
+    zero_length = sum(1 for a, b in pairs if b <= a)
+    naive = sum(max(b - a, 0.0) for a, b in pairs)
+    total = 0.0
+    cur_a = cur_b = None
+    for a, b in sorted(pairs):
+        if b <= a:
+            continue
+        if cur_b is None or a > cur_b:
+            if cur_b is not None:
+                total += cur_b - cur_a
+            cur_a, cur_b = a, b
+        else:
+            cur_b = max(cur_b, b)
+    if cur_b is not None:
+        total += cur_b - cur_a
+    return UnionStats(
+        total_s=round(total, 2),
+        n_segments=len(pairs),
+        unsorted=unsorted,
+        zero_length=zero_length,
+        naive_sum_s=round(naive, 2),
+    )
+
+
+# ---------------------------------------------------------------- 行模型
+
+
+@dataclass
+class TrialRow:
+    scorer_id: str
+    trial_id: str
+    source: str                    # 'audit_json' | 'salvaged_csv'
+    video: str
+    chamber: int | None
+    seed: int | None
+    presentation_order: int | None
+    playback_rate: float | None
+    tail_climbing: bool | None
+    unscoreable: bool | None
+    status: str
+    n_hold_segments: int
+    holds_unsorted: bool
+    zero_length_segments: int
+    mobile_union_s: float | None   # rule 1 的唯一 mobile 口径；rejected 为 None
+    immobility_s: float | None     # TST_WINDOW_S − mobile_union_s
+    mobile_seconds_DISCARDED: float | None
+    naive_inflation_s: float | None    # rule 2 记账：naive − union（乱序才有意义）
+    per_key_excess_wallclock_s: float | None  # (discarded−union)/段数/倍速（§2 证据链）
+    reject_reason: str = ""
+    note: str = ""
+    scored_at: str = ""
+    warnings: list[str] = field(default_factory=list)
+
+    def csv_fields(self) -> dict[str, str]:
+        def fmt(v: Any) -> str:
+            if v is None:
+                return ""
+            if isinstance(v, bool):
+                return "True" if v else "False"
+            return str(v)
+        d = asdict(self)
+        d["warnings"] = ";".join(self.warnings)
+        return {k: fmt(v) for k, v in d.items()}
+
+
+CSV_COLUMNS = (
+    "scorer_id", "trial_id", "source", "video", "chamber", "seed",
+    "presentation_order", "playback_rate", "tail_climbing", "unscoreable",
+    "status", "n_hold_segments", "holds_unsorted", "zero_length_segments",
+    "mobile_union_s", "immobility_s", "mobile_seconds_DISCARDED",
+    "naive_inflation_s", "per_key_excess_wallclock_s",
+    "reject_reason", "note", "scored_at", "warnings",
+)
+
+
+def split_trial_id(trial_id: str) -> tuple[str, int | None]:
+    m = TRIAL_ID_RE.match(trial_id)
+    if not m:
+        return trial_id, None
+    return m.group("video"), int(m.group("chamber"))
+
+
+def _rule3_violation(mobile_seconds: float | None, n_holds: int,
+                     unscoreable: bool | None) -> bool:
+    return (mobile_seconds == 0.0) and (n_holds == 0) and (unscoreable is False)
+
+
+def _excess_wallclock(discarded: float | None, union: float | None,
+                      n_segments: int, rate: float | None) -> float | None:
+    """每按键墙钟超额（§2 的 0.121 s 估计的逐试次原料）。数据不齐就返回 None，不猜。"""
+    if discarded is None or union is None or rate is None:
+        return None
+    if n_segments <= 0 or rate <= 0:
+        return None
+    return round((discarded - union) / n_segments / rate, 4)
+
+
+# ---------------------------------------------------------------- 加载：审计 JSON
+
+
+def load_audit_json(path: Path | str, *, on_reject: str = "mark") -> tuple[dict, list[TrialRow]]:
+    """读一份秒表工具审计导出（王娟/陈璇/徐乐彤格式）。
+
+    on_reject='raise' ⇒ 命中 rule 3 抛 TrialRejected（下游 DP-013/014 用，
+    真值入库必须显式处理"没评"）；'mark' ⇒ 行标 rejected 但保留在表里报出。
+    """
+    path = Path(path)
+    doc = json.loads(path.read_text(encoding="utf-8"))
+    fmt = doc.get("format")
+    if fmt != AUDIT_FORMAT:
+        raise ValueError(f"{path.name}: format={fmt!r}，不是本校验器认识的 {AUDIT_FORMAT!r}")
+    scorer = str(doc.get("scorer_id", ""))
+    seed = doc.get("seed")
+    delivered: list[str] = list(doc.get("delivered_order", []))
+    rows: list[TrialRow] = []
+    for rec in doc.get("records", []):
+        row = _row_from_record(rec, scorer=scorer, seed=seed, delivered=delivered)
+        if row.status == STATUS_REJECTED and on_reject == "raise":
+            raise TrialRejected(scorer, row.trial_id, row.reject_reason)
+        rows.append(row)
+    header = {
+        "scorer_id": scorer, "seed": seed,
+        "done_count": doc.get("done_count"), "total_trials": doc.get("total_trials"),
+        "tool_version": doc.get("tool_version"), "partial": doc.get("partial"),
+        "delivered_order": delivered, "file": path.name,
+    }
+    return header, rows
+
+
+def _row_from_record(rec: dict, *, scorer: str, seed: Any,
+                     delivered: Sequence[str]) -> TrialRow:
+    trial_id = str(rec.get("trial_id", ""))
+    video, chamber = split_trial_id(trial_id)
+    warns: list[str] = []
+    holds = rec.get("holds") or []
+    discarded = _f(rec.get("mobile_seconds"))
+    unscoreable = parse_bool(rec.get("unscoreable", False))
+    if unscoreable is None:
+        warns.append("unscoreable_field_unparseable")
+
+    # rule 3：先于一切——"没评"不许伪装成"评出 0"
+    if _rule3_violation(discarded, len(holds), unscoreable):
+        return TrialRow(
+            scorer_id=scorer, trial_id=trial_id, source="audit_json",
+            video=video, chamber=chamber, seed=seed,
+            presentation_order=rec.get("presentation_order"),
+            playback_rate=_f(rec.get("playback_rate")),
+            tail_climbing=parse_bool(rec.get("tail_climbing", False)),
+            unscoreable=unscoreable, status=STATUS_REJECTED,
+            n_hold_segments=0, holds_unsorted=False, zero_length_segments=0,
+            mobile_union_s=None, immobility_s=None,
+            mobile_seconds_DISCARDED=discarded,
+            naive_inflation_s=None, per_key_excess_wallclock_s=None,
+            reject_reason=REJECT_UNSCORED_TRIPLE,
+            note=str(rec.get("note", "")), scored_at=str(rec.get("scored_at", "")),
+            warnings=warns,
+        )
+
+    # rule 1+2+4
+    u = union_holds(holds)
+    rate = _f(rec.get("playback_rate"))
+    porder = rec.get("presentation_order")
+    if isinstance(porder, int) and delivered:
+        if not (1 <= porder <= len(delivered)) or delivered[porder - 1] != trial_id:
+            warns.append("presentation_order_mismatch")
+    else:
+        warns.append("presentation_order_missing")
+    for a, b in ((float(x), float(y)) for x, y in holds):
+        if a < -TIMESTAMP_RESOLUTION_S or b < -TIMESTAMP_RESOLUTION_S:
+            warns.append("hold_negative_time")
+            break
+    for b in (float(y) for _, y in holds):
+        if b > TST_WINDOW_S + TIMESTAMP_RESOLUTION_S:
+            warns.append("hold_beyond_window")
+            break
+
+    status = STATUS_UNSCOREABLE if unscoreable else STATUS_ACCEPTED
+    union = u.total_s if status == STATUS_ACCEPTED else None
+    immob = round(TST_WINDOW_S - u.total_s, 2) if status == STATUS_ACCEPTED else None
+    inflation = round(u.naive_sum_s - u.total_s, 2) if (u.unsorted and status == STATUS_ACCEPTED) else None
+    if inflation is not None and inflation >= NAIVE_INFLATION_FLAG_S:
+        warns.append("naive_sum_inflation>=5s")
+
+    return TrialRow(
+        scorer_id=scorer, trial_id=trial_id, source="audit_json",
+        video=video, chamber=chamber, seed=seed,
+        presentation_order=porder, playback_rate=rate,
+        tail_climbing=parse_bool(rec.get("tail_climbing", False)),
+        unscoreable=unscoreable, status=status,
+        n_hold_segments=u.n_segments, holds_unsorted=u.unsorted,
+        zero_length_segments=u.zero_length,
+        mobile_union_s=union, immobility_s=immob,
+        mobile_seconds_DISCARDED=discarded,
+        naive_inflation_s=inflation,
+        per_key_excess_wallclock_s=_excess_wallclock(discarded, union, u.n_segments, rate),
+        note=str(rec.get("note", "")), scored_at=str(rec.get("scored_at", "")),
+        warnings=warns,
+    )
+
+
+# ---------------------------------------------------------- 加载：张的抢救 CSV
+#
+# 抢救文件（cli/salvage_truncated_audit.py 产出）里 holds 已聚合成
+# mobile_union_s / holds_unsorted / zero_length_segments 三列——并集口径与
+# 乱序判据是同一实现（见 union_holds 的等价钉测）。本 loader 只做透传 +
+# 一致性复算（immobility），并回填 seed（从同目录 TRUNCATED txt 头部，
+# 那是原始导出的一部分，不是猜测）。
+
+
+def _seed_from_truncated_txt(path: Path) -> int | None:
+    try:
+        head = path.read_text(encoding="utf-8")[:200]
+    except FileNotFoundError:
+        return None
+    m = re.search(r'"seed"\s*:\s*(\d+)', head)
+    return int(m.group(1)) if m else None
+
+
+def load_salvaged_csv(path: Path | str, *, on_reject: str = "mark") -> list[TrialRow]:
+    path = Path(path)
+    sibling_txt = sorted(path.parent.glob("*TRUNCATED*json.txt"))
+    seed = _seed_from_truncated_txt(sibling_txt[0]) if sibling_txt else None
+    m = _SCORER_IN_NAME_RE.match(path.name)
+    scorer_from_name = m.group(1) if m else path.name  # 解析不出如实回退文件名
+    rows: list[TrialRow] = []
+    with path.open(encoding="utf-8-sig", newline="") as fh:
+        for rec in csv.DictReader(fh):
+            trial_id = rec.get("trial_id", "")
+            video, chamber = split_trial_id(trial_id)
+            warns: list[str] = ["union_precomputed_by_salvage_tool"]
+            n_seg = int(_f(rec.get("n_hold_segments")) or 0)
+            discarded = _f(rec.get("mobile_seconds_DISCARDED"))
+            union = _f(rec.get("mobile_union_s"))
+            unscoreable = parse_bool(rec.get("unscoreable"))
+            unsorted = parse_bool(rec.get("holds_unsorted")) is True
+            zero = int(_f(rec.get("zero_length_segments")) or 0)
+            rate = _f(rec.get("playback_rate"))
+            row = TrialRow(
+                scorer_id=str(rec.get("scorer_id") or scorer_from_name),
+                trial_id=trial_id, source="salvaged_csv",
+                video=video, chamber=chamber, seed=seed,
+                presentation_order=(int(v) if (v := _f(rec.get("presentation_order"))) is not None else None),
+                playback_rate=rate,
+                tail_climbing=parse_bool(rec.get("tail_climbing")),
+                unscoreable=unscoreable, status=STATUS_ACCEPTED,
+                n_hold_segments=n_seg, holds_unsorted=unsorted,
+                zero_length_segments=zero,
+                mobile_union_s=union,
+                immobility_s=(round(TST_WINDOW_S - union, 2) if union is not None else None),
+                mobile_seconds_DISCARDED=discarded,
+                naive_inflation_s=None,  # 抢救件无 holds 明细，朴素虚高不可复算（如实留空）
+                per_key_excess_wallclock_s=_excess_wallclock(discarded, union, n_seg, rate),
+                note=str(rec.get("note", "")), scored_at=str(rec.get("scored_at", "")),
+                warnings=warns,
+            )
+            if _rule3_violation(discarded, n_seg, unscoreable):
+                row.status = STATUS_REJECTED
+                row.reject_reason = REJECT_UNSCORED_TRIPLE
+                row.mobile_union_s = None
+                row.immobility_s = None
+                if on_reject == "raise":
+                    raise TrialRejected(row.scorer_id, trial_id, REJECT_UNSCORED_TRIPLE)
+            rows.append(row)
+    return rows
+
+
+# ---------------------------------------------------------------- 交叉核对：CSV 摘要
+
+
+def crosscheck_summary_csv(rows: Sequence[TrialRow], path: Path | str) -> list[str]:
+    """配套 `human_scores_*.csv` 与审计 JSON 的一致性核对（只核对，不采信其数值）。
+
+    返回不一致清单（空 = 一致）。CSV 无 holds，mobile_seconds 列不可采信——
+    它的存在价值就是被拿来和 JSON 对账。
+    """
+    path = Path(path)
+    by_trial = {r.trial_id: r for r in rows if r.source == "audit_json"}
+    mismatches: list[str] = []
+    with path.open(encoding="utf-8-sig", newline="") as fh:
+        for rec in csv.DictReader(fh):
+            tid = rec.get("trial_id", "")
+            row = by_trial.get(tid)
+            if row is None:
+                mismatches.append(f"{path.name}: CSV 有 JSON 无 → {tid}")
+                continue
+            c_mob, j_mob = _f(rec.get("mobile_seconds")), row.mobile_seconds_DISCARDED
+            # 容差是 CSV 落盘分辨率（1 位小数）的半步长，不是判定阈值——见
+            # SUMMARY_CSV_MOBILE_TOL_S 注释。超出它才是真对不上账。
+            if c_mob is None or j_mob is None or abs(c_mob - j_mob) > SUMMARY_CSV_MOBILE_TOL_S:
+                mismatches.append(f"{path.name}/{tid}: mobile_seconds CSV={c_mob} ≠ JSON={j_mob}")
+            c_p, j_p = _f(rec.get("presentation_order")), row.presentation_order
+            if c_p is None or j_p is None or int(c_p) != j_p:
+                mismatches.append(f"{path.name}/{tid}: presentation_order CSV={c_p} ≠ JSON={j_p}")
+            if parse_bool(rec.get("unscoreable")) != row.unscoreable:
+                mismatches.append(f"{path.name}/{tid}: unscoreable 不一致")
+            if parse_bool(rec.get("tail_climbing")) != row.tail_climbing:
+                mismatches.append(f"{path.name}/{tid}: tail_climbing 不一致")
+    missing_in_csv = [r.scorer_id + "/" + t for t in by_trial
+                      if t not in {rec for rec in _csv_trial_ids(path)}]
+    mismatches.extend(f"{path.name}: JSON 有 CSV 无 → {m}" for m in missing_in_csv)
+    return mismatches
+
+
+def _csv_trial_ids(path: Path) -> set[str]:
+    with path.open(encoding="utf-8-sig", newline="") as fh:
+        return {rec.get("trial_id", "") for rec in csv.DictReader(fh)}
+
+
+# ---------------------------------------------------------------- 装配 + 报告
+
+
+@dataclass
+class TableResult:
+    rows: list[TrialRow]
+    n_trials: int = 0
+    n_accepted: int = 0
+    n_rejected: int = 0
+    n_unscoreable: int = 0
+    unsorted_total: int = 0
+    zero_length_total: int = 0
+    max_naive_inflation_s: float = 0.0
+    per_key_estimates: list[float] = field(default_factory=list)
+    window_violations: list[str] = field(default_factory=list)
+    order_mismatches: list[str] = field(default_factory=list)
+    crosscheck_mismatches: list[str] = field(default_factory=list)
+    seeds: dict[str, int | None] = field(default_factory=dict)
+    seed_groups: dict[int, list[str]] = field(default_factory=dict)
+
+    def by_scorer(self) -> dict[str, dict[str, Any]]:
+        out: dict[str, dict[str, Any]] = {}
+        for r in self.rows:
+            b = out.setdefault(r.scorer_id, {"n": 0, "unsorted": 0, "zero_length": 0,
+                                             "rejected": 0, "union_sum_s": 0.0})
+            b["n"] += 1
+            b["unsorted"] += int(r.holds_unsorted)
+            b["zero_length"] += r.zero_length_segments
+            b["rejected"] += int(r.status == STATUS_REJECTED)
+            b["union_sum_s"] += r.mobile_union_s or 0.0
+        return out
+
+
+def build_table(data_dir: Path | str) -> TableResult:
+    data_dir = Path(data_dir)
+    result = TableResult(rows=[])
+    audit_jsons = sorted(p for p in data_dir.glob("timer_audit_*.json"))
+    salvaged = sorted(p for p in data_dir.glob("human_scores_*SALVAGED*.csv"))
+    if not audit_jsons:
+        raise FileNotFoundError(f"{data_dir} 下没有 timer_audit_*.json —— 拒绝产出空表")
+
+    for p in audit_jsons:
+        header, rows = load_audit_json(p, on_reject="mark")
+        result.rows.extend(rows)
+        if header["seed"] is not None:
+            result.seeds[header["scorer_id"]] = int(header["seed"])
+    for p in salvaged:
+        rows = load_salvaged_csv(p, on_reject="mark")
+        result.rows.extend(rows)
+        for r in rows:
+            if r.seed is not None:
+                result.seeds[r.scorer_id] = int(r.seed)
+
+    result.rows.sort(key=lambda r: (r.scorer_id, r.presentation_order or 0, r.trial_id))
+
+    for r in result.rows:
+        result.n_trials += 1
+        if r.status == STATUS_REJECTED:
+            result.n_rejected += 1
+        elif r.status == STATUS_UNSCOREABLE:
+            result.n_unscoreable += 1
+        else:
+            result.n_accepted += 1
+        result.unsorted_total += int(r.holds_unsorted)
+        result.zero_length_total += r.zero_length_segments
+        if r.naive_inflation_s:
+            result.max_naive_inflation_s = max(result.max_naive_inflation_s, r.naive_inflation_s)
+        if r.per_key_excess_wallclock_s is not None and r.status == STATUS_ACCEPTED:
+            result.per_key_estimates.append(r.per_key_excess_wallclock_s)
+        if "hold_beyond_window" in r.warnings:
+            result.window_violations.append(f"{r.scorer_id}/{r.trial_id}")
+        if "presentation_order_mismatch" in r.warnings:
+            result.order_mismatches.append(f"{r.scorer_id}/{r.trial_id}")
+
+    for seed, scorers in _invert(result.seeds).items():
+        result.seed_groups[seed] = sorted(scorers)
+
+    # 配套 CSV 交叉核对（有 JSON 的评分员才核）
+    json_scorers = {r.scorer_id for r in result.rows if r.source == "audit_json"}
+    for p in sorted(data_dir.glob("human_scores_*.csv")):
+        if "SALVAGED" in p.name:
+            continue
+        # 用文件名里的评分员名过滤（文件名形如 human_scores_<评分员>_<日期>_partialNofM.csv）
+        for s in json_scorers:
+            if f"_{s}_" in p.name:
+                result.crosscheck_mismatches.extend(
+                    crosscheck_summary_csv([r for r in result.rows if r.scorer_id == s], p))
+    return result
+
+
+def _invert(d: dict[str, int]) -> dict[int, list[str]]:
+    out: dict[int, list[str]] = {}
+    for k, v in d.items():
+        out.setdefault(v, []).append(k)
+    return out
+
+
+def write_table_csv(rows: Sequence[TrialRow], path: Path | str) -> None:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8", newline="") as fh:
+        w = csv.DictWriter(fh, fieldnames=CSV_COLUMNS, lineterminator="\n")
+        w.writeheader()
+        for r in sorted(rows, key=lambda r: (r.scorer_id, r.presentation_order or 0, r.trial_id)):
+            w.writerow(r.csv_fields())
+
+
+def table_csv_text(rows: Sequence[TrialRow]) -> str:
+    buf = io.StringIO()
+    w = csv.DictWriter(buf, fieldnames=CSV_COLUMNS, lineterminator="\n")
+    w.writeheader()
+    for r in sorted(rows, key=lambda r: (r.scorer_id, r.presentation_order or 0, r.trial_id)):
+        w.writerow(r.csv_fields())
+    return buf.getvalue()
+
+
+def format_report(res: TableResult) -> str:
+    lines = [
+        f"试次总数: {res.n_trials}（accepted {res.n_accepted} / rejected {res.n_rejected} "
+        f"/ unscoreable {res.n_unscoreable}）",
+        f"holds 乱序自嵌套试次: {res.unsorted_total}",
+        f"零长段总数: {res.zero_length_total}（并集口径下自动为 0，此处仅记账）",
+        f"朴素求和最大虚高: {res.max_naive_inflation_s} s",
+        f"holds 越过 {TST_WINDOW_S} s 硬收口: {res.window_violations or '无'}",
+        f"presentation_order 与 delivered_order 不符: {res.order_mismatches or '无'}",
+        f"配套 CSV 交叉核对: {res.crosscheck_mismatches or '全部一致'}",
+        f"seed 分组: { {s: g for s, g in res.seed_groups.items()} }",
+    ]
+    if res.per_key_estimates:
+        import statistics
+        m = statistics.mean(res.per_key_estimates)
+        sd = statistics.stdev(res.per_key_estimates) if len(res.per_key_estimates) > 1 else 0.0
+        lines.append(
+            f"每按键墙钟超额（逐试次估计 n={len(res.per_key_estimates)}）: "
+            f"均值 {m:.4f} s（审计 §5 的 0.121 s 为试次×倍速合并口径，逐试次更抖）"
+        )
+    if res.n_rejected:
+        lines.append("⚠ 以下试次被拒绝入库（rule 3，重新排评）:")
+        for r in res.rows:
+            if r.status == STATUS_REJECTED:
+                lines.append(f"  - {r.scorer_id} / {r.trial_id}: {r.reject_reason}")
+    lines.append("按评分员: ")
+    for s, b in sorted(res.by_scorer().items()):
+        lines.append(
+            f"  {s}: n={b['n']} 乱序={b['unsorted']} 零长段={b['zero_length']} "
+            f"拒绝={b['rejected']} union合计={b['union_sum_s']:.2f}s"
+        )
+    lines.append("本表不含任何一致性指标（r/ICC/BA 属 DP-013/DP-014）。")
+    return "\n".join(lines)
