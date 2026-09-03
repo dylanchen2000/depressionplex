@@ -37,6 +37,17 @@ def _load(path: Path) -> dict:
     doc = json.loads(path.read_text())
     if doc.get("schema") != SCHEMA:
         raise SystemExit(f"标注文件 schema 不符: {doc.get('schema')} != {SCHEMA}")
+    # 原语表版本：早于该字段引入的存量标注（2026-09-03 之前同事已做的那批）
+    # **不能拒收**——它们是真实真值。缺字段时标 `pre-v1` 并告警，让口径显式可见，
+    # 而不是静默当成当前版本（本项目已有两次静默兜底事故）。
+    if "primitive_table_version" not in doc:
+        doc["primitive_table_version"] = "pre-v1"
+        print(
+            f"警告：{path.name} 未记录原语表版本，按 `pre-v1` 处理。"
+            f"当前表为 {P.PRIMITIVE_TABLE_VERSION}；若两者原语定义不同，"
+            f"这批标注不得与新批混算 κ。",
+            file=sys.stderr,
+        )
     return doc
 
 
@@ -59,6 +70,7 @@ def cmd_init(args: argparse.Namespace) -> int:
         )
     doc = {
         "schema": SCHEMA,
+        "primitive_table_version": P.PRIMITIVE_TABLE_VERSION,
         "trial": args.trial,
         "assay": args.assay,
         "annotator": args.annotator,
@@ -171,6 +183,14 @@ def cmd_agree(args: argparse.Namespace) -> int:
     b = _load(Path(args.b))
     if a["n_frames"] != b["n_frames"]:
         raise SystemExit("两文件帧数不符")
+    # 原语表版本必须一致：原语定义变了，同名原语指的就不是同一件事，
+    # 跨版本算出的 κ 混了"定义差异"与"判断差异"，数字无法解释。
+    if a["primitive_table_version"] != b["primitive_table_version"]:
+        raise SystemExit(
+            "硬约束：两份标注的原语表版本不同"
+            f"（{a['primitive_table_version']} vs {b['primitive_table_version']}）。"
+            "跨版本 κ 混淆了定义差异与判断差异，不可计算。"
+        )
     # 盲法硬约束：κ 只在盲标 trial 上算。任一文件带机器预填 ⇒ 锚定偏差 ⇒
     # κ 虚高（两人同意的是机器，不是行为无歧义）。文档拦不住赶进度的人，
     # 所以这里是工具级硬约束。
