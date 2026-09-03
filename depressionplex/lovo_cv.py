@@ -32,6 +32,11 @@
   immobility = window − mobile；软件侧同样 mobile = bout 流水线后的 Mobility
   时长（raw 变体同报，DP-014 要求两侧同时施加 bout 时不迷路）。
 - 分母随行携带（G9）：total_frames / scoreable_frames / unknown_fraction。
+- **DP-035（G11 逐秒 Jaccard 门）**：总时长一致 ≠ 判断一致（实测有试次总差 0.9 s
+  而逐秒 Jaccard 仅 0.51）。软件-人工的 Jaccard 与人工-人工基线（0.738，13 试次
+  实测，DP-035）**同式同口径**（复用 `scorer_disagreement` 的交集实现，不许两套账），
+  与 G7/G8 捆在同一份报告里出，**任一不过即不过**；逐试次值全部列出（升序 =
+  拖累项排前）。算不出 ⇒ 判不过并写明原因，不许"不报=过"。
 - 阈值单位：θ 是 BL² 归一化残差（无量纲物理量），搜索网格边界只是搜索范围
   声明，不是判定阈值。时间一律秒。
 - assay_core 纪律沿用：只依赖 numpy。
@@ -46,7 +51,7 @@ from typing import Sequence
 import numpy as np
 
 from .assay_core import bouts, rules
-from .cli.scorer_disagreement import mutual_best_edges
+from .cli.scorer_disagreement import intersect_total, mutual_best_edges, total as segs_total
 
 #: 唯一允许被拟合的参数名。写死在这里，报告里也好对账。
 FITTED_PARAM = "theta_mob"
@@ -59,6 +64,15 @@ OBJECTIVES = (OBJECTIVE_TOTAL, OBJECTIVE_ONSET)
 #: 它不是判定阈值，FROZEN 出货值 0.0175 在网格内。
 THETA_SEARCH_MIN = 0.005
 THETA_SEARCH_MAX = 0.05
+
+# ---------------------------------------------------------- 验收门阈值（G7/G8/G11）
+# 三个门槛的来源全部是**人工侧**实测或 SPEC，与软件输出无关——
+# "禁止用自己的输出调阈值"在这里是构造性成立，不是口头承诺。
+G7_MIN_R = 0.818          # G7：样本外 Pearson r 下限（SPEC §9，人工-人工一致性推导）
+G8_MAX_BIAS_S = 28.6      # G8：|Bland-Altman 偏差| 上限 = 两位人工评分员的实测最大偏差（DP-036）
+G11_MIN_JACCARD = 0.738   # G11：软件-人工逐秒 Jaccard 下限 = 人工-人工 A 组 n=13 平均
+                          # （DP-035 唯一**预先登记**值；B 组 0.816/n=3 只作参考记账，
+                          # 拿 n=3 抬门槛属小样本过拟合——门槛维持 0.738 不动）
 
 
 # ---------------------------------------------------------------- 样本与结果模型
@@ -101,6 +115,13 @@ class TrialSample:
                 if not (0.0 <= s and e <= self.window_s + 1e-9):
                     raise ValueError(f"{self.trial_id}: 真值段 [{s},{e}] 越出窗口，拒收不截断")
                 prev_end = e
+            # G11 与 onset 目标都直接吃段——段合计与 mobile 总量必须一本账。
+            seg_sum = sum(e - s for s, e in self.truth_mobile_segs)
+            if abs(seg_sum - self.truth_mobile_s) > 0.05:
+                raise ValueError(
+                    f"{self.trial_id}: 真值段合计 {seg_sum:.3f} s 与 truth_mobile_s "
+                    f"{self.truth_mobile_s:.3f} s 差 >0.05 s——两套账不许同时入账"
+                    "（上游 normalize/union 与总量必须同源）")
 
 
 @dataclass(frozen=True)
@@ -121,6 +142,8 @@ class TrialEval:
     #: 软件 Mobility 段（bout 流水线后，秒；闭区间帧号换算 [start/fps, (end+1)/fps]）。
     #: onset_match 目标的输入；Interval 闭区间语义在这里收口，别处不再猜。
     software_mobility_pipeline_segs: tuple[tuple[float, float], ...] = ()
+    #: DP-035（G11）：软件-人工逐秒 Jaccard；真值段缺失时为 None（算不出≠通过）。
+    jaccard_vs_truth: float | None = None
 
 
 @dataclass(frozen=True)
@@ -155,6 +178,9 @@ class LovoResult:
     truth_sources: tuple[str, ...]
     #: DP-037：本结果用的目标函数（默认 = 历史口径，不许偷改）。
     objective: str = OBJECTIVE_TOTAL
+    #: DP-035（G11）：全部样本外预测的逐秒 Jaccard 均值；任何一试次缺真值段 ⇒ None
+    #: （算不出必须显式呈现，不许部分平均冒充全体）。
+    g11_mean_jaccard: float | None = None
 
     def summary(self) -> str:
         lines = [
@@ -181,6 +207,37 @@ class LovoResult:
             f"  Bland-Altman: 偏差 {self.ba_bias_s:+.2f} s, "
             f"LoA [{self.ba_loa_low_s:.2f}, {self.ba_loa_high_s:.2f}] s",
         ]
+        # ---- DP-035：G11 逐秒 Jaccard + G7/G8/G11 捆绑判定 ----
+        per_trial = [(p.trial_id, p.jaccard_vs_truth)
+                     for f in self.folds for p in f.predictions]
+        missing = [t for t, j in per_trial if j is None]
+        if self.g11_mean_jaccard is not None:
+            lines.append(
+                f"  G11 逐秒 Jaccard（软件-人工，与人工-人工基线同式）"
+                f" mean = {self.g11_mean_jaccard:.3f}（n={len(per_trial)}，"
+                f"门槛 ≥{G11_MIN_JACCARD} = 人工-人工 13 试次实测，DP-035）")
+            lines.append("    逐试次升序（拖累项排前）：")
+            for t, j in sorted(per_trial, key=lambda kv: kv[1]):
+                lines.append(f"      {j:.3f}  {t}")
+        else:
+            lines.append(
+                f"  G11 逐秒 Jaccard：**算不出**（{len(missing)}/{len(per_trial)} "
+                f"试次缺真值段：{missing[:8]}{'…' if len(missing) > 8 else ''}）"
+                "——算不出按不过处理，不报≠过")
+        g7_ok = self.pooled_pearson_r >= G7_MIN_R
+        g8_ok = abs(self.ba_bias_s) <= G8_MAX_BIAS_S
+        g11_ok = (self.g11_mean_jaccard is not None
+                  and self.g11_mean_jaccard >= G11_MIN_JACCARD)
+        marks = (("G7 r≥0.818", g7_ok), ("G8 |bias|≤28.6s", g8_ok),
+                 ("G11 Jaccard≥0.738", g11_ok))
+        lines.append(
+            "  验收门捆绑（G7/G8/G11 同时报告，任一不过即不过）: "
+            + "; ".join(f"{n} {'过' if ok else '**不过**'}" for n, ok in marks)
+            + f" ⇒ 总判定：{'三项全过' if all(ok for _, ok in marks) else '不过'}")
+        if set(self.truth_sources) != {"human"}:
+            lines.append(
+                "  [口径声明] 本表真值含合成——上面的捆绑判定只是**管道演示**，"
+                "不得对外作为验收证据；正式 G1–G11 以 DP-014（人工真值）为准。")
         return "\n".join(lines)
 
 
@@ -220,10 +277,30 @@ def evaluate_trial(sample: TrialSample, theta: float, *,
         total_frames=total, scoreable_frames=scoreable,
         unknown_fraction=unknown_fraction,
         software_mobility_pipeline_segs=segs,
+        jaccard_vs_truth=(None if sample.truth_mobile_segs is None
+                          else jaccard_segs(segs, sample.truth_mobile_segs)),
     )
 
 
 # ---------------------------------------------------------------- 目标函数
+
+
+def jaccard_segs(a_segs: Sequence[tuple[float, float]],
+                 b_segs: Sequence[tuple[float, float]]) -> float:
+    """两组时间段的时长加权 Jaccard = 交集 / (A总 + B总 − 交集)。
+
+    与 `cli/scorer_disagreement` 人工-人工基线 0.738 **完全同式**——交集/总长
+    都复用那边的实现，G11 与基线之间不许有第二套账（两套账 = 不可比 = 门失效）。
+    唯一的特例是双方皆空（denominator=0）：约定记 1.0——"两边都说整段没有任何
+    已判运动段"是零分歧，判对不罚（与 onset_match 的零段语义同构）。一侧空另一侧
+    不空由公式自然给 0.0（完全不重叠），不特判。
+    """
+    a, b = list(a_segs), list(b_segs)
+    inter = intersect_total(a, b)
+    denom = segs_total(a) + segs_total(b) - inter
+    if denom <= 1e-12:
+        return 1.0 if not a and not b else 0.0
+    return inter / denom
 
 
 def onset_match_error(sw_segs: Sequence[tuple[float, float]],
@@ -369,6 +446,9 @@ def lovo_cv(samples: Sequence[TrialSample], *,
     th = np.asarray(thetas)
     diff = soft - truth
     cv = float(100.0 * th.std(ddof=1) / th.mean()) if th.size > 1 else 0.0
+    # G11：all-or-nothing——有一个试次缺真值段就整门"算不出"，不许部分平均冒充全体
+    jacs = [p.jaccard_vs_truth for p in all_pred]
+    g11 = float(np.mean(jacs)) if all_pred and all(j is not None for j in jacs) else None
     return LovoResult(
         folds=tuple(folds),
         bout_params=bp,
@@ -381,6 +461,7 @@ def lovo_cv(samples: Sequence[TrialSample], *,
         ba_loa_high_s=float(diff.mean() + 1.96 * diff.std(ddof=1)) if len(diff) > 1 else 0.0,
         truth_sources=tuple(s.truth_source for s in samples),
         objective=objective,
+        g11_mean_jaccard=g11,
     )
 
 
@@ -463,6 +544,8 @@ def prediction_rows(res: LovoResult) -> list[dict]:
                 "total_frames": p.total_frames,
                 "scoreable_frames": p.scoreable_frames,
                 "unknown_fraction": round(p.unknown_fraction, 4),
+                "g11_jaccard": (None if p.jaccard_vs_truth is None
+                                else round(p.jaccard_vs_truth, 4)),
                 "bout_params_frozen": res.bout_params == bouts.CSI_TST_STARTING_POINT,
                 "objective": res.objective,
             })

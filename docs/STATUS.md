@@ -372,7 +372,8 @@ v1 的 `r ≥ 0.95` **下架**。技术理由不只是成本——参照物噪�
 - **二轮派工单进度（执行 agent）**：任务 0 ✅（`feat/human-agreement` 经 PR **#16** 合入 main，合并前已 merge `5044183`，全量测试 **132 通过 0 失败**）；
   **DP-032 ✅ 交付**（Mac 侧全扫：隔间 4 非 valid = **2**——v4/v7；脚本修复经 PR **#18** 合入；逐字映射表与帧级目检复核见上方"销账"段；
   `_汇总.txt` 全文已随派工单回报贴给道俊）；**DP-037 ✅ 经 PR #20 合入**（默认目标一字未动 + `onset_match` 对照、配对复用 `mutual_best_edges`、两组各带 G2、判读留道俊；合入时全量测试 **138 通过 0 失败**）；
-  **DP-034 + DP-031 ✅ 经 PR #21 合入**（`feat/dp034-never-occupied`；**2026-09-04 实测回归**：Mac 上用拆分后代码全量重跑 `scripts/dp032_chamber4_sweep.sh` ⇒ v4/v7 = `never_occupied`（在场占比恰 0.00）、其余 5 支 valid、detached=0 ⇒ **G10 假阳性 0 在实测层坐实**，与 DP-032/DP-005 的帧级目检与切片清单结论一致）：`validity.py` 拆 `never_occupied`/`detached`（在场判据纯相对量⇒标度不变，标进测试；新增中途脱落判 n≥4；`score_gate()` 唯一闸门——排除态不放行、幻影候选 `[PHANTOM-IMMOBILITY 报警]`、`occupied_fraction` 入账且空场必须恰为 0.0）；新建 `g10_gates.py` 报告层（三支各带分母不合并、G10a 双口径、G10b"召回不可测"+警示行、G10c κ 退化打"未定义"不得记 1.0）；合入时全量测试 **148 通过 0 失败**；后续按序：DP-035 → trial 级串联。
+  **DP-034 + DP-031 ✅ 经 PR #21 合入**（`feat/dp034-never-occupied`；**2026-09-04 实测回归**：Mac 上用拆分后代码全量重跑 `scripts/dp032_chamber4_sweep.sh` ⇒ v4/v7 = `never_occupied`（在场占比恰 0.00）、其余 5 支 valid、detached=0 ⇒ **G10 假阳性 0 在实测层坐实**，与 DP-032/DP-005 的帧级目检与切片清单结论一致）：`validity.py` 拆 `never_occupied`/`detached`（在场判据纯相对量⇒标度不变，标进测试；新增中途脱落判 n≥4；`score_gate()` 唯一闸门——排除态不放行、幻影候选 `[PHANTOM-IMMOBILITY 报警]`、`occupied_fraction` 入账且空场必须恰为 0.0）；新建 `g10_gates.py` 报告层（三支各带分母不合并、G10a 双口径、G10b"召回不可测"+警示行、G10c κ 退化打"未定义"不得记 1.0）；合入时全量测试 **148 通过 0 失败**；拆分代码实测重跑见上；脚本 `$var` 紧跟全角括号在 bash 3.2 下的定案段崩溃经 PR **#22** 修复）；
+  **DP-035 ✅（`feat/dp035-g11-gate`）**：G11 逐秒 Jaccard 门接入 `lovo_cv` 报告——`jaccard_segs` 与人工-人工基线**同式同实现**（复用 `scorer_disagreement.intersect_total/total`）；逐试次升序全表（拖累项排前）随行导出（`g11_jaccard` 列）；**G7/G8/G11 捆绑判定"任一不过即不过"**，缺真值段⇒整门算不出⇒按不过处理（"不报≠过"）；合成口径自动附"管道演示不作对外验收证据"声明；门槛三常量写死并注明全部来源于人工侧（0.816/B 组 n=3 不进代码）。合入时全量测试 **153 通过 0 失败**；后续按序：trial 级串联。
 - Capy 侧：原语表版本化（DP-030）+ 零出现率 κ 修正 + 复核预算清单 + 空场立项（DP-028）
   + **评分员分歧定位（DP-036）+ G11/G10 拆分（DP-034/035）**。
   **main 测试通过 111 失败 0**（PR #11 已并入 `df7f272`）。
@@ -428,7 +429,7 @@ DP-032 的脚本 `scripts/dp032_chamber4_sweep.sh` 已进仓库。
 4. **DP-032（Mac 侧，几分钟，可能藏着一个 G10 假阳性）**：跑标定探针打印 v1..v7 → 文件名映射表，
    并对 7 个视频的隔间 4 重跑标定。**这是本轮唯一必须在 Mac 上做的事**，沙箱不能解码视频。
 5. ~~**DP-034 + DP-031**：拆 `never_occupied` / `detached` 状态码，G10 分 a/b/c 三支报告。~~ **2026-09-04 已完成**（`feat/dp034-never-occupied`；实现/测试/口径见 ISSUES DP-031、DP-034 落地记录；真实素材上的 G10 数字随 DP-014 正式报告出）。
-6. **DP-035**：G11 时间轴 Jaccard 门接进验收报告（工具 `cli/scorer_disagreement.py` 已就绪）。
+6. ~~**DP-035**：G11 时间轴 Jaccard 门接进验收报告（工具 `cli/scorer_disagreement.py` 已就绪）。~~ **2026-09-04 已接入 `lovo_cv` 报告（`feat/dp035-g11-gate`，实现与测试口径见 ISSUES DP-035 落地记录）**；人工真值上的 G11 数字随 DP-014 出。
 7. ~~DP-024 目检第 1 帧~~ **已由道俊完成，DP-004/DP-024 全关闭。**
 8. `band_range` 从 `TapeCorridor` 移到隔间级容器（已记账，不阻塞）。
 9. **DP-014**：正式 G1–G11 报告。前置：DP-032 + DP-034 + 张重导（B 组现只有 3 对，出不了第二个 ICC）。
