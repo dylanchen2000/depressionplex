@@ -294,6 +294,79 @@ def test_lovo_onset_runs_and_reports() -> None:
         "onset 组也带自己的 G2，口径与 total 组一致"
 
 
+# ---------------------------------------------------------------- DP-035 G11 门
+
+
+def test_jaccard_segs_semantics() -> None:
+    # 完全一致 ⇒ 1；完全不相交 ⇒ 0；部分重叠按**时长加权**（与人工-人工基线同式）
+    assert L.jaccard_segs([(1.0, 5.0)], [(1.0, 5.0)]) == 1.0
+    assert L.jaccard_segs([(0.0, 4.0)], [(10.0, 14.0)]) == 0.0
+    j = L.jaccard_segs([(0.0, 10.0)], [(5.0, 15.0)])
+    assert abs(j - 5.0 / 15.0) < 1e-12
+    # 一侧全空 ⇒ 0（幻影/漏判都要被看见）；双方皆空 ⇒ 1.0（零分歧，判对不罚）
+    assert L.jaccard_segs([], [(1.0, 2.0)]) == 0.0
+    assert L.jaccard_segs([(1.0, 2.0)], []) == 0.0
+    assert L.jaccard_segs([], []) == 1.0
+    # 多段并集口径：交集复用 scorer_disagreement 的归并扫描。
+    # A=[0,4]+[6,8] 总 6；B=[2,7] 总 5；交 (2,4)=2+(6,7)=1=3；并 = 6+5−3 = 8 ⇒ 3/8
+    assert abs(L.jaccard_segs([(0.0, 4.0), (6.0, 8.0)], [(2.0, 7.0)])
+               - 3.0 / 8.0) < 1e-12
+
+
+def test_truth_segs_and_total_must_share_one_ledger() -> None:
+    """段合计 ≠ truth_mobile_s ⇒ 两套账，拒收（G11 与总量不许各说各话）。"""
+    base = L.synthetic_lovo_trials(window_s=10.0, fps=10.0, seed=5)[0]
+    try:
+        dataclasses.replace(base, truth_mobile_s=1.0,
+                            truth_mobile_segs=((0.0, 6.0),))
+        assert False, "段合计 6 s 而总量 1 s——必须拒收"
+    except ValueError as e:
+        assert "两套账" in str(e)
+
+
+def test_g11_travels_in_summary_and_rows() -> None:
+    samples = L.synthetic_lovo_trials(window_s=30.0, fps=10.0, seed=41)
+    res = L.lovo_cv(samples, theta_grid=_grid())
+    assert res.g11_mean_jaccard is not None, "合成生成器带真值段，G11 必须可算"
+    assert 0.0 <= res.g11_mean_jaccard <= 1.0
+    txt = res.summary()
+    for needle in ("G11", "0.738", "G7", "G8", "任一不过即不过", "拖累项"):
+        assert needle in txt, f"summary 缺 {needle!r}——G7/G8/G11 必须同报告"
+    # 逐试次升序：前一行数值 ≤ 后一行
+    listed = [float(l.split()[0]) for l in txt.splitlines()
+              if l.startswith("      ") and "." in l.split()[0]]
+    assert len(listed) == res.n_predictions == 27
+    assert listed == sorted(listed)
+    rows = L.prediction_rows(res)
+    assert all(0.0 <= r["g11_jaccard"] <= 1.0 for r in rows)
+    assert abs(sum(r["g11_jaccard"] for r in rows) / len(rows)
+               - res.g11_mean_jaccard) < 1e-3
+
+
+def test_g11_missing_segs_is_not_silently_passing() -> None:
+    """缺真值段 ⇒ G11 算不出 ⇒ 捆绑判定按不过处理，且报告写明。"""
+    samples = L.synthetic_lovo_trials(window_s=30.0, fps=10.0, seed=43)
+    bare = [dataclasses.replace(s, truth_mobile_segs=None) for s in samples]
+    res = L.lovo_cv(bare, theta_grid=_grid())          # total 目标不要求段，能跑
+    assert res.g11_mean_jaccard is None
+    txt = res.summary()
+    assert "算不出" in txt and "不报≠过" in txt
+    assert "**不过**" in txt                            # 捆绑判定不许绿
+    rows = L.prediction_rows(res)
+    assert all(r["g11_jaccard"] is None for r in rows)
+
+
+def test_gate_bundle_flags_synthetic_as_pipeline_only() -> None:
+    """合成真值上的捆绑判定必须自带口径声明——管道演示不得对外作验收证据。"""
+    res = L.lovo_cv(L.synthetic_lovo_trials(window_s=30.0, fps=10.0, seed=47),
+                    theta_grid=_grid())
+    txt = res.summary()
+    assert "管道演示" in txt and "DP-014" in txt
+    # 门槛常量写死且来源是人工侧（纪律护栏：改这三个数需要 SPEC 依据，不需要新代码）
+    assert L.G7_MIN_R == 0.818 and L.G8_MAX_BIAS_S == 28.6
+    assert L.G11_MIN_JACCARD == 0.738
+
+
 def test_objective_comparison_prints_both_G2s() -> None:
     samples = L.synthetic_lovo_trials(window_s=30.0, fps=10.0, seed=31)
     comp = L.lovo_cv_objective_comparison(samples, theta_grid=_grid())
