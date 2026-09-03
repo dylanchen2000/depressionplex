@@ -119,7 +119,7 @@ class UnionStats:
 def union_holds(holds: Sequence[Sequence[float]]) -> UnionStats:
     """排序取并集。**必须先排序**：见模块头规则 2。
 
-    与 `cli/salvage_truncated_audit.union_seconds` 语义一致（后者已在 DP-010
+    与 `depressionplex/cli/salvage_truncated_audit.union_seconds` 语义一致（后者已在 DP-010
     抢救里实证），两者等价由 tests/test_human_agreement.py 钉住，防止分叉。
     """
     pairs = [(float(a), float(b)) for a, b in holds]
@@ -326,7 +326,7 @@ def _row_from_record(rec: dict, *, scorer: str, seed: Any,
 
 # ---------------------------------------------------------- 加载：张的抢救 CSV
 #
-# 抢救文件（cli/salvage_truncated_audit.py 产出）里 holds 已聚合成
+# 抢救文件（depressionplex/cli/salvage_truncated_audit.py 产出）里 holds 已聚合成
 # mobile_union_s / holds_unsorted / zero_length_segments 三列——并集口径与
 # 乱序判据是同一实现（见 union_holds 的等价钉测）。本 loader 只做透传 +
 # 一致性复算（immobility），并回填 seed（从同目录 TRUNCATED txt 头部，

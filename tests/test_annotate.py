@@ -10,6 +10,7 @@ import json
 import tempfile
 from pathlib import Path
 
+from depressionplex.assay_core import primitives as P
 from depressionplex.cli import annotate as A
 
 SEED = {"bouts": [{"start": 10, "end": 40,
@@ -83,3 +84,47 @@ def test_agree_ok_on_blind_files() -> None:
             path.write_text(json.dumps(doc))
         rc = A.main(["agree", str(a), str(b)])
         assert rc == 0
+
+
+def test_init_records_primitive_table_version() -> None:
+    """原语表版本必须写进标注文件，否则事后无法判断按哪套定义标的。"""
+    with tempfile.TemporaryDirectory() as t:
+        path = Path(t) / "a.json"
+        assert A.main(["init", str(path), "--trial", "v1", "--assay", "TST",
+                       "--annotator", "x", "--n-frames", "10"]) == 0
+        doc = json.loads(path.read_text())
+        assert doc["primitive_table_version"] == P.PRIMITIVE_TABLE_VERSION
+
+
+def test_legacy_file_without_version_is_accepted_as_pre_v1() -> None:
+    """存量标注（同事在该字段引入前已做的那批）是真实真值，不得拒收。"""
+    with tempfile.TemporaryDirectory() as t:
+        path = Path(t) / "a.json"
+        assert A.main(["init", str(path), "--trial", "v1", "--assay", "TST",
+                       "--annotator", "x", "--n-frames", "10"]) == 0
+        doc = json.loads(path.read_text())
+        del doc["primitive_table_version"]
+        path.write_text(json.dumps(doc))
+        assert A._load(path)["primitive_table_version"] == "pre-v1"
+
+
+def test_agree_rejects_mixed_primitive_table_versions() -> None:
+    """跨原语表版本算 κ 会把定义差异混进判断差异，必须拒绝。"""
+    with tempfile.TemporaryDirectory() as t:
+        tmp = Path(t)
+        a, b = tmp / "a.json", tmp / "b.json"
+        for name, path in (("ann1", a), ("ann2", b)):
+            assert A.main(["init", str(path), "--trial", "v1", "--assay", "TST",
+                           "--annotator", name, "--n-frames", "100"]) == 0
+            doc = json.loads(path.read_text())
+            doc["bouts"] = SEED["bouts"]
+            path.write_text(json.dumps(doc))
+        doc = json.loads(b.read_text())
+        del doc["primitive_table_version"]  # ⇒ pre-v1
+        b.write_text(json.dumps(doc))
+        try:
+            A.main(["agree", str(a), str(b)])
+        except SystemExit as e:
+            assert "原语表版本" in str(e)
+        else:
+            raise AssertionError("跨版本不得算 κ")

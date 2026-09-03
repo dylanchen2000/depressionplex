@@ -5,9 +5,9 @@
 缺 30mg_2周-ch4 沿用 DP-005 事实），跑完整 LOVO-CV 并打印：
 每折 θ_mob、G2（跨折变异系数）、样本外 r、Bland-Altman。
 
-    python3 cli/lovo_cv_demo.py                 # 360 s × 10 fps 全量口径
-    python3 cli/lovo_cv_demo.py --window 60     # 快跑
-    python3 cli/lovo_cv_demo.py --out predictions.csv
+    python3 -m depressionplex.cli.lovo_cv_demo            # 360 s × 10 fps 全量口径
+    python3 -m depressionplex.cli.lovo_cv_demo --window 60  # 快跑
+    python3 -m depressionplex.cli.lovo_cv_demo --out predictions.csv
 
 **读结果须知**：这里的 θ 数值、r、CV 全是合成量级的管道演示，不构成 G2/G7
 证据；真 G2 用人工真值（DP-014）才算。合成 CV 若 >15%，只说明框架对折间
@@ -18,14 +18,10 @@ from __future__ import annotations
 
 import argparse
 import csv
-import sys
 import time
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
-
-from depressionplex import lovo_cv as L
+from .. import lovo_cv as L
 
 
 def main() -> int:

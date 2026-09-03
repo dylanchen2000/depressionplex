@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """DP-012：人工评分校验器 + 并集重算，产出 43 试次重算表。
 
-用法：
-    python3 cli/recompute_human_scores.py [-d data/human_scores/raw]
-                                          [-o data/human_scores/recomputed/human_scores_recomputed_DP-012.csv]
-                                          [--strict]
+用法（在仓库根目录）：
+    python3 -m depressionplex.cli.recompute_human_scores \\
+        [-d data/human_scores/raw]
+        [-o data/human_scores/recomputed/human_scores_recomputed_DP-012.csv]
+        [--strict]
 
 退出码：0 正常；1 有完整性告警（越窗/乱序编号/CSV 对不上账）；
 2（--strict）有拒绝入库试次——"报错"的另一种写法，给流水线用。
@@ -17,10 +18,9 @@ import argparse
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
+from ..human_agreement import build_table, format_report, write_table_csv
 
-from depressionplex.human_agreement import build_table, format_report, write_table_csv  # noqa: E402
+ROOT = Path(__file__).resolve().parents[2]   # depressionplex/cli/x.py → 仓库根
 
 
 def main() -> int:

@@ -33,9 +33,15 @@ COMMITTED_TABLE = REPO / "data" / "human_scores" / "recomputed" / "human_scores_
 
 
 def _load_salvage_ref():
-    """import cli/salvage_truncated_audit.py（顶层脚本，不是包）。"""
-    spec = importlib.util.spec_from_file_location(
-        "salvage_ref", REPO / "cli" / "salvage_truncated_audit.py")
+    """按文件路径 import 抢救工具（DP-030 后在 depressionplex/cli/，旧路径兜底）。"""
+    for rel in ("depressionplex/cli/salvage_truncated_audit.py",
+                "cli/salvage_truncated_audit.py"):
+        p = REPO / rel
+        if p.exists():
+            break
+    else:
+        raise AssertionError("找不到 salvage_truncated_audit.py——位置变了？")
+    spec = importlib.util.spec_from_file_location("salvage_ref", p)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
@@ -75,7 +81,7 @@ def test_union_zero_length_bookkeeping() -> None:
 
 
 def test_union_equivalence_with_salvage_tool() -> None:
-    """与 `cli/salvage_truncated_audit.union_seconds` 逐案等价（张抢救件就是
+    """与 `depressionplex/cli/salvage_truncated_audit.union_seconds` 逐案等价（张抢救件就是
     它算的），钉住两份实现不分叉。"""
     ref = _load_salvage_ref()
     rng = random.Random(20260903)
