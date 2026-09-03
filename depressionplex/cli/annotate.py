@@ -210,6 +210,13 @@ def cmd_agree(args: argparse.Namespace) -> int:
         ka = P.expand_to_frames(ba, n, pid)
         kb = P.expand_to_frames(bb, n, pid)
         rep = P.agreement_report(ka, kb)
+        if rep["undefined_no_positives"]:
+            # 不能印 κ=1.000：没有正样本就没有可一致的东西，印出来必被误读。
+            print(
+                f"  {pid}: κ=未定义（出现率 0，两人都从未勾过 ⇒ 本批无正样本，"
+                f"不是一致性证据）  原始一致率={rep['raw_agreement']:.3f}"
+            )
+            continue
         extra = f"  PABAK={rep['pabak']:.3f}（稀有原语，κ 受基率支配）" if rep["rare"] else ""
         print(
             f"  {pid}: κ={rep['kappa']:.3f}  原始一致率={rep['raw_agreement']:.3f}"
