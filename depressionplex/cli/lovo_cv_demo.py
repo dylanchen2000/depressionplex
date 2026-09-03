@@ -7,7 +7,12 @@
 
     python3 -m depressionplex.cli.lovo_cv_demo            # 360 s × 10 fps 全量口径
     python3 -m depressionplex.cli.lovo_cv_demo --window 60  # 快跑
+    python3 -m depressionplex.cli.lovo_cv_demo --objective total   # 只跑历史口径
     python3 -m depressionplex.cli.lovo_cv_demo --out predictions.csv
+
+DP-037：`--objective` 默认 **both**——两个目标函数各跑一遍并对照打印
+（两组 θ_mob 并列、各带自己的 G2）。"接近⇒θ稳 / 差很多⇒改目标"由道俊拍板，
+本 CLI 只并排列数字。
 
 **读结果须知**：这里的 θ 数值、r、CV 全是合成量级的管道演示，不构成 G2/G7
 证据；真 G2 用人工真值（DP-014）才算。合成 CV 若 >15%，只说明框架对折间
@@ -33,6 +38,9 @@ def main() -> int:
     ap.add_argument("--seed", type=int, default=20260903)
     ap.add_argument("--coarse", action="store_true",
                     help="只用 31 点粗网格（快，θ 分辨率 0.0015）")
+    ap.add_argument("--objective", choices=("total", "onset", "both"), default="both",
+                    help="DP-037：total=total_immobility（历史口径），onset=onset_match，"
+                         "both=两者各跑一遍并对照打印（默认）")
     ap.add_argument("--out", metavar="CSV", help="把样本外预测表写到该路径")
     args = ap.parse_args()
 
@@ -44,19 +52,31 @@ def main() -> int:
           f"，用时 {time.time() - t0:.1f} s\n")
 
     t0 = time.time()
-    res = L.lovo_cv(samples, theta_grid=L._default_grid() if args.coarse else None)
-    print(res.summary())
-    print(f"\n（LOVO 全程用时 {time.time() - t0:.1f} s；"
+    grid = L._default_grid() if args.coarse else None
+    if args.objective == "both":
+        comp = L.lovo_cv_objective_comparison(samples, theta_grid=grid)
+        print(L.format_objective_comparison(comp))
+        print()
+        for obj in L.OBJECTIVES:
+            print(comp[obj].summary())
+            print()
+        all_rows = [r for obj in L.OBJECTIVES for r in L.prediction_rows(comp[obj])]
+    else:
+        obj = {"total": L.OBJECTIVE_TOTAL, "onset": L.OBJECTIVE_ONSET}[args.objective]
+        res = L.lovo_cv(samples, theta_grid=grid, objective=obj)
+        print(res.summary())
+        print()
+        all_rows = L.prediction_rows(res)
+    print(f"（LOVO 全程用时 {time.time() - t0:.1f} s；"
           f"拟合只动了 {L.FITTED_PARAM}，bout 参数保持 FROZEN）")
 
     if args.out:
-        rows = L.prediction_rows(res)
         out = Path(args.out)
         with out.open("w", newline="", encoding="utf-8") as fh:
-            w = csv.DictWriter(fh, fieldnames=list(rows[0].keys()))
+            w = csv.DictWriter(fh, fieldnames=list(all_rows[0].keys()))
             w.writeheader()
-            w.writerows(rows)
-        print(f"预测表（G9 口径，{len(rows)} 行）→ {out}")
+            w.writerows(all_rows)
+        print(f"预测表（G9 口径，{len(all_rows)} 行，objective 列区分两组）→ {out}")
     return 0
 
 
