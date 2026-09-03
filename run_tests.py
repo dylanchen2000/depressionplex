@@ -17,9 +17,12 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "tests"))
 
 TEST_MODULES = ("test_bouts", "test_rad", "test_geometry", "test_segment",
-                "test_rules", "test_validity", "test_primitives",
-                "test_annotate", "test_scorer_disagreement",
-                "test_human_agreement", "test_lovo_cv")
+                "test_rules", "test_validity", "test_g10_gates",
+                "test_primitives", "test_annotate",
+                "test_scorer_disagreement", "test_human_agreement",
+                "test_lovo_cv",
+                # 元守卫：新增 tests/test_*.py 必须同时进这张表，否则此测试变红
+                "test_run_tests_registry")
 
 
 def main() -> int:
