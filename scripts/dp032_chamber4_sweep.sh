@@ -23,10 +23,10 @@ CUR_FROM=6000  # 静止时段 8 连帧（同 2026-08-24 的 B 批）
 CUR_TO=6007
 
 for tool in ffmpeg ffprobe python3; do
-  command -v "$tool" >/dev/null 2>&1 || { echo "缺 $tool，装了再跑"; exit 127; }
+  command -v "$tool" >/dev/null 2>&1 || { echo "缺 ${tool}，装了再跑"; exit 127; }
 done
 [ -f depressionplex/cli/probe_frames.py ] || { echo "请在 depressionplex 仓库根目录跑本脚本"; exit 2; }
-[ -d "$VID_DIR" ] || { echo "视频目录不存在：$VID_DIR（用第一个参数指定）"; exit 2; }
+[ -d "$VID_DIR" ] || { echo "视频目录不存在：${VID_DIR}（用第一个参数指定）"; exit 2; }
 
 mkdir -p "$OUT"
 SUMMARY="$OUT/_汇总.txt"
@@ -78,7 +78,7 @@ for k in $(seq 1 "$NV"); do
 
   {
     echo
-    echo "==== v$k  $base   （总帧 $N，标定抽 $(ls "$D/calib" | wc -l | tr -d ' ') 帧，步长 $STEP）===="
+    echo "==== v$k  $base   （总帧 ${N}，标定抽 $(ls "$D/calib" | wc -l | tr -d ' ') 帧，步长 ${STEP}）===="
     echo "-- 隔间定位 --"; grep -E '个: \[' "$D/probe.txt" || echo "  (无)"
     echo "-- 第4节 逐隔间分割（只看隔间4）--"
     awk '/== 4\./,/== 5\./' "$D/probe.txt" | grep -A3 '隔间4' || echo "  (无隔间4 输出)"
