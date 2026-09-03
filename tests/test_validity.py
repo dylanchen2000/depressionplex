@@ -1,7 +1,12 @@
-"""试次级有效性判据测试：脱落 / 截断 / 有效。
+"""试次级有效性判据测试：从未有动物 / 脱落 / 截断 / 有效（DP-031 拆分）。
 
-判据（评审定稿）：全片标定帧是否出现身体级面积（≥0.5×其他隔间中位数）。
-从未出现 = 脱落（产品特性，建议排除）；出现过但当前只有尾级 = 截断 bug。
+判据（评审定稿）：全片标定帧是否出现身体级面积（≥0.5×其他隔间中位数）；
+是否出现**任何**动物级掩膜（≥0.15×身体门槛，相对量⇒标度不变）。
+- 从未动物级 = never_occupied（布置/录制问题，建议排除——**不是**实验失败）；
+- 有尾级从未身体级、或前半身体后半消失 = detached（悬挂失效/中途脱落，实验失败）；
+- 出现过但当前只有尾级 = truncated_suspect（分割 bug，不得按脱落静默丢弃）。
+DP-028 N1–N3：排除态隔间的一切 immobility 都是幻影——score_gate 是唯一闸门，
+never_occupied 的在场占比必须**恰等于 0**，幻影候选必须报警不得静默。
 """
 
 from __future__ import annotations
@@ -75,15 +80,22 @@ def test_no_body_anywhere_needs_prior_to_decide() -> None:
 
 
 def test_three_of_four_detached_stable_with_prior() -> None:
-    """评审用例：3/4 脱落时相对基准退化，常开下界使判据仍成立。"""
-    calib = {1: _profile(200), 2: _profile(5), 3: [None] * 8, 4: _profile(5)}
+    """评审用例：3/4 无身体级时相对基准退化，常开下界使判据仍成立。
+
+    DP-031 拆分后三种"无身体级"证据各归其位：尾级悬挂 = detached（2 号），
+    整片零掩膜 / 只有噪声级尾链 = never_occupied（3、4 号）——处置同为排除，
+    报告口径不合并（G10a vs G10b）。
+    """
+    calib = {1: _profile(200), 2: _profile(40), 3: [None] * 8, 4: _profile(5)}
     tv = V.assess_trial_validity(calib, body_area_prior=100.0)
     by = {c.chamber: c for c in tv.chambers}
     assert by[1].status == V.STATUS_VALID
-    assert by[2].status == V.STATUS_DETACHED
-    assert by[3].status == V.STATUS_DETACHED
-    assert by[4].status == V.STATUS_DETACHED
-    assert tv.exclude == (2, 3, 4)
+    assert by[2].status == V.STATUS_DETACHED        # 有尾级证据：悬挂失效
+    assert by[3].status == V.STATUS_NEVER_OCCUPIED  # 从未有掩膜
+    assert by[4].status == V.STATUS_NEVER_OCCUPIED  # 噪声级尾链（v4/v7 的实况）
+    assert tv.exclude == (2, 3, 4)                  # 处置：排除态不产出统计量
+    assert tv.detached == (2,)                      # 两支各自可数——不合并
+    assert tv.never_occupied == (3, 4)
 
 
 def test_none_and_tiny_entries_ignored() -> None:
@@ -94,12 +106,106 @@ def test_none_and_tiny_entries_ignored() -> None:
     tv = V.assess_trial_validity(calib)
     by = {c.chamber: c for c in tv.chambers}
     assert by[1].status == V.STATUS_VALID
-    assert by[4].status == V.STATUS_DETACHED
+    assert by[4].status == V.STATUS_NEVER_OCCUPIED   # 零掩膜：空场，不是脱落
+    assert by[4].occupied_fraction == 0.0
 
 
 def test_verdicts_invariant_to_area_scale() -> None:
-    """单位不变量配套：全部面积 ×4（更高分辨率同一试次）判定不变。"""
-    calib = {1: _profile(200), 2: _profile(190), 3: _profile(210), 4: _profile(40)}
-    v1 = V.assess_trial_validity(calib)
-    v2 = V.assess_trial_validity({k: [4 * x for x in p] for k, p in calib.items()})
-    assert [c.status for c in v1.chambers] == [c.status for c in v2.chambers]
+    """单位不变量配套：全部面积 ×4（更高分辨率同一试次）判定不变。
+
+    两个案例都过：尾级悬挂（detached 支）与 v4/v7 实况的噪声级尾链
+    （never_occupied 支）。在场判据是**纯相对量**（≥0.15×门槛，raw 值直接比，
+    不过 _AREA_FLOOR 像素常数）——×4 后 profile(5) 的尾链跨过 floor 仍判
+    never_occupied，判定不随分辨率翻转。occupied_fraction 也必须逐位一致。
+    """
+    for base4 in (_profile(40), _profile(5)):
+        calib = {1: _profile(200), 2: _profile(190), 3: _profile(210), 4: base4}
+        v1 = V.assess_trial_validity(calib)
+        v2 = V.assess_trial_validity(
+            {k: [4 * x for x in p] for k, p in calib.items()})
+        assert [(c.status, c.occupied_fraction) for c in v1.chambers] == \
+               [(c.status, c.occupied_fraction) for c in v2.chambers]
+    for want, base4 in ((V.STATUS_DETACHED, _profile(40)),
+                        (V.STATUS_NEVER_OCCUPIED, _profile(5))):
+        calib = {1: _profile(200), 2: _profile(190), 3: _profile(210), 4: base4}
+        assert {c.chamber: c.status
+                for c in V.assess_trial_validity(calib).chambers}[4] == want
+
+
+def test_never_occupied_separated_from_detached() -> None:
+    """DP-031 拆分：整片无掩膜 ⇒ never_occupied；N2 占比**恰为 0**，不是"很低"。"""
+    calib = {1: _profile(200), 2: _profile(190), 3: _profile(210),
+             4: [None, None, 2.0, None, 5.0, None, 3.0, 1.0]}  # v7 实况：尾链级
+    tv = V.assess_trial_validity(calib)
+    by = {c.chamber: c for c in tv.chambers}
+    assert by[4].status == V.STATUS_NEVER_OCCUPIED
+    assert by[4].occupied_fraction == 0.0
+    assert by[4].ever_had_body is False
+    assert tv.never_occupied == (4,) and tv.detached == ()
+    assert tv.exclude == (4,)                      # 处置同 detached：建议排除
+    assert "布置/录制问题" in by[4].note            # 科学含义：非实验失败
+    # 对照：真尾级悬挂仍归 detached——两支判据不互换
+    calib_d = {**calib, 4: _profile(40)}
+    tv_d = V.assess_trial_validity(calib_d)
+    assert tv_d.detached == (4,) and tv_d.never_occupied == ()
+
+
+def test_midtrial_detachment_detected() -> None:
+    """G10b 的正样本形态：前半有身体、后半整段无动物级 ⇒ 中途脱落（实验失败）。"""
+    calib = {1: _profile(200), 2: _profile(190), 3: _profile(210),
+             4: [200.0, 190.0, 210.0, 195.0, None, 3.0, 5.0, None]}
+    tv = V.assess_trial_validity(calib)
+    by = {c.chamber: c for c in tv.chambers}
+    assert by[4].status == V.STATUS_DETACHED
+    assert tv.detached == (4,) and tv.never_occupied == ()
+    assert "中途脱落" in by[4].note and "G10b" in by[4].note
+    assert by[4].occupied_fraction == 0.5          # 前半在场——非 0，不落 never 支
+    # 证据不足不判：标定帧 <4 帧时前后半无从谈起，保持 valid 不误伤
+    calib3 = {**calib, 4: [200.0, None, 2.0]}
+    tv3 = V.assess_trial_validity(calib3)
+    assert {c.chamber: c.status for c in tv3.chambers}[4] == V.STATUS_VALID
+    # 恰好 4 帧、后半整段消失 ⇒ 可判（门槛在 n≥4 打开）
+    calib4 = {**calib, 4: [200.0, None, 2.0, None]}
+    tv4 = V.assess_trial_validity(calib4)
+    assert {c.chamber: c.status for c in tv4.chambers}[4] == V.STATUS_DETACHED
+
+
+def _cv_of(chamber: int, calib: dict[int, list[float | None]]):
+    tv = V.assess_trial_validity(calib)
+    return next(c for c in tv.chambers if c.chamber == chamber)
+
+
+def test_score_gate_blocks_phantom_immobility_N1_N3() -> None:
+    """DP-028 最危险失败模式：空隔间被判 immobility=360 s（伪造药效）。
+
+    N1：排除态不放行——immobility 数字根本出不去；N3：流水线仍递来候选值
+    ⇒ **必须报警**（幻影要响），报警不许静默。
+    """
+    calib = {1: _profile(200), 2: _profile(190), 3: _profile(210), 4: [None] * 8}
+    cv_never = _cv_of(4, calib)
+    allowed, msgs = V.score_gate(cv_never, candidate_immobility_s=360.0)
+    assert allowed is False, "N1：never_occupied 隔间不得产出任何 immobility 数字"
+    assert any("PHANTOM-IMMOBILITY" in m for m in msgs), "N3：幻影必须报警"
+    assert any("360.0" in m for m in msgs), "报警必须带上被拦截的幻影数值（可审计）"
+    # 没有候选值也要拦（闸门不依赖上游犯错才生效），此时不该有幻影报警
+    allowed2, msgs2 = V.score_gate(cv_never)
+    assert allowed2 is False
+    assert not any("PHANTOM" in m for m in msgs2)
+    # 各排除/失效态一律不放行
+    cv_det = _cv_of(4, {**calib, 4: _profile(40)})
+    assert V.score_gate(cv_det, 100.0)[0] is False
+    cv_trunc = next(
+        c for c in V.assess_trial_validity(
+            {**calib, 4: [45.0, 200.0, 180.0, 40.0, 190.0, 210.0, 42.0, 185.0]},
+            {1: _profile(200), 2: _profile(190), 3: _profile(210), 4: _profile(42)},
+        ).chambers if c.chamber == 4)
+    assert cv_trunc.status == V.STATUS_TRUNCATED
+    assert V.score_gate(cv_trunc, 200.0)[0] is False, "截断 bug 隔间同样不得产出数字"
+    cv_unknown = next(
+        c for c in V.assess_trial_validity({k: [None] * 8 for k in (1, 2, 3, 4)})
+        .chambers if c.chamber == 1)
+    assert cv_unknown.status == V.STATUS_UNKNOWN
+    assert V.score_gate(cv_unknown, 50.0)[0] is False
+    # valid 放行且无消息
+    cv_valid = _cv_of(1, calib)
+    assert V.score_gate(cv_valid, 12.3) == (True, ())

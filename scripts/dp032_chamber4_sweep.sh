@@ -6,6 +6,10 @@
 #   2 个                      ⇒ 第二个里面有活老鼠而软件说它空了 = **G10 假阳性**，必须修
 #                                （spec 要求 G10 假阳性为 0）
 #
+# 【DP-034 拆分后的口径（2026-09-04）】"无动物"= `never_occupied`（从未有动物级掩膜）；
+#   `detached` = 有尾级（悬挂失效/中途脱落）——科学含义不同，定案段分开计数。
+#   实测定案：never_occupied=2（v4、v7），帧级目检两者都是真阴性 ⇒ 无假阳性，DP-032 关闭。
+#
 # 必须在**有视频的机器上**跑（Mac）：沙箱 cv2/ffmpeg 均损坏，解不了视频。
 # 依赖：ffmpeg + ffprobe（Mac 已装）、python3 + numpy + PIL。probe_frames 只吃 PNG，不吃视频，
 #       所以本脚本先抽帧再体检。
@@ -90,26 +94,30 @@ done
 # ---- 3. 定案：数一数隔间 4 被判"非 valid"的有几个 ----
 {
   echo
-  echo "==================== 定案 ===================="
-  hit=0; bad=0
+  echo "==================== 定案（DP-034 拆分口径）===================="
+  hit=0; bad=0; n_never=0; n_det=0; n_other=0
   for k in $(seq 1 "$NV"); do
     line=$(awk '/== 5\./,0' "$OUT/v$k/probe.txt" 2>/dev/null | grep -E '隔间4:' | head -1)
     st=$(printf '%s' "$line" | sed -n 's/.*隔间4: *\([a-z_]*\).*/\1/p')
     [ -n "$st" ] || st="脚本无输出"
     printf 'v%-2d 隔间4 = %-18s %s\n' "$k" "$st" "$(basename "${VIDS[$k]}")"
     case "$st" in
-      valid)        ;;
-      脚本无输出)    bad=$((bad + 1)) ;;
-      *)            hit=$((hit + 1)) ;;
+      valid)           ;;
+      脚本无输出)       bad=$((bad + 1)) ;;
+      never_occupied)  hit=$((hit + 1)); n_never=$((n_never + 1)) ;;
+      detached)        hit=$((hit + 1)); n_det=$((n_det + 1)) ;;
+      *)               hit=$((hit + 1)); n_other=$((n_other + 1)) ;;
     esac
   done
   echo
   if [ "$bad" -gt 0 ]; then
     echo "[!] 有 $bad 个视频没跑出第 5 节结果——先查 $OUT/v*/probe.txt，**不要**用下面的计数定案"
   fi
-  echo "隔间 4 被判'非 valid'（detached / unknown / truncated_suspect）的视频数 = $hit"
+  echo "隔间 4 被判'非 valid' 的视频数 = $hit（其中 never_occupied=$n_never / detached=$n_det / 其他=$n_other）"
+  echo "  '被判无动物' = never_occupied 计数；detached 是悬挂失效/中途脱落（G10b，实验失败须上报），两支**不得合并计数**"
   echo "  = 1  ⇒ 读法①成立（且应是 20mg_3周），DP-032 关闭，无假阳性"
-  echo "  = 2  ⇒ 另一个里有活老鼠却被判空 = **G10 假阳性**，spec 要求为 0，必须修"
+  echo "  = 2  ⇒ 若两个都是 never_occupied ⇒ 与 DP-005 复核一致（v4 为尾级应为 detached）；"
+  echo "         若其一是 detached/valid 而被算进'无动物' ⇒ 有活鼠被判空 = **G10 假阳性**，必须修"
   echo " >= 3  ⇒ 与道俊目检（只有 20mg_3周-ch4 是空的）冲突，先别改代码，回来对口径"
   echo
   echo "全文在 $OUT/v*/probe.txt，本汇总在 $SUMMARY"

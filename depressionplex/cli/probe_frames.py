@@ -222,17 +222,25 @@ def main(argv: list[str] | None = None) -> int:
             current_areas,
             body_area_prior=args.body_area_prior,
         )
-        print("\n== 5. 试次级有效性（脱落/截断/有效）==")
+        print("\n== 5. 试次级有效性（从未有动物/脱落/截断/有效）==")
         for c in tv.chambers:
+            frac = "—" if c.occupied_fraction is None else f"{c.occupied_fraction:.2f}"
             print(
                 f"  隔间{c.chamber}: {c.status}  最大动物面积 {c.max_area:.0f}"
+                f"  在场占比 {frac}"
                 f"  参考 {c.ref_body_area:.0f}（门槛 {c.body_threshold:.0f}）"
                 + (f"  {c.note}" if c.note else "")
             )
-        if tv.exclude:
+        if tv.never_occupied:
             print(
-                f"  [建议排除] {tv.exclude}：真实脱落/未悬挂——"
-                "金标准（Can et al. 2012）本就要求排除，属产品特性而非失败"
+                f"  [建议排除] {tv.never_occupied}：从未有动物（never_occupied）——"
+                "布置/录制问题，非实验失败；金标准本就要求排除，"
+                "属产品特性而非失败（G10a 口径，不并入脱落）"
+            )
+        if tv.detached:
+            print(
+                f"  [建议排除] {tv.detached}：脱落/悬挂失效（detached）——"
+                "**实验失败须上报**；金标准要求排除（G10b 口径，不并入空场）"
             )
         if tv.needs_repair:
             print(

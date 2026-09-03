@@ -371,7 +371,8 @@ v1 的 `r ≥ 0.95` **下架**。技术理由不只是成本——参照物噪�
   **仍缺 DP-037**（`lovo_cv.py` 里 `onset` 出现 0 次）——立项晚于派工单，不算漏做，下一轮补。
 - **二轮派工单进度（执行 agent）**：任务 0 ✅（`feat/human-agreement` 经 PR **#16** 合入 main，合并前已 merge `5044183`，全量测试 **132 通过 0 失败**）；
   **DP-032 ✅ 交付**（Mac 侧全扫：隔间 4 非 valid = **2**——v4/v7；脚本修复经 PR **#18** 合入；逐字映射表与帧级目检复核见上方"销账"段；
-  `_汇总.txt` 全文已随派工单回报贴给道俊）；后续按序：DP-037 → DP-034/031 → DP-035 → trial 级串联。
+  `_汇总.txt` 全文已随派工单回报贴给道俊）；**DP-037 ✅ 经 PR #20 合入**（默认目标一字未动 + `onset_match` 对照、配对复用 `mutual_best_edges`、两组各带 G2、判读留道俊；合入时全量测试 **138 通过 0 失败**）；
+  **DP-034 + DP-031 ✅（本 PR `feat/dp034-never-occupied`）**：`validity.py` 拆 `never_occupied`/`detached`（在场判据纯相对量⇒标度不变，标进测试；新增中途脱落判 n≥4；`score_gate()` 唯一闸门——排除态不放行、幻影候选 `[PHANTOM-IMMOBILITY 报警]`、`occupied_fraction` 入账且空场必须恰为 0.0）；新建 `g10_gates.py` 报告层（三支各带分母不合并、G10a 双口径、G10b"召回不可测"+警示行、G10c κ 退化打"未定义"不得记 1.0）；合入时全量测试 **148 通过 0 失败**；后续按序：DP-035 → trial 级串联。
 - Capy 侧：原语表版本化（DP-030）+ 零出现率 κ 修正 + 复核预算清单 + 空场立项（DP-028）
   + **评分员分歧定位（DP-036）+ G11/G10 拆分（DP-034/035）**。
   **main 测试通过 111 失败 0**（PR #11 已并入 `df7f272`）。
@@ -416,7 +417,7 @@ DP-032 的脚本 `scripts/dp032_chamber4_sweep.sh` 已进仓库。
 
 1. ~~**DP-012**~~ **已合入 main（Capy 复核通过）**：人工评分校验器 + 并集重算（`union(sorted(holds))`、
    丢弃 `mobile_seconds`、拒收 `mobile==0 && holds==[] && unscoreable==false`、零长段记账）。**未算任何一致性指标**——按派工单。
-2. **DP-013 已合入 main** + **DP-037 在办**：LOVO-CV 框架（7 折，**只拟合 θ_mob 一个标量**，bout 参数保持 FROZEN），
+2. **DP-013 已合入 main** + ~~DP-037 在办~~ **DP-037 已完成（PR #20；"θ 接近/差很多"的判读按纪律留给道俊，待 DP-014 人工真值重跑）**：LOVO-CV 框架（7 折，**只拟合 θ_mob 一个标量**，bout 参数保持 FROZEN），
    合成真值跑通。必须输出**每折的 θ_mob 值本身**——7 个值的变异系数就是 **G2**，
    是本项目对 CSI「阈值需逐视频试错」唯一零成本的反证。
    **DP-037 加一个目标函数变体做对照**：除"最小化 immobility 总量差"外再跑"最小化运动**起始时刻**
@@ -426,7 +427,7 @@ DP-032 的脚本 `scripts/dp032_chamber4_sweep.sh` 已进仓库。
 3. 把 `rules.py` 与 `bouts.py` 串成 trial 级输出（含分母：可评分帧/总帧、`unknown` 占比、`TrialValidity`）。
 4. **DP-032（Mac 侧，几分钟，可能藏着一个 G10 假阳性）**：跑标定探针打印 v1..v7 → 文件名映射表，
    并对 7 个视频的隔间 4 重跑标定。**这是本轮唯一必须在 Mac 上做的事**，沙箱不能解码视频。
-5. **DP-034 + DP-031**：拆 `never_occupied` / `detached` 状态码，G10 分 a/b/c 三支报告。
+5. ~~**DP-034 + DP-031**：拆 `never_occupied` / `detached` 状态码，G10 分 a/b/c 三支报告。~~ **2026-09-04 已完成**（`feat/dp034-never-occupied`；实现/测试/口径见 ISSUES DP-031、DP-034 落地记录；真实素材上的 G10 数字随 DP-014 正式报告出）。
 6. **DP-035**：G11 时间轴 Jaccard 门接进验收报告（工具 `cli/scorer_disagreement.py` 已就绪）。
 7. ~~DP-024 目检第 1 帧~~ **已由道俊完成，DP-004/DP-024 全关闭。**
 8. `band_range` 从 `TapeCorridor` 移到隔间级容器（已记账，不阻塞）。
