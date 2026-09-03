@@ -1,0 +1,4 @@
+trial_id,mobile_union_s,immobility_s,n_hold_segments,holds_unsorted,zero_length_segments,playback_rate,tail_climbing,unscoreable,presentation_order,scored_at,note,mobile_seconds_DISCARDED
+30mg_2周_2+20_2周2-ch1,112.36,247.64,89,True,3,0.25,False,False,1,2026-09-02,慢放0.25x,114.51
+30mg_2周_2+20_2周2-ch2,127.37,232.63,62,False,0,0.25,False,False,4,2026-09-02,慢放0.25x,129.54
+30mg_2周_1-3+20_1周1-ch3,113.52,246.48,44,False,0,0.25,False,False,6,2026-09-02,慢放0.25x,114.88
