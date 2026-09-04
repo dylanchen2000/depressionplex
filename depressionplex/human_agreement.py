@@ -456,13 +456,28 @@ class TableResult:
         out: dict[str, dict[str, Any]] = {}
         for r in self.rows:
             b = out.setdefault(r.scorer_id, {"n": 0, "unsorted": 0, "zero_length": 0,
-                                             "rejected": 0, "union_sum_s": 0.0})
+                                             "rejected": 0, "union_sum_s": 0.0,
+                                             "rates": {}})
             b["n"] += 1
             b["unsorted"] += int(r.holds_unsorted)
             b["zero_length"] += r.zero_length_segments
             b["rejected"] += int(r.status == STATUS_REJECTED)
             b["union_sum_s"] += r.mobile_union_s or 0.0
+            # DP-046：倍速台账。key 用 float 或 None（未记录），**不许把 None 当默认值填掉**
+            b["rates"][r.playback_rate] = b["rates"].get(r.playback_rate, 0) + 1
         return out
+
+    def rate_changed_scorers(self) -> dict[str, dict[Any, int]]:
+        """批内换过倍速的评分员 → 各倍速的试次数（DP-046）。
+
+        倍速不是备注，是**受控实验参数**：倍速减半 ⇒ 按键粒度减半（徐 1.55@0.25x
+        / 3.22@0.5x、陈璇 2.33@0.5x / 4.85@1.0x，两人独立复现），而**一处倍速错配
+        就把 ICC 由 0.864 打到 0.344**，与"一个人粗一个人细"同量级。批内换速的批
+        次不能整批合算一致性，必须分层——所以这里必须报出来，不许静默。
+        `None`（未记录倍速）与已知倍速混在一起同样算换速：分不了层就是分不了层。
+        """
+        return {s: dict(sorted(b["rates"].items(), key=lambda kv: (kv[0] is None, kv[0])))
+                for s, b in self.by_scorer().items() if len(b["rates"]) > 1}
 
 
 def build_table(data_dir: Path | str) -> TableResult:
@@ -573,11 +588,21 @@ def format_report(res: TableResult) -> str:
         for r in res.rows:
             if r.status == STATUS_REJECTED:
                 lines.append(f"  - {r.scorer_id} / {r.trial_id}: {r.reject_reason}")
+    changed = res.rate_changed_scorers()
+    if changed:
+        lines.append("⚠ 批内换过倍速（DP-046，**这些人的数据不许整批合算一致性，必须按倍速分层**）:")
+        for s, rates in sorted(changed.items()):
+            lines.append(f"  - {s}: " + " ".join(
+                f"{'未记录' if k is None else k}x×{v}" for k, v in rates.items()))
+        lines.append("  倍速是受控实验参数：一处错配就把 ICC 由 0.864 打到 0.344（与'粗×细'同量级）。"
+                     "SOP v1.3 起全项目锁 0.5x，且同一对两人必须同速")
     lines.append("按评分员: ")
     for s, b in sorted(res.by_scorer().items()):
+        rates = " ".join(f"{'未记录' if k is None else k}x×{v}" for k, v in
+                         sorted(b["rates"].items(), key=lambda kv: (kv[0] is None, kv[0])))
         lines.append(
             f"  {s}: n={b['n']} 乱序={b['unsorted']} 零长段={b['zero_length']} "
-            f"拒绝={b['rejected']} union合计={b['union_sum_s']:.2f}s"
+            f"拒绝={b['rejected']} union合计={b['union_sum_s']:.2f}s 倍速[{rates}]"
         )
     lines.append("本表不含任何一致性指标（r/ICC/BA 属 DP-013/DP-014）。")
     return "\n".join(lines)
