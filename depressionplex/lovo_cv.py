@@ -144,6 +144,10 @@ class TrialEval:
     software_mobility_pipeline_segs: tuple[tuple[float, float], ...] = ()
     #: DP-035（G11）：软件-人工逐秒 Jaccard；真值段缺失时为 None（算不出≠通过）。
     jaccard_vs_truth: float | None = None
+    #: DP-045：双方皆空（人工与软件都没有任何运动段）。这类试次**不进 G11 均值的
+    #: 分母**——按 DP-043，声明为空的隔间根本不该进分析，记 1.0 是白送分（会把
+    #: 门抬虚），记 0 是冤枉；一律剔除并单独报条数。
+    jaccard_both_empty: bool = False
 
 
 @dataclass(frozen=True)
@@ -208,21 +212,30 @@ class LovoResult:
             f"LoA [{self.ba_loa_low_s:.2f}, {self.ba_loa_high_s:.2f}] s",
         ]
         # ---- DP-035：G11 逐秒 Jaccard + G7/G8/G11 捆绑判定 ----
+        all_p = [p for f in self.folds for p in f.predictions]
+        empty = [p.trial_id for p in all_p if p.jaccard_both_empty]
         per_trial = [(p.trial_id, p.jaccard_vs_truth)
-                     for f in self.folds for p in f.predictions]
+                     for p in all_p if not p.jaccard_both_empty]
         missing = [t for t, j in per_trial if j is None]
+        # DP-045：分母永远显式——剔除了几个双方皆空试次必须写出来
+        excl = (f"，**剔除 {len(empty)} 个双方皆空试次**（DP-045，不记 1.0 不记 0）"
+                f"：{empty[:8]}{'…' if len(empty) > 8 else ''}" if empty else "")
         if self.g11_mean_jaccard is not None:
             lines.append(
                 f"  G11 逐秒 Jaccard（软件-人工，与人工-人工基线同式）"
-                f" mean = {self.g11_mean_jaccard:.3f}（n={len(per_trial)}，"
-                f"门槛 ≥{G11_MIN_JACCARD} = 人工-人工 13 试次实测，DP-035）")
+                f" mean = {self.g11_mean_jaccard:.3f}（分母 n={len(per_trial)}/"
+                f"{len(all_p)}{excl}，门槛 ≥{G11_MIN_JACCARD} = 人工-人工实测，"
+                f"DP-035）")
             lines.append("    逐试次升序（拖累项排前）：")
             for t, j in sorted(per_trial, key=lambda kv: kv[1]):
                 lines.append(f"      {j:.3f}  {t}")
         else:
+            why = (f"{len(missing)}/{len(per_trial)} 试次缺真值段："
+                   f"{missing[:8]}{'…' if len(missing) > 8 else ''}"
+                   if per_trial else
+                   f"剔除 {len(empty)} 个双方皆空试次后**一个可评试次都不剩**")
             lines.append(
-                f"  G11 逐秒 Jaccard：**算不出**（{len(missing)}/{len(per_trial)} "
-                f"试次缺真值段：{missing[:8]}{'…' if len(missing) > 8 else ''}）"
+                f"  G11 逐秒 Jaccard：**算不出**（{why}）"
                 "——算不出按不过处理，不报≠过")
         g7_ok = self.pooled_pearson_r >= G7_MIN_R
         g8_ok = abs(self.ba_bias_s) <= G8_MAX_BIAS_S
@@ -279,6 +292,8 @@ def evaluate_trial(sample: TrialSample, theta: float, *,
         software_mobility_pipeline_segs=segs,
         jaccard_vs_truth=(None if sample.truth_mobile_segs is None
                           else jaccard_segs(segs, sample.truth_mobile_segs)),
+        jaccard_both_empty=(sample.truth_mobile_segs is not None
+                            and not segs and not sample.truth_mobile_segs),
     )
 
 
@@ -301,6 +316,22 @@ def jaccard_segs(a_segs: Sequence[tuple[float, float]],
     if denom <= 1e-12:
         return 1.0 if not a and not b else 0.0
     return inter / denom
+
+
+def g11_mean(preds: Sequence["TrialEval"]) -> float | None:
+    """G11 均值：all-or-nothing + DP-045 双方皆空剔除。
+
+    两条规则，缺一门就失效：
+    - 有任何一个试次**缺真值段** ⇒ 整门 None（算不出≠通过，不许部分平均冒充全体）；
+    - **双方皆空**的试次剔出分母。`jaccard_segs` 对这种情况返回 1.0（成对函数
+      的语义是对的：零分歧判对不罚），但把它算进均值就是**白送分**——按 DP-043，
+      声明为空的隔间根本不该进分析，靠"隔间是空的"把 G11 抬上门槛是造假通过。
+      剔完一个不剩 ⇒ None，同样按不过处理。
+    """
+    if not preds or any(p.jaccard_vs_truth is None for p in preds):
+        return None
+    kept = [p.jaccard_vs_truth for p in preds if not p.jaccard_both_empty]
+    return float(np.mean(kept)) if kept else None
 
 
 def onset_match_error(sw_segs: Sequence[tuple[float, float]],
@@ -446,9 +477,9 @@ def lovo_cv(samples: Sequence[TrialSample], *,
     th = np.asarray(thetas)
     diff = soft - truth
     cv = float(100.0 * th.std(ddof=1) / th.mean()) if th.size > 1 else 0.0
-    # G11：all-or-nothing——有一个试次缺真值段就整门"算不出"，不许部分平均冒充全体
-    jacs = [p.jaccard_vs_truth for p in all_pred]
-    g11 = float(np.mean(jacs)) if all_pred and all(j is not None for j in jacs) else None
+    # G11：all-or-nothing——有一个试次缺真值段就整门"算不出"，不许部分平均冒充全体。
+    # DP-045：双方皆空的试次先剔除（不记 1.0 也不记 0），剔完没剩 ⇒ 算不出，不是过。
+    g11 = g11_mean(all_pred)
     return LovoResult(
         folds=tuple(folds),
         bout_params=bp,
