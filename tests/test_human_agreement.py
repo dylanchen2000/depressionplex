@@ -190,19 +190,25 @@ def test_unknown_format_rejected() -> None:
 
 
 def test_real_data_matches_audit_baseline() -> None:
+    # 2026-09-04（DP-044）：并入张咸明重评的 14 条 ⇒ 43+14=57 试次。
+    # 两条 `20mg_3周-ch4` 都被拒收（两人独立都给空，DP-012：空 holds 与"没评"
+    # 不可区分，一律拒收不许变 0）——这正是**真空隔间**在入库口径上的表现。
     res = build_table(RAW)
-    assert res.n_trials == 43
-    assert res.n_rejected == 1 and res.n_accepted == 42
-    rejected = [r for r in res.rows if r.status == STATUS_REJECTED]
-    assert rejected[0].scorer_id == "徐乐彤" and rejected[0].trial_id == "20mg_3周-ch4"
-    assert rejected[0].mobile_union_s is None  # 不许变成 0 入库 ⇒ 360
+    assert res.n_trials == 57
+    assert res.n_rejected == 2 and res.n_accepted == 55
+    rejected = sorted((r.scorer_id, r.trial_id) for r in res.rows
+                      if r.status == STATUS_REJECTED)
+    assert rejected == [("张咸明", "20mg_3周-ch4"), ("徐乐彤", "20mg_3周-ch4")]
+    for r in res.rows:
+        if r.status == STATUS_REJECTED:
+            assert r.mobile_union_s is None  # 不许变成 0 入库 ⇒ 360
 
-    assert res.unsorted_total == 12, "审计 §5.1：王3 徐5 陈3 张1"
+    assert res.unsorted_total == 15, "审计 §5.1：王3 徐5 陈3 张1 + 张咸明3"
     by = res.by_scorer()
     assert {s: by[s]["unsorted"] for s in by} == {
-        "王娟": 3, "陈璇": 3, "徐乐彤": 5, "张": 1}
+        "王娟": 3, "陈璇": 3, "徐乐彤": 5, "张": 1, "张咸明": 3}
     assert {s: by[s]["zero_length"] for s in by} == {
-        "王娟": 0, "陈璇": 0, "徐乐彤": 1, "张": 3}
+        "王娟": 0, "陈璇": 0, "徐乐彤": 1, "张": 3, "张咸明": 3}
     assert 54.6 <= res.max_naive_inflation_s <= 54.9, "审计：最多虚高 +54.8 s"
 
     # DP-004 证据：holds 无一越 360 硬收口
@@ -216,8 +222,11 @@ def test_real_data_matches_audit_baseline() -> None:
         "陈璇": by["陈璇"]["union_sum_s"] / 13,
         "徐乐彤": by["徐乐彤"]["union_sum_s"] / 13,   # 拒绝的不计入合计，13 有效
         "张": by["张"]["union_sum_s"] / 3,
+        # DP-044：张咸明 13 个有效（同一批、同 seed、全程 0.5x）
+        "张咸明": by["张咸明"]["union_sum_s"] / 13,
     }
-    for s, expect in {"王娟": 195.7, "陈璇": 167.1, "徐乐彤": 115.0, "张": 117.8}.items():
+    for s, expect in {"王娟": 195.7, "陈璇": 167.1, "徐乐彤": 115.0,
+                      "张": 117.8, "张咸明": 132.7}.items():
         assert abs(means[s] - expect) < 0.15, f"{s}: {means[s]:.2f} vs 审计 {expect}"
 
     # 审计 §5：每按键墙钟超额（逐试次口径，合并估计 0.121 s；逐试次更抖）
@@ -231,7 +240,8 @@ def test_real_data_matches_audit_baseline() -> None:
             assert abs(r.immobility_s - (TST_WINDOW_S - r.mobile_union_s)) < 1e-9
 
     # seed 分组（PROVENANCE 铁律 3 的数据前提）：同 seed 组共享播放顺序
-    assert res.seed_groups == {973678866: ["王娟", "陈璇"], 210593506: ["张", "徐乐彤"]}
+    assert res.seed_groups == {973678866: ["王娟", "陈璇"],
+                               210593506: ["张", "张咸明", "徐乐彤"]}
     w = {r.trial_id: r.presentation_order for r in res.rows if r.scorer_id == "王娟"}
     c = {r.trial_id: r.presentation_order for r in res.rows if r.scorer_id == "陈璇"}
     assert set(w) == set(c) and all(w[t] == c[t] for t in w), \

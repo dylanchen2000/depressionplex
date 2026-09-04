@@ -343,6 +343,46 @@ def test_g11_travels_in_summary_and_rows() -> None:
                - res.g11_mean_jaccard) < 1e-3
 
 
+def test_g11_both_empty_trials_excluded_from_denominator() -> None:
+    """DP-045：双方皆空的试次剔出 G11 分母——不记 1.0（白送分）也不记 0（冤枉）。
+
+    真实来源：`20mg_3周-ch4` 是**真的空隔间**，徐乐彤与张咸明独立都给 0。
+    人工侧那条被 DP-012 拒收、G11 基线按 n=13 算；软件侧若把同一条记 1.0，
+    两边就不是一套账了（DP-035 明令禁止），而且靠"隔间是空的"把 G11 抬到
+    门槛上等于造假通过。
+    """
+    samples = L.synthetic_lovo_trials(window_s=30.0, fps=10.0, seed=41)
+    res = L.lovo_cv(samples, theta_grid=_grid())
+    preds = [p for f in res.folds for p in f.predictions]
+    base = L.g11_mean(preds)
+    assert base is not None and abs(base - res.g11_mean_jaccard) < 1e-12
+
+    # 掺入一个双方皆空试次（Jaccard=1.0）：不打标记会把均值抬高，打标记后不动
+    empty_unflagged = dataclasses.replace(preds[0], jaccard_vs_truth=1.0,
+                                          jaccard_both_empty=False)
+    empty_flagged = dataclasses.replace(empty_unflagged, jaccard_both_empty=True)
+    assert L.g11_mean(preds + [empty_unflagged]) > base, "对照：不剔就是会被抬高"
+    assert abs(L.g11_mean(preds + [empty_flagged]) - base) < 1e-12
+
+    # 全是双方皆空 ⇒ 算不出，不是 1.0 满分通过
+    assert L.g11_mean([empty_flagged, empty_flagged]) is None
+
+    # 标记由 evaluate 自己打，不靠调用方记得传
+    assert all(p.jaccard_both_empty is False for p in preds), \
+        "合成样本都有运动段，不该有双方皆空"
+
+    # 分母必须写进报告（DP-045：永远报分母）
+    txt = L.LovoResult(
+        folds=res.folds, bout_params=res.bout_params,
+        theta_values=res.theta_values, theta_cv_pct=res.theta_cv_pct,
+        n_predictions=res.n_predictions, pooled_pearson_r=res.pooled_pearson_r,
+        ba_bias_s=res.ba_bias_s, ba_loa_low_s=res.ba_loa_low_s,
+        ba_loa_high_s=res.ba_loa_high_s, truth_sources=res.truth_sources,
+        objective=res.objective, g11_mean_jaccard=res.g11_mean_jaccard,
+    ).summary()
+    assert "分母 n=" in txt
+
+
 def test_g11_missing_segs_is_not_silently_passing() -> None:
     """缺真值段 ⇒ G11 算不出 ⇒ 捆绑判定按不过处理，且报告写明。"""
     samples = L.synthetic_lovo_trials(window_s=30.0, fps=10.0, seed=43)

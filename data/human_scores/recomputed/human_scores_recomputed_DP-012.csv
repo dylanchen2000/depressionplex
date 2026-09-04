@@ -2,6 +2,20 @@ scorer_id,trial_id,source,video,chamber,seed,presentation_order,playback_rate,ta
 张,30mg_2周_2+20_2周2-ch1,salvaged_csv,30mg_2周_2+20_2周2,1,210593506,1,0.25,False,False,accepted,89,True,3,112.36,247.64,114.51,,0.0966,,慢放0.25x,2026-09-02,union_precomputed_by_salvage_tool
 张,30mg_2周_2+20_2周2-ch2,salvaged_csv,30mg_2周_2+20_2周2,2,210593506,4,0.25,False,False,accepted,62,False,0,127.37,232.63,129.54,,0.14,,慢放0.25x,2026-09-02,union_precomputed_by_salvage_tool
 张,30mg_2周_1-3+20_1周1-ch3,salvaged_csv,30mg_2周_1-3+20_1周1,3,210593506,6,0.25,False,False,accepted,44,False,0,113.52,246.48,114.88,,0.1236,,慢放0.25x,2026-09-02,union_precomputed_by_salvage_tool
+张咸明,30mg_2周_2+20_2周2-ch1,audit_json,30mg_2周_2+20_2周2,1,210593506,1,0.5,False,False,accepted,82,True,0,114.7,245.3,118.69,6.28,0.0973,,慢放0.5x,2026-09-04,naive_sum_inflation>=5s
+张咸明,30mg_2周_2+20_2周2-ch2,audit_json,30mg_2周_2+20_2周2,2,210593506,4,0.5,False,False,accepted,46,False,0,140.52,219.48,144.07,,0.1543,,慢放0.5x,2026-09-04,
+张咸明,30mg_2周_1-3+20_1周1-ch3,audit_json,30mg_2周_1-3+20_1周1,3,210593506,6,0.5,False,False,accepted,51,False,0,111.16,248.84,114.24,,0.1208,,慢放0.5x,2026-09-04,
+张咸明,20mg_3周-ch4,audit_json,20mg_3周,4,210593506,7,0.5,False,False,rejected,0,False,0,,,0.0,,,mobile_seconds==0 且 holds==[] 且 unscoreable==false —— 这是『没评』不是『评出 0』，按 0 入库会得到 immobility=360 s（物理上限）,慢放0.5x,2026-09-04,
+张咸明,30mg_2周-ch2,audit_json,30mg_2周,2,210593506,9,0.5,False,False,accepted,41,False,1,87.89,272.11,90.75,,0.1395,,慢放0.5x,2026-09-04,
+张咸明,20mg_3周-ch3,audit_json,20mg_3周,3,210593506,11,0.5,False,False,accepted,71,False,0,134.17,225.83,138.5,,0.122,,慢放0.5x,2026-09-04,
+张咸明,20mg_3周-ch2,audit_json,20mg_3周,2,210593506,12,0.5,False,False,accepted,36,False,0,145.2,214.8,147.54,,0.13,,慢放0.5x,2026-09-04,
+张咸明,30mg_2周_1-3+20_1周1-ch2,audit_json,30mg_2周_1-3+20_1周1,2,210593506,14,0.5,False,False,accepted,26,False,0,108.27,251.73,109.78,,0.1162,,慢放0.5x,2026-09-04,
+张咸明,30mg_2周_2+20_2周2-ch4,audit_json,30mg_2周_2+20_2周2,4,210593506,18,0.5,False,False,accepted,46,True,1,117.19,242.81,119.69,4.15,0.1087,,慢放0.5x,2026-09-04,
+张咸明,30mg_2周-ch3,audit_json,30mg_2周,3,210593506,19,0.5,False,False,accepted,38,False,0,139.95,220.05,142.43,,0.1305,,慢放0.5x,2026-09-04,
+张咸明,30mg_2周-ch1,audit_json,30mg_2周,1,210593506,21,0.5,False,False,accepted,27,True,0,183.66,176.34,185.32,2.04,0.123,,慢放0.5x,2026-09-04,
+张咸明,30mg_2周_1-3+20_1周1-ch1,audit_json,30mg_2周_1-3+20_1周1,1,210593506,22,0.5,False,False,accepted,50,False,0,105.11,254.89,108.53,,0.1368,,慢放0.5x,2026-09-04,
+张咸明,30mg_2周_2+20_2周2-ch3,audit_json,30mg_2周_2+20_2周2,3,210593506,24,0.5,False,False,accepted,54,False,1,175.77,184.23,179.11,,0.1237,,慢放0.5x,2026-09-04,
+张咸明,30mg_2周_1-3+20_1周1-ch4,audit_json,30mg_2周_1-3+20_1周1,4,210593506,25,0.5,False,False,accepted,40,False,0,161.78,198.22,164.34,,0.128,,慢放0.5x,2026-09-04,
 徐乐彤,30mg_2周_2+20_2周2-ch1,audit_json,30mg_2周_2+20_2周2,1,210593506,1,0.25,False,False,accepted,60,True,0,100.4,259.6,102.36,1.39,0.1307,,慢放0.25x,2026-09-02,
 徐乐彤,30mg_2周_2+20_2周2-ch2,audit_json,30mg_2周_2+20_2周2,2,210593506,4,0.25,False,False,accepted,76,False,0,117.6,242.4,119.88,,0.12,,慢放0.25x,2026-09-02,
 徐乐彤,30mg_2周_1-3+20_1周1-ch3,audit_json,30mg_2周_1-3+20_1周1,3,210593506,6,0.25,False,False,accepted,55,False,0,94.19,265.81,96.06,,0.136,,慢放0.25x,2026-09-02,

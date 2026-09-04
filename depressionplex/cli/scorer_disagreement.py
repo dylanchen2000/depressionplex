@@ -36,6 +36,16 @@ def total(segs: list[Seg]) -> float:
     return sum(e - s for s, e in segs)
 
 
+def _both_empty(A: list[Seg], B: list[Seg]) -> bool:
+    """两位评分员在这一试次都没按出任何运动段（DP-045）。
+
+    典型来源是**真的空隔间**（`20mg_3周-ch4`，两人独立都给 0）。这不是一致
+    也不是分歧：留在分母里会稀释偏差、并把 Jaccard 记成 nan 毒掉整个均值。
+    与 `lovo_cv` 的 G11 侧同一条规则，两边不许两套账。
+    """
+    return total(A) <= 1e-12 and total(B) <= 1e-12
+
+
 def overlap(a: Seg, b: Seg) -> float:
     return max(0.0, min(a[1], b[1]) - max(a[0], b[0]))
 
@@ -148,18 +158,36 @@ def main(argv: list[str]) -> int:
         means.append((a + b) / 2)
         print(f"{t[:34]:34s} {a:7.1f} {b:7.1f} {a - b:+7.1f} {x:7.1f} "
               f"{a - x:7.1f} {b - x:7.1f} {j:5.2f}")
-    bias = sum(diffs) / len(diffs)
-    print(f"\n偏差(A−B) {bias:+.2f} s   |差|均值 {sum(abs(d) for d in diffs) / len(diffs):.2f} s")
+    # DP-045：双方皆空的试次剔除出所有均值的分母。它既不是一致也不是分歧——
+    # 按 DP-043，声明为空的隔间根本不该进分析；留在分母里会把偏差稀释、把
+    # Jaccard 变成 nan（曾把 G11 基线整个毒成 nan）。分母一律显式报出。
+    keep = [i for i, t in enumerate(common) if not _both_empty(A[t], B[t])]
+    empty = [common[i] for i in range(len(common)) if i not in set(keep)]
+    if empty:
+        print(f"\n⚠ 剔除 {len(empty)} 个**双方皆空**试次（DP-045，不记 1.0 不记 0）："
+              f"{empty}\n  以下所有均值分母 = {len(keep)}/{len(common)}")
+    if not keep:
+        print("剔除后没有可评试次，拒绝输出均值（不静默返回 0）", file=sys.stderr)
+        return 1
+    kd = [diffs[i] for i in keep]
+    kj = [jac[i] for i in keep]
+    bias = sum(kd) / len(kd)
+    print(f"\n偏差(A−B) {bias:+.2f} s   |差|均值 {sum(abs(d) for d in kd) / len(kd):.2f} s"
+          f"   （n={len(kd)}）")
     print(f"A独有 {ta - ti:.1f} s   B独有 {tb - ti:.1f} s   "
           f"单向净差占对称差 {abs(ta - tb) / ((ta - ti) + (tb - ti)) * 100:.0f}%")
-    print(f"**平均 Jaccard {sum(jac) / len(jac):.3f}** ← 时间轴上的真实一致水平，G11 门槛取此值")
+    print(f"**平均 Jaccard {sum(kj) / len(kj):.3f}**（n={len(kj)}）"
+          f" ← 时间轴上的真实一致水平，G11 门槛取此值")
     print(f"总量一致但时间轴不一致的试次（|差|<10 s 且 Jaccard<0.7）: "
-          f"{[t for t, d, j in zip(common, diffs, jac) if abs(d) < 10 and j < 0.7] or '无'}")
+          f"{[common[i] for i in keep if abs(diffs[i]) < 10 and jac[i] < 0.7] or '无'}")
 
     print("\n── 单向分歧是几大段还是一堆碎片 ──")
     for lab, X, Y in ((f"A独有({nb}说静止)", A, B), (f"B独有({na}说静止)", B, A)):
         segs = sorted(e - s for t in common for s, e in subtract(X[t], Y[t]))
         n, tot = len(segs), sum(segs)
+        if not segs:      # 一侧完全被另一侧包含：如实说"没有单侧片段"，不许崩
+            print(f"  {lab}: 0 段（该侧完全被另一侧包含，无单向分歧）")
+            continue
         print(f"  {lab}: {n} 段 合计 {tot:.1f} s 中位 {segs[n // 2]:.2f} s 最大 {segs[-1]:.2f} s")
 
     print("\n── 边界：按下 vs 松手（互为最佳匹配）──")
