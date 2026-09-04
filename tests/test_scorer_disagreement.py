@@ -129,3 +129,65 @@ def test_all_empty_returns_error_not_fake_perfect_score():
                 {"records": [{"trial_id": "T1", "holds": []}]}))
         rc = S.main(["prog", str(tmp / "a.json"), str(tmp / "b.json")])
     assert rc == 1
+
+def test_playback_rate_stratification_labels_mixed_numbers():
+    """DP-046：倍速错配的配对，合并数必须当场贴"混杂、不得单独引用"，并分层给数。
+
+    为什么这条必须锁死：实测**一处倍速错配就把 ICC 由 0.864 打到 0.344**，与"一个人
+    评得粗一个人评得细"同量级。合并数被当成"人工-人工一致性"去定 G8/G11 的门，
+    等于用一个混杂量当验收基准。倍速缺记录同样算分不了层，一律进"未记录"层。
+    """
+    import contextlib
+    import io
+    import json
+    import tempfile
+    from pathlib import Path
+
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        # T1/T2 同 0.5x；T3 错配（0.25x vs 0.5x）；T4 一侧没记倍速
+        a = [{"trial_id": "T1", "holds": [[0, 10]], "playback_rate": 0.5},
+             {"trial_id": "T2", "holds": [[0, 10]], "playback_rate": 0.5},
+             {"trial_id": "T3", "holds": [[0, 10]], "playback_rate": 0.25},
+             {"trial_id": "T4", "holds": [[0, 10]]}]
+        b = [{"trial_id": "T1", "holds": [[0, 20]], "playback_rate": 0.5},
+             {"trial_id": "T2", "holds": [[0, 20]], "playback_rate": 0.5},
+             {"trial_id": "T3", "holds": [[0, 20]], "playback_rate": 0.5},
+             {"trial_id": "T4", "holds": [[0, 20]], "playback_rate": 0.5}]
+        (tmp / "a.json").write_text(json.dumps({"records": a}))
+        (tmp / "b.json").write_text(json.dumps({"records": b}))
+        assert S.load_rates(tmp / "a.json") == {
+            "T1": 0.5, "T2": 0.5, "T3": 0.25, "T4": None}, "缺字段必须是 None 不是默认值"
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = S.main(["prog", str(tmp / "a.json"), str(tmp / "b.json")])
+    out = buf.getvalue()
+    assert rc == 0
+    assert "混杂：1 个倍速错配 + 1 个倍速未记录" in out, out
+    assert "不得单独引用" in out
+    assert "⚠ **批内换过倍速**" in out, "A 批内 0.5x/0.25x/未记录混用，必须点出来"
+    assert "倍速匹配: n=2" in out and "倍速错配: n=1" in out and "倍速未记录: n=1" in out, out
+    assert "只许用**倍速匹配**那一层" in out
+
+
+def test_matched_rates_produce_no_mixed_warning():
+    """对照：两人全程同倍速 ⇒ 不贴混杂标签，Jaccard 行回到"G11 门槛取此值"。"""
+    import contextlib
+    import io
+    import json
+    import tempfile
+    from pathlib import Path
+
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        recs = lambda end: [{"trial_id": f"T{i}", "holds": [[0, end]],
+                             "playback_rate": 0.5} for i in (1, 2)]
+        (tmp / "a.json").write_text(json.dumps({"records": recs(10)}))
+        (tmp / "b.json").write_text(json.dumps({"records": recs(20)}))
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = S.main(["prog", str(tmp / "a.json"), str(tmp / "b.json")])
+    out = buf.getvalue()
+    assert rc == 0
+    assert "混杂" not in out and "批内换过倍速" not in out, out
+    assert "G11 门槛取此值" in out and "倍速匹配: n=2" in out
