@@ -9,9 +9,20 @@ TST 金标准（Can et al. 2012）要求排除脱落/攀爬等动物——自动
 是否**存在过任何动物级掩膜**（≥ presence_frac × 身体门槛，相对量⇒标度不变）。
 
 - 从未有动物级掩膜 ⇒ `never_occupied`：布置/录制问题（动物从头到尾没进过
-  这个隔间，如 DP-032/DP-005 的 20mg_3周-ch4、30mg_2周-ch4）。处置与 detached
+  这个隔间，如 DP-028 的 20mg_3周-ch4）。处置与 detached
   相同（建议排除），**但科学含义与判据都不同，不得混报**：空场不是实验失败，
   拿它冒充"脱落检测已验证"是虚假验收（G10 拆分见 DP-034，门槛写死不许合并）。
+- **标定帧全部分割失败 ⇒ `unknown`，永不 `never_occupied`（DP-032，2026-09-06）。**
+  `None` 是"这一帧没看成"，不是"这一帧没有动物"。旧代码里两者走同一条路
+  （占比分母是全部标定帧、`None` 只算不命中 ⇒ 占比 0 ⇒ never_occupied），
+  于是软件在**从未成功观测该隔间**的情况下断言了"这里从来没有动物"——
+  `30mg 2周` 隔间 4 就这样被静默丢掉，那只鼠至今没被任何人评过分。
+  实测更硬的一条：真空的 `20mg_3周-ch4` 与它的失败签名**逐字相同**
+  （同样走廊未收口、同样 `animal_in_corridor`、同样全 None）⇒ 两者无法区分
+  ⇒ 不许下判。配套：`occupied_fraction` 的分母改为**分割成功的帧数**；
+  每个隔间记 `unsegmentable_fraction`，"多少帧根本没看见"不再静默。
+  代价要如实报：G10a 的唯一正样本走的是同一条错误路径，所以**自动识别空隔间
+  在本数据集变为不可测**（与 G10b 同状态），不得声称已验证。
 - 有尾级掩膜但从未身体级 ⇒ `detached`（未悬挂/悬挂失效）；或前半有身体、
   后半整段无动物级掩膜 ⇒ `detached`（**中途脱落**——实验失败，须上报）。
 - 存在过、但当前分析只给出尾级面积 ⇒ `truncated_suspect`：**这是 bug**
@@ -39,7 +50,7 @@ threshold = max(0.5×median_others, prior)，任意脱落数量下成立。不�
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import numpy as np
 
@@ -75,6 +86,10 @@ class ChamberValidity:
     #: never_occupied 必须**恰为 0.0**（N2：不是"很低"，是 0）。
     #: 参考量不可估（thr≤0）时为 None——不许拿伪占比冒充可判。
     occupied_fraction: float | None = None
+    #: 分割失败（无掩膜）帧占比（DP-032）。**1.0 = 整段隔间一帧都没看成**，
+    #: 此时不得判 never_occupied——那是"没有证据"，不是"没有动物"。
+    #: None = 剖面为空，不可估（不许记 0）。
+    unsegmentable_fraction: float | None = None
 
 
 @dataclass(frozen=True)
@@ -117,6 +132,22 @@ def _areas(profile: list[float | None]) -> np.ndarray:
     return np.asarray(vals, dtype=float)
 
 
+def _usable(profile: list[float | None]) -> int:
+    """分割成功、有面积可读的帧数。
+
+    `None`/`NaN` 是**"这一帧没看成"**，不是"这一帧面积为 0"——DP-032 的整个
+    缺陷就在于这两件事被混为一谈。凡是要拿占比下结论的地方，分母都得用这个。
+    """
+    return sum(1 for v in profile if v is not None and not np.isnan(float(v)))
+
+
+def _unseg_frac(profile: list[float | None]) -> float | None:
+    """分割失败帧占比。剖面为空 ⇒ None（不可估，不许记 0）。"""
+    if not profile:
+        return None
+    return 1.0 - _usable(profile) / len(profile)
+
+
 def assess_trial_validity(
     calib_areas: dict[int, list[float | None]],
     current_areas: dict[int, list[float | None]] | None = None,
@@ -152,12 +183,18 @@ def assess_trial_validity(
     prior = body_area_prior or 0.0
 
     def _present_frac(profile: list[float | None], t: float) -> float:
-        """"有动物在场"帧占比：raw ≥ _PRESENCE_FRAC×t（纯相对量 ⇒ 标度不变）。"""
-        if t <= 0 or not profile:
-            raise ValueError("present_frac 只在门槛>0 且有标定帧时可算")
+        """"有动物在场"帧占比：raw ≥ _PRESENCE_FRAC×t（纯相对量 ⇒ 标度不变）。
+
+        **分母是分割成功的帧，不是全部标定帧（DP-032）。**分割失败的帧是
+        "没看到"，把它算进分母等于把"看不见"记成"看见了、没有动物"——
+        DP-032 里 27/50 帧分割失败的隔间就因此被稀释成占比 0。
+        """
+        n = _usable(profile)
+        if t <= 0 or n == 0:
+            raise ValueError("present_frac 只在门槛>0 且有分割成功的标定帧时可算")
         hit = sum(1 for v in profile
                   if v is not None and not np.isnan(v) and v >= _PRESENCE_FRAC * t)
-        return hit / len(profile)
+        return hit / n
 
     out: list[ChamberValidity] = []
     for k in sorted(calib_areas):
@@ -182,6 +219,19 @@ def assess_trial_validity(
             ))
             continue
         prof = calib_areas[k]
+        if _usable(prof) == 0:
+            # DP-032：整段隔间一帧都没分割成功 ⇒ **没有证据**，不是"没有动物"。
+            # 实测路径：走廊未收口(band_unsealed) + animal_in_corridor ⇒ 整段
+            # 不可分割 ⇒ 面积全 None。把它记成 never_occupied 等于静默丢掉一只
+            # 真动物（`30mg 2周` 隔间 4 已真实发生，那只鼠至今没被任何人评过），
+            # 而且与真空场（`20mg_3周-ch4`）的签名逐字相同 ⇒ 无法区分 ⇒ 不许下判。
+            out.append(ChamberValidity(
+                k, STATUS_UNKNOWN, maxes[k], ref, thr, False,
+                "标定帧全部分割失败（无掩膜可用）：在场与否不可判——"
+                "不得判为空隔间（DP-032）",
+                None,
+            ))
+            continue
         frac = _present_frac(prof, thr)
         ever = maxes[k] >= thr
         if not ever:
@@ -233,7 +283,11 @@ def assess_trial_validity(
         out.append(ChamberValidity(
             k, STATUS_VALID, maxes[k], ref, thr, True, "", frac
         ))
-    return TrialValidity(tuple(out))
+    # DP-032：把"这个隔间有多少帧我们根本没看见"补进每条记录，不再静默丢失。
+    return TrialValidity(tuple(
+        replace(cv, unsegmentable_fraction=_unseg_frac(calib_areas[cv.chamber]))
+        for cv in out
+    ))
 
 
 def score_gate(cv: ChamberValidity,

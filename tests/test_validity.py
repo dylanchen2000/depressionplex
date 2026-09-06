@@ -83,19 +83,25 @@ def test_three_of_four_detached_stable_with_prior() -> None:
     """评审用例：3/4 无身体级时相对基准退化，常开下界使判据仍成立。
 
     DP-031 拆分后三种"无身体级"证据各归其位：尾级悬挂 = detached（2 号），
-    整片零掩膜 / 只有噪声级尾链 = never_occupied（3、4 号）——处置同为排除，
-    报告口径不合并（G10a vs G10b）。
+    只有噪声级尾链 = never_occupied（4 号）。
+
+    **DP-032 修正（2026-09-06）**：3 号原先是 `[None]*8` 且断言 never_occupied
+    （注释写"从未有掩膜"）——那正是 DP-032 的缺陷本身：`None` 是"这一帧没看成"，
+    不是"这一帧没有动物"。现在 3 号判 `unknown`，并另立 3′ 号保留"真的看了、
+    只有噪声级尾链"⇒ never_occupied 这条不受影响的路径。
     """
     calib = {1: _profile(200), 2: _profile(40), 3: [None] * 8, 4: _profile(5)}
     tv = V.assess_trial_validity(calib, body_area_prior=100.0)
     by = {c.chamber: c for c in tv.chambers}
     assert by[1].status == V.STATUS_VALID
     assert by[2].status == V.STATUS_DETACHED        # 有尾级证据：悬挂失效
-    assert by[3].status == V.STATUS_NEVER_OCCUPIED  # 从未有掩膜
+    assert by[3].status == V.STATUS_UNKNOWN         # 一帧都没看成 ⇒ 无证据（DP-032）
+    assert by[3].occupied_fraction is None          # 不许拿伪占比冒充可判
+    assert by[3].unsegmentable_fraction == 1.0
     assert by[4].status == V.STATUS_NEVER_OCCUPIED  # 噪声级尾链（v4/v7 的实况）
-    assert tv.exclude == (2, 3, 4)                  # 处置：排除态不产出统计量
+    assert tv.exclude == (2, 4)                     # 处置：排除态不产出统计量
     assert tv.detached == (2,)                      # 两支各自可数——不合并
-    assert tv.never_occupied == (3, 4)
+    assert tv.never_occupied == (4,)                # 3 号不再顶 G10a 的账
 
 
 def test_none_and_tiny_entries_ignored() -> None:
@@ -106,8 +112,14 @@ def test_none_and_tiny_entries_ignored() -> None:
     tv = V.assess_trial_validity(calib)
     by = {c.chamber: c for c in tv.chambers}
     assert by[1].status == V.STATUS_VALID
-    assert by[4].status == V.STATUS_NEVER_OCCUPIED   # 零掩膜：空场，不是脱落
-    assert by[4].occupied_fraction == 0.0
+    # 1 号：8 帧里 3 帧 None、1 帧 3.0 —— 分母只算 5 个成功帧，
+    # 其中 4 帧身体级 ⇒ 占比 0.8，不是 4/8 = 0.5（DP-032 分母修正）。
+    assert by[1].occupied_fraction == 0.8
+    assert by[1].unsegmentable_fraction == 0.375
+    # 4 号：全 None ⇒ 一帧都没看成 ⇒ unknown，**不是**空场（DP-032）。
+    assert by[4].status == V.STATUS_UNKNOWN
+    assert by[4].occupied_fraction is None
+    assert by[4].unsegmentable_fraction == 1.0
 
 
 def test_verdicts_invariant_to_area_scale() -> None:
@@ -159,7 +171,10 @@ def test_midtrial_detachment_detected() -> None:
     assert by[4].status == V.STATUS_DETACHED
     assert tv.detached == (4,) and tv.never_occupied == ()
     assert "中途脱落" in by[4].note and "G10b" in by[4].note
-    assert by[4].occupied_fraction == 0.5          # 前半在场——非 0，不落 never 支
+    # 前半在场——非 0，不落 never 支。**DP-032 后分母是 6 个成功帧不是 8 帧**：
+    # 4 帧身体级 / 6 帧看成 = 2/3（旧口径 4/8 = 0.5）。判定不变，只是数值更诚实。
+    assert by[4].occupied_fraction == 4 / 6
+    assert by[4].unsegmentable_fraction == 0.25
     # 证据不足不判：标定帧 <4 帧时前后半无从谈起，保持 valid 不误伤
     calib3 = {**calib, 4: [200.0, None, 2.0]}
     tv3 = V.assess_trial_validity(calib3)
@@ -209,3 +224,87 @@ def test_score_gate_blocks_phantom_immobility_N1_N3() -> None:
     # valid 放行且无消息
     cv_valid = _cv_of(1, calib)
     assert V.score_gate(cv_valid, 12.3) == (True, ())
+
+
+# ---------------------------------------------------------------------------
+# DP-032：把"一帧都没看成"从"从来没有动物"里分出来
+# ---------------------------------------------------------------------------
+
+def test_all_frames_unsegmentable_is_unknown_never_empty() -> None:
+    """DP-032 的实况回归：整段隔间分割失败**不得**判成空隔间。
+
+    实测路径（`scripts/dp032_diagnose_chamber.py`）：走廊未收口 +
+    `animal_in_corridor` ⇒ 整段一帧掩膜都出不来 ⇒ 面积全 None。
+    旧代码把它判 never_occupied，等于静默丢掉一只真动物——`30mg 2周` 隔间 4
+    已真实发生，那只鼠至今没被任何人评过分。
+    """
+    calib = {1: _profile(170), 2: _profile(230), 3: _profile(200),
+             4: [None] * 12}
+    tv = V.assess_trial_validity(calib)
+    by = {c.chamber: c for c in tv.chambers}
+    assert by[4].status == V.STATUS_UNKNOWN
+    assert by[4].status != V.STATUS_NEVER_OCCUPIED
+    assert by[4].occupied_fraction is None
+    assert by[4].unsegmentable_fraction == 1.0
+    assert by[4].ever_had_body is False
+    assert "不得判为空隔间" in by[4].note
+    # 不许顶 G10a 的账：假阳性只能由"真的看了、确实没有"产生
+    assert tv.never_occupied == ()
+    # 但处置仍是不放行——unknown 是排除态，不产出任何 immobility 数字
+    allowed, msgs = V.score_gate(by[4], candidate_immobility_s=360.0)
+    assert allowed is False and msgs
+
+
+def test_true_empty_and_unsegmentable_do_not_collapse() -> None:
+    """两者签名在实测里逐字相同，但判定必须不同——否则等于把巧合当能力。
+
+    真空隔间（看了 12 帧、全是噪声级尾链）⇒ never_occupied；
+    不可分割隔间（12 帧一帧没看成）⇒ unknown。**不许合并成同一个结论。**
+    """
+    base = {1: _profile(200), 2: _profile(190), 3: _profile(210)}
+    empty = V.assess_trial_validity({**base, 4: _profile(4)})
+    blind = V.assess_trial_validity({**base, 4: [None] * 12})
+    assert empty.never_occupied == (4,) and empty.detached == ()
+    assert blind.never_occupied == () and blind.detached == ()
+    by_e = {c.chamber: c for c in empty.chambers}
+    by_b = {c.chamber: c for c in blind.chambers}
+    assert by_e[4].status != by_b[4].status
+    assert by_e[4].unsegmentable_fraction == 0.0   # 真的看了
+    assert by_b[4].unsegmentable_fraction == 1.0   # 一帧没看成
+
+
+def test_present_frac_denominator_is_usable_frames_only() -> None:
+    """占比分母 = 分割成功的帧，不是全部标定帧。
+
+    DP-032 实测里 `30mg 2周` 隔间 3 有一段 27/50 帧分割失败，
+    旧分母会把占比稀释到 0，从而把一个有老鼠的隔间推向 never_occupied。
+    """
+    half = [200.0, None] * 6            # 6 帧身体级 + 6 帧没看成
+    calib = {1: _profile(200), 2: _profile(190), 3: _profile(210), 4: half}
+    by = {c.chamber: c for c in V.assess_trial_validity(calib).chambers}
+    assert by[4].occupied_fraction == 1.0      # 看成的帧里 6/6 在场，不是 6/12
+    assert by[4].unsegmentable_fraction == 0.5
+    assert by[4].status == V.STATUS_VALID      # 不再被稀释成排除态
+
+
+def test_unsegmentable_fraction_recorded_on_every_chamber() -> None:
+    """"多少帧根本没看见"必须逐隔间落在记录里，不许静默丢失。"""
+    calib = {1: _profile(200), 2: [200.0, None, 200.0, None],
+             3: _profile(210), 4: _profile(190)}
+    by = {c.chamber: c for c in V.assess_trial_validity(calib).chambers}
+    assert by[1].unsegmentable_fraction == 0.0
+    assert by[2].unsegmentable_fraction == 0.5
+    assert all(c.unsegmentable_fraction is not None
+               for c in V.assess_trial_validity(calib).chambers)
+
+
+def test_unsegmentable_verdict_invariant_to_area_scale() -> None:
+    """单位不变量配套：面积 ×4 后"不可分割 ⇒ unknown"不翻转。"""
+    calib = {1: _profile(200), 2: _profile(190), 3: _profile(210), 4: [None] * 8}
+    a = V.assess_trial_validity(calib)
+    b = V.assess_trial_validity(
+        {k: [None if x is None else 4 * x for x in p] for k, p in calib.items()})
+    assert [(c.status, c.occupied_fraction, c.unsegmentable_fraction)
+            for c in a.chambers] == \
+           [(c.status, c.occupied_fraction, c.unsegmentable_fraction)
+            for c in b.chambers]
