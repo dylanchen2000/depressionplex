@@ -1,0 +1,996 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <link rel="icon" href="data:,">
+  <title>DepressionPlex 原子原语标注工具 V2.2</title>
+  <style>
+    :root { --ink:#203040; --blue:#2474a6; --green:#198754; --red:#b02a37; --line:#d7dee5; --soft:#f6f8fa; }
+    * { box-sizing:border-box; }
+    body { margin:0; font:14px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif; color:var(--ink); background:#eef2f5; }
+    .container { max-width:1500px; margin:auto; padding:18px; }
+    h1,h2,h3 { margin:0 0 10px; }
+    h1 { font-size:24px; } h2 { font-size:17px; } h3 { font-size:14px; }
+    .badge { padding:3px 8px; border-radius:12px; background:#dff3ff; color:#075985; font-size:12px; vertical-align:middle; }
+    .subtitle { color:#607080; margin:4px 0 16px; }
+    .card { background:#fff; border:1px solid var(--line); border-radius:8px; padding:14px; margin-bottom:14px; }
+    .hidden { display:none !important; }
+    .row { display:flex; flex-wrap:wrap; gap:10px; align-items:end; }
+    .field { min-width:150px; flex:1; }
+    label { display:block; margin-bottom:4px; font-weight:600; }
+    input,select,button { font:inherit; }
+    input,select { width:100%; padding:7px 8px; border:1px solid #b9c3cc; border-radius:5px; background:#fff; }
+    input[type=checkbox] { width:auto; }
+    button { border:0; border-radius:5px; padding:8px 12px; color:#fff; background:var(--blue); cursor:pointer; }
+    button.secondary { background:#65727e; } button.success { background:var(--green); } button.danger { background:var(--red); }
+    button:disabled { opacity:.5; cursor:not-allowed; }
+    .toolbar { display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
+    .toolbar label { margin:0 0 0 8px; font-weight:500; }
+    .status { padding:9px 11px; margin-top:10px; border-radius:5px; background:#dff3ff; white-space:pre-wrap; }
+    .status.error { background:#f8d7da; color:#721c24; }
+    .notice { padding:9px 11px; border-left:4px solid #e7a31a; background:#fff7df; margin:8px 0; }
+    .layout { display:grid; grid-template-columns:minmax(520px,2fr) minmax(360px,1fr); gap:14px; }
+    video { width:100%; max-height:620px; background:#111; }
+    .video-controls { padding:9px; background:#1f2933; color:#fff; }
+    .video-controls input[type=range] { width:100%; }
+    .mono { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; }
+    .mouse-buttons,.track-buttons { display:flex; flex-wrap:wrap; gap:6px; margin:8px 0; }
+    .mouse-buttons button,.track-buttons button { background:#e8edf1; color:#263849; border:1px solid #cbd5dd; padding:6px 9px; }
+    .mouse-buttons button.active,.track-buttons button.active { color:#fff; background:var(--blue); }
+    .intervals { max-height:340px; overflow:auto; border:1px solid var(--line); border-radius:5px; margin:8px 0; }
+    .interval { display:flex; justify-content:space-between; gap:8px; padding:7px 9px; border-bottom:1px solid var(--line); cursor:pointer; }
+    .interval:last-child { border:0; } .interval.active { background:#eaf5fc; }
+    .grid2 { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
+    pre { max-height:520px; overflow:auto; padding:11px; background:#101923; color:#d8e5ef; border-radius:5px; white-space:pre-wrap; }
+    table { border-collapse:collapse; width:100%; font-size:12px; }
+    th,td { border:1px solid var(--line); padding:5px 7px; text-align:left; }
+    th { background:var(--soft); }
+    .error-list { color:var(--red); max-height:180px; overflow:auto; }
+    @media(max-width:950px) { .layout { grid-template-columns:1fr; } }
+  </style>
+</head>
+<body>
+<main class="container">
+  <h1>DepressionPlex 原子原语标注工具 <span class="badge">V2.2 · V2-only · 独立轨道</span></h1>
+  <p class="subtitle">唯一权威格式：depressionplex.annotation.v2。区间 [start,end] 为闭区间；分析窗口 [start,end_exclusive) 为半开区间。</p>
+
+  <section class="card">
+    <div class="toolbar">
+      <button onclick="app.showCreate(true)">新建</button>
+      <button class="success" onclick="app.saveFile()">保存 V2 JSON</button>
+      <button onclick="document.getElementById('openFile').click()">打开 V2 JSON</button>
+      <input id="openFile" class="hidden" type="file" accept=".json,application/json" onchange="app.loadFile(event)">
+      <button class="success" onclick="app.exportCSV()">导出当前 mouse enriched V2 CSV</button>
+      <button class="secondary" onclick="app.showStats()">窗口统计</button>
+      <button class="secondary" onclick="app.showAgreement()">双人一致性</button>
+      <label><input id="completedToggle" type="checkbox" onchange="app.setCompleted(this.checked)"> 已完成并复核</label>
+      <span id="autosave" class="mono"></span>
+    </div>
+    <div id="status" class="status hidden"></div>
+  </section>
+
+  <section id="createCard" class="card hidden">
+    <h2>新建 V2 标注</h2>
+    <div class="row">
+      <div class="field"><label>Trial ID</label><input id="newTrial" placeholder="例：20mg_1w_video1"></div>
+      <div class="field"><label>Assignment ID</label><input id="newAssignment" placeholder="例：pilot_tst_001"></div>
+      <div class="field"><label>范式</label><select id="newAssay"><option>TST</option><option>FST</option></select></div>
+      <div class="field"><label>标注员唯一 ID</label><input id="newAnnotator" placeholder="例：ann_chenxuan"></div>
+      <div class="field"><label>FPS</label><input id="newFps" type="number" min="0.001" step="0.001" value="25"></div>
+      <div class="field"><label>权威 n_frames</label><input id="newNFrames" type="number" min="1" step="1" placeholder="由 ffprobe/decoder 核对"></div>
+    </div>
+    <div class="row" style="margin-top:10px">
+      <div class="field"><label>标注池</label><select id="newPool" onchange="app.syncBlindPrefill()"><option value="validate">validate（盲标验证）</option><option value="train">train（训练）</option></select></div>
+      <div class="field"><label><input id="newBlind" type="checkbox" checked> blind（未看规则/模型结果）</label></div>
+      <div class="field"><label><input id="newPrefill" type="checkbox"> prefill（仅 train 可用）</label></div>
+      <div class="field"><label><input id="roleConfirm" type="checkbox"> 我确认角色为 independent_rater</label></div>
+      <div class="field"><label><input id="frameCountConfirm" type="checkbox"> 我已用 ffprobe/decoder 核对 fps 与 n_frames</label></div>
+    </div>
+    <div class="row" style="margin-top:10px">
+      <div class="field"><label>Active mice</label><div class="toolbar">
+        <label><input id="mouse1" type="checkbox" checked>1</label><label><input id="mouse2" type="checkbox" checked>2</label>
+        <label><input id="mouse3" type="checkbox" checked>3</label><label><input id="mouse4" type="checkbox" checked>4</label>
+      </div></div>
+      <div class="toolbar"><button class="success" onclick="app.createNew()">创建</button><button class="secondary" onclick="app.showCreate(false)">取消</button></div>
+    </div>
+  </section>
+
+  <section class="card">
+    <div class="layout">
+      <div>
+        <h2>视频与分析窗口</h2>
+        <input id="videoFile" type="file" accept="video/*" onchange="app.loadVideo(event)">
+        <div id="videoIdentity" class="notice">尚未绑定视频。保存、CSV 与一致性均要求 SHA-256 视频身份。</div>
+        <video id="video" controls preload="metadata"></video>
+        <div class="video-controls">
+          <input id="progress" type="range" min="0" max="100" step="0.01" value="0" oninput="app.seekPct(this.value)">
+          <div class="toolbar">
+            <button onclick="app.step(-5)">-5帧</button><button onclick="app.step(-1)">-1帧</button>
+            <button onclick="app.step(1)">+1帧</button><button onclick="app.step(5)">+5帧</button>
+            <span id="frameDisplay" class="mono">frame 0 / 0</span>
+          </div>
+        </div>
+        <div class="row" style="margin-top:10px">
+          <div class="field"><label>analysis start（含）</label><input id="awStart" type="number" min="0" value="0"></div>
+          <div class="field"><label>analysis end_exclusive（不含）</label><input id="awEnd" type="number" min="0" value="0"></div>
+          <button onclick="app.updateWindow()">应用半开窗口</button>
+          <span id="awDuration" class="mono"></span>
+        </div>
+        <div class="notice">新建/视频加载只会给出候选窗口，不会自动确认。正式 validate TST 必须由标注员显式确认不少于 9000 帧；可直接采用 9661/11470 等完整视频窗口。</div>
+      </div>
+
+      <div>
+        <h2>独立原语轨道</h2>
+        <div id="docInfo" class="notice">请先创建或加载 V2 文件。</div>
+        <div id="mouseButtons" class="mouse-buttons"></div>
+        <div id="trackButtons" class="track-buttons"></div>
+        <h3 id="trackTitle">未选择轨道</h3>
+        <div id="intervals" class="intervals"><div class="interval">暂无间隔</div></div>
+        <div class="grid2"><div><label>start（含）</label><input id="ivStart" type="number"></div><div><label>end（含）</label><input id="ivEnd" type="number"></div></div>
+        <div style="margin-top:8px"><label>值</label><select id="ivValue"></select></div>
+        <div class="toolbar" style="margin-top:8px">
+          <button onclick="app.useCurrentFrame('start')">当前帧→start</button><button onclick="app.useCurrentFrame('end')">当前帧→end</button>
+          <button class="success" onclick="app.upsertInterval()">新增 / 更新</button><button class="secondary" onclick="app.clearSelection()">清除选择</button>
+          <button class="danger" onclick="app.deleteSelected()">删除所选</button>
+        </div>
+        <div id="validation" class="error-list hidden"></div>
+      </div>
+    </div>
+  </section>
+
+  <section id="statsCard" class="card hidden">
+    <h2>窗口统计（逐 active_mice 分开）</h2>
+    <div class="row"><div class="field"><label>Rubric</label><select id="statsRubric"></select></div><div class="field"><label>Mouse</label><select id="statsMouse"><option value="all">全部 active_mice（分别计算）</option></select></div><button onclick="app.computeStats()">计算</button><button class="secondary" onclick="app.showStats(false)">关闭</button></div>
+    <pre id="statsOutput"></pre>
+  </section>
+
+  <section id="agreeCard" class="card hidden">
+    <h2>双人一致性（严格门禁、逐鼠、仅分析窗口）</h2>
+    <div class="notice">只接受两份 completed=true、pool=validate、blind=true、prefill=false 且 trial/video 身份一致的 V2.2 文件；标注员必须不同。</div>
+    <div class="row"><div class="field"><label>文件 A</label><input id="agreeA" type="file" accept=".json"></div><div class="field"><label>文件 B</label><input id="agreeB" type="file" accept=".json"></div><button onclick="app.computeAgreement()">严格计算</button><button class="secondary" onclick="app.showAgreement(false)">关闭</button></div>
+    <div id="agreeOutput"></div>
+  </section>
+</main>
+
+<script>
+'use strict';
+const app = {
+  SCHEMA: 2,
+  FORMAT: 'depressionplex.annotation.v2',
+  TOOL_VERSION: '2.2.0',
+  PRIMITIVE_SET_VERSION: 'depressionplex-primitives-v2.1.0',
+  RUBRIC_VERSION: 'depressionplex-rubrics-v2.1.0',
+  INTERVAL_SEMANTICS: 'closed',
+  WINDOW_SEMANTICS: 'half_open',
+  AUTOSAVE_KEY: 'depressionplex_annotation_v2_2_autosave',
+
+  TRACK_DEFS: {
+    head_neck_motion:{label:'头颈部运动',type:'level',values:['none','subtle','marked'],assay:'TST,FST'},
+    fore_motion:{label:'前肢运动',type:'level',values:['none','subtle','marked'],assay:'TST,FST'},
+    hind_motion:{label:'后肢运动',type:'level',values:['none','subtle','marked'],assay:'TST,FST'},
+    trunk_deforming:{label:'躯干动态形变',type:'bool',values:['false','true'],assay:'TST,FST'},
+    whole_body_swing:{label:'整体钟摆摆动',type:'bool',values:['false','true'],assay:'TST'},
+    fore_wall_upstroke:{label:'前肢扒壁',type:'bool',values:['false','true'],assay:'FST'},
+    body_translation:{label:'整体位移方向',type:'cat',values:['none','horizontal','upward','downward'],assay:'FST'},
+    body_axis:{label:'身体轴姿态',type:'cat',values:['horizontal','oblique','vertical'],assay:'FST'},
+    wall_contact:{label:'缸壁接触',type:'cat',values:['none','forepaw','body'],assay:'FST'},
+    waterline_state:{label:'水线状态',type:'cat',values:['nose_above','head_partial','head_submerged','body_submerged'],assay:'FST'},
+    touch_wall:{label:'触壁/触悬挂杆',type:'bool',values:['false','true'],assay:'TST'},
+    tail_grasp:{label:'前爪抓尾',type:'bool',values:['false','true'],assay:'TST'},
+    axis_orient:{label:'身体轴朝向',type:'orient',values:['down','level','up','unknown'],assay:'TST'},
+    visibility:{label:'可见性',type:'cat',values:['clear','occluded','uncertain'],assay:'TST,FST'}
+  },
+  ASSAY_PROFILES: {
+    TST:['head_neck_motion','fore_motion','hind_motion','trunk_deforming','whole_body_swing','touch_wall','tail_grasp','axis_orient','visibility'],
+    FST:['head_neck_motion','fore_motion','hind_motion','trunk_deforming','fore_wall_upstroke','body_translation','body_axis','wall_contact','waterline_state','visibility']
+  },
+  RUBRICS: {
+    academic_tst:{Mobility:d=>(d.hind_motion==='marked'||d.trunk_deforming==='true'||d.touch_wall==='true')&&d.tail_grasp!=='true',Immobility:d=>!(d.hind_motion==='marked'||d.trunk_deforming==='true'||d.touch_wall==='true')&&d.tail_grasp!=='true'},
+    csi_tst:{Mobility:d=>d.head_neck_motion!=='none'||d.fore_motion!=='none'||d.hind_motion!=='none'||d.trunk_deforming==='true'||d.whole_body_swing==='true',Immobility:d=>d.head_neck_motion==='none'&&d.fore_motion==='none'&&d.hind_motion==='none'&&d.trunk_deforming==='false'&&d.whole_body_swing==='false'},
+    ours_tst:{Mobility:d=>(d.hind_motion==='marked'||d.trunk_deforming==='true')&&d.whole_body_swing!=='true'&&d.tail_grasp!=='true',Immobility:d=>d.head_neck_motion==='none'&&d.fore_motion==='none'&&d.hind_motion==='none'&&d.trunk_deforming==='false'&&d.whole_body_swing!=='true'&&d.tail_grasp!=='true',PassiveSwing:d=>d.whole_body_swing==='true'&&d.head_neck_motion==='none'&&d.fore_motion==='none'&&d.hind_motion==='none'&&d.trunk_deforming==='false'&&d.tail_grasp!=='true',ForelimbOnly:d=>d.fore_motion!=='none'&&d.hind_motion==='none'&&d.trunk_deforming==='false'&&d.tail_grasp!=='true',TailClimbing:d=>d.tail_grasp==='true',HeadNeckStruggle:d=>d.head_neck_motion==='marked'&&d.hind_motion==='none'&&d.trunk_deforming==='false'&&d.tail_grasp!=='true',ActiveDrivenSwing:d=>d.whole_body_swing==='true'&&(d.head_neck_motion!=='none'||d.fore_motion!=='none'||d.hind_motion!=='none'||d.trunk_deforming==='true')},
+    academic_fst:{Immobility:d=>d.fore_motion!=='marked'&&d.hind_motion!=='marked'&&d.trunk_deforming==='false',Swimming:d=>d.hind_motion!=='none'&&d.wall_contact==='none',Climbing:d=>d.fore_wall_upstroke==='true'||(d.fore_motion==='marked'&&d.wall_contact!=='none')},
+    csi_fst:{Float:d=>d.head_neck_motion==='none'&&d.fore_motion==='none'&&d.hind_motion==='none'&&d.trunk_deforming==='false',Swim:d=>d.hind_motion!=='none'&&d.wall_contact==='none'&&d.fore_wall_upstroke!=='true',Climb:d=>d.fore_wall_upstroke==='true'||(d.fore_motion==='marked'&&d.wall_contact!=='none'),Struggle:d=>d.trunk_deforming==='true'&&d.fore_motion!=='none'&&d.hind_motion!=='none',FullDive:d=>(d.waterline_state==='head_submerged'||d.waterline_state==='body_submerged')&&(d.fore_motion!=='none'||d.hind_motion!=='none'),PassiveDive:d=>(d.waterline_state==='head_submerged'||d.waterline_state==='body_submerged')&&d.fore_motion==='none'&&d.hind_motion==='none'},
+    ours_fst:{QuietImmobility:d=>d.fore_motion==='none'&&d.hind_motion==='none'&&d.trunk_deforming==='false'&&d.waterline_state==='nose_above',PassiveResidual:d=>d.fore_motion==='none'&&d.hind_motion==='none'&&d.trunk_deforming==='false'&&d.waterline_state!=='nose_above',ForeOnlySubtle:d=>d.fore_motion==='subtle'&&d.hind_motion==='none'&&d.trunk_deforming==='false',ActiveStruggle:d=>d.hind_motion==='marked'&&d.trunk_deforming==='true',EscapeDirected:d=>d.fore_wall_upstroke==='true'&&d.body_axis==='vertical',Swimming:d=>d.hind_motion!=='none'&&d.wall_contact==='none'&&d.fore_wall_upstroke!=='true'&&d.body_translation!=='upward',Climbing:d=>d.fore_wall_upstroke==='true'&&d.body_axis!=='horizontal'}
+  },
+  PRIORITY: {
+    academic_tst:['Mobility','Immobility'],csi_tst:['Mobility','Immobility'],
+    academic_fst:['Climbing','Swimming','Immobility'],csi_fst:['Struggle','Climb','Swim','FullDive','PassiveDive','Float']
+  },
+
+  doc:null, video:null, pendingVideo:null, currentMouse:1, currentTrack:null, selectedIndex:-1,
+
+  init() {
+    this.video=document.getElementById('video');
+    this.video.addEventListener('timeupdate',()=>this.updateFrameDisplay());
+    this.video.addEventListener('loadeddata',()=>this.updateFrameDisplay());
+    this.syncBlindPrefill();
+    this.restoreAutosave();
+    setInterval(()=>{ if(this.doc) this.autosave(); },60000);
+  },
+
+  showStatus(message,error=false) {
+    const el=document.getElementById('status');
+    el.textContent=message; el.classList.remove('hidden'); el.classList.toggle('error',error);
+  },
+  fail(message) { this.showStatus(message,true); alert(message); return false; },
+  now() { return new Date().toISOString(); },
+  timestampWithZone(value) { return typeof value==='string'&&Number.isFinite(Date.parse(value))&&/(?:Z|[+-]\d{2}:\d{2})$/.test(value); },
+  clone(value) { return JSON.parse(JSON.stringify(value)); },
+  tracksFor(assay) { return this.ASSAY_PROFILES[assay]||[]; },
+  defaultValue(track) { const d=this.TRACK_DEFS[track]; return d.type==='bool'?'false':d.values[0]; },
+  showCreate(show=true) { document.getElementById('createCard').classList.toggle('hidden',!show); },
+
+  syncBlindPrefill() {
+    const validate=document.getElementById('newPool').value==='validate';
+    const blind=document.getElementById('newBlind');
+    const prefill=document.getElementById('newPrefill');
+    if(validate) { blind.checked=true; blind.disabled=true; prefill.checked=false; prefill.disabled=true; }
+    else { blind.disabled=false; prefill.disabled=false; }
+  },
+
+  createNew() {
+    const trial=document.getElementById('newTrial').value.trim();
+    const assignmentId=document.getElementById('newAssignment').value.trim();
+    const assay=document.getElementById('newAssay').value;
+    const annotator=document.getElementById('newAnnotator').value.trim();
+    const fps=Number(document.getElementById('newFps').value);
+    const nFrames=Number(document.getElementById('newNFrames').value);
+    const pool=document.getElementById('newPool').value;
+    const blind=document.getElementById('newBlind').checked;
+    const prefill=document.getElementById('newPrefill').checked;
+    const mice=[1,2,3,4].filter(m=>document.getElementById('mouse'+m).checked);
+    if(!trial||!assignmentId||!annotator) return this.fail('trial、assignment_id、annotator 均不能为空。');
+    if(!Number.isFinite(fps)||fps<=0) return this.fail('FPS 必须为正数。');
+    if(!Number.isInteger(nFrames)||nFrames<=0) return this.fail('n_frames 必须是经 ffprobe/decoder 核对的正整数。');
+    if(!document.getElementById('frameCountConfirm').checked) return this.fail('请确认已用 ffprobe/decoder 核对 fps 与 n_frames。');
+    if(!mice.length) return this.fail('至少选择一只 active mouse。');
+    if(!document.getElementById('roleConfirm').checked) return this.fail('请确认 annotator_role=independent_rater。');
+    if(pool==='validate'&&(!blind||prefill)) return this.fail('validate 池必须 blind=true 且 prefill=false。');
+    const stamp=this.now();
+    const n=nFrames;
+    const tracks={}; this.tracksFor(assay).forEach(t=>tracks[t]=[]);
+    this.doc={
+      schema:this.SCHEMA,format:this.FORMAT,tool_version:this.TOOL_VERSION,
+      primitive_set_version:this.PRIMITIVE_SET_VERSION,rubric_version:this.RUBRIC_VERSION,
+      interval_semantics:this.INTERVAL_SEMANTICS,analysis_window_semantics:this.WINDOW_SEMANTICS,analysis_window_confirmed:false,
+      trial,assignment_id:assignmentId,assay,annotator,annotator_role:'independent_rater',
+      blind,pool,prefill,completed:false,completed_at:null,
+      created_at:stamp,updated_at:stamp,metadata_repaired:false,provenance:null,
+      fps,n_frames:n,analysis_window:[0,n],active_mice:mice,
+      video:this.pendingVideo?this.clone(this.pendingVideo):null,tracks
+    };
+    this.currentMouse=mice[0]; this.currentTrack=this.tracksFor(assay)[0]; this.selectedIndex=-1;
+    this.showCreate(false); this.loadDocIntoUI(); this.autosave();
+    this.showStatus('已创建 canonical V2.2 文档。绑定并校验视频后方可导出。');
+    return true;
+  },
+
+  isCanonicalIdentity(doc) {
+    return doc.schema===this.SCHEMA&&doc.format===this.FORMAT&&doc.tool_version===this.TOOL_VERSION&&
+      doc.primitive_set_version===this.PRIMITIVE_SET_VERSION&&doc.rubric_version===this.RUBRIC_VERSION&&
+      doc.interval_semantics===this.INTERVAL_SEMANTICS&&doc.analysis_window_semantics===this.WINDOW_SEMANTICS;
+  },
+
+  canonicalFieldsPresent(doc) {
+    return typeof doc.trial==='string'&&typeof doc.assignment_id==='string'&&typeof doc.annotator==='string'&&
+      ['independent_rater','legacy_rater'].includes(doc.annotator_role)&&typeof doc.blind==='boolean'&&typeof doc.completed==='boolean'&&
+      typeof doc.metadata_repaired==='boolean'&&typeof doc.created_at==='string'&&typeof doc.updated_at==='string'&&
+      typeof doc.analysis_window_confirmed==='boolean'&&Array.isArray(doc.active_mice)&&Array.isArray(doc.analysis_window)&&doc.tracks&&typeof doc.tracks==='object';
+  },
+
+  canonicalizeMigratedTracks(tracks,assay,activeMice,nFrames,repairedFields) {
+    const repairLog=[];
+    const mergeGroup=(track,mouse,items)=>{
+      const sorted=items.map(iv=>({...iv})).sort((a,b)=>a.start-b.start||a.end-b.end);
+      const merged=[];
+      sorted.forEach(iv=>{
+        const previous=merged[merged.length-1];
+        if(previous&&Number.isInteger(previous.start)&&Number.isInteger(previous.end)&&Number.isInteger(iv.start)&&Number.isInteger(iv.end)&&iv.start<=previous.end) {
+          if(iv.value!==previous.value) throw new Error('迁移硬拒：'+track+' mouse '+mouse+' 存在异值重叠 ['+previous.start+','+previous.end+']='+previous.value+' 与 ['+iv.start+','+iv.end+']='+iv.value+'。');
+          const oldEnd=previous.end; previous.end=Math.max(previous.end,iv.end);
+          repairLog.push({action:'merge_same_value_overlap_or_duplicate',track,mouse,left_end:oldEnd,merged_end:previous.end,value:iv.value});
+        } else if(previous&&Number.isInteger(previous.end)&&Number.isInteger(iv.start)&&iv.start===previous.end+1&&iv.value===previous.value) {
+          const oldEnd=previous.end; previous.end=iv.end;
+          repairLog.push({action:'merge_same_value_adjacent',track,mouse,left_end:oldEnd,merged_end:previous.end,value:iv.value});
+        } else merged.push(iv);
+      });
+      return merged;
+    };
+    this.tracksFor(assay).forEach(track=>{
+      const groups=new Map();
+      (tracks[track]||[]).forEach(iv=>{ const key=iv.mouse; if(!groups.has(key)) groups.set(key,[]); groups.get(key).push(iv); });
+      const normalized=[];
+      groups.forEach((items,mouse)=>normalized.push(...mergeGroup(track,mouse,items)));
+      tracks[track]=normalized.sort((a,b)=>a.mouse-b.mouse||a.start-b.start||a.end-b.end);
+    });
+    if(assay==='TST'&&Number.isInteger(nFrames)&&nFrames>0) {
+      const track='axis_orient',rebuilt=[];
+      activeMice.forEach(mouse=>{
+        const items=(tracks[track]||[]).filter(iv=>iv.mouse===mouse).sort((a,b)=>a.start-b.start||a.end-b.end);
+        let cursor=0; const withUnknown=[];
+        items.forEach(iv=>{
+          if(Number.isInteger(iv.start)&&iv.start>cursor) { withUnknown.push({start:cursor,end:iv.start-1,value:'unknown',mouse}); repairLog.push({action:'fill_axis_unknown_gap',track,mouse,start:cursor,end:iv.start-1}); }
+          withUnknown.push(iv); if(Number.isInteger(iv.end)) cursor=Math.max(cursor,iv.end+1);
+        });
+        if(cursor<nFrames) { withUnknown.push({start:cursor,end:nFrames-1,value:'unknown',mouse}); repairLog.push({action:'fill_axis_unknown_gap',track,mouse,start:cursor,end:nFrames-1}); }
+        rebuilt.push(...mergeGroup(track,mouse,withUnknown));
+      });
+      rebuilt.push(...(tracks[track]||[]).filter(iv=>!activeMice.includes(iv.mouse)));
+      tracks[track]=rebuilt.sort((a,b)=>a.mouse-b.mouse||a.start-b.start||a.end-b.end);
+    }
+    if(repairLog.length) repairedFields.push('tracks');
+    return repairLog;
+  },
+
+  migrateLegacyV2(source,sourceName,sourceSha256) {
+    if(source.schema!==2) throw new Error('仅支持 schema=2；schema1/schema3 已正式退役并拒绝加载。');
+    const explicitFormat=source.format;
+    if(explicitFormat&&explicitFormat!==this.FORMAT) throw new Error('format 不是 '+this.FORMAT+'，拒绝加载。');
+    if(!source.tracks||typeof source.tracks!=='object') throw new Error('旧文件不是 V2 独立轨道结构，拒绝迁移。');
+    const assignment=(source.assignment_id||prompt('旧 V2 文件缺少 assignment_id，请输入迁移后的 assignment_id：','')).trim();
+    if(!assignment) throw new Error('迁移必须提供非空 assignment_id。');
+    const repairedBy=(prompt('请输入执行本次迁移/元数据修复的人员 ID（repaired_by）：',source.annotator||'')||'').trim();
+    if(!repairedBy) throw new Error('迁移必须记录非空 repaired_by。');
+    const stamp=this.now();
+    const assay=source.assay;
+    if(!this.ASSAY_PROFILES[assay]) throw new Error('未知 assay: '+assay);
+    const extraTracks=Object.keys(source.tracks).filter(track=>!this.tracksFor(assay).includes(track));
+    if(extraTracks.length) throw new Error('legacy 源文件含有不属于 '+assay+' 的轨道，为避免静默丢数据已拒绝迁移：'+extraTracks.join(', '));
+    const repairedFields=['format','tool_version','primitive_set_version','rubric_version','interval_semantics','analysis_window_semantics','analysis_window_confirmed','annotator_role','completed','metadata_repaired','provenance'];
+    let active;
+    if(Array.isArray(source.active_mice)&&source.active_mice.length) active=source.active_mice.map(Number);
+    else {
+      const raw=prompt('旧文件缺少 active_mice。请依据原始分配输入鼠号，逗号分隔（例：1 或 1,2,3,4）：','');
+      active=(raw||'').split(',').map(x=>Number(x.trim())).filter(Number.isInteger);
+      if(!active.length||active.some(m=>m<1||m>4)) throw new Error('迁移必须由人工明确提供合法 active_mice。');
+      repairedFields.push('active_mice');
+    }
+    const n=Number(source.n_frames)||0;
+    let aw=Array.isArray(source.analysis_window)?source.analysis_window.map(Number):null;
+    if(!aw||aw.length!==2||aw[0]===aw[1]) {
+      if(n<=0) aw=[0,0];
+      else {
+        if(!confirm('旧文件缺少有效 analysis_window。是否仅把 [0,n_frames) 写为“待人工确认”的候选窗口？\n该操作不会把 analysis_window_confirmed 设为 true。')) throw new Error('迁移必须先明确候选分析窗口。');
+        aw=[0,n]; repairedFields.push('analysis_window');
+      }
+    }
+    const tracks={};
+    this.tracksFor(assay).forEach(t=>{
+      tracks[t]=(source.tracks[t]||[]).map(iv=>({start:Number(iv.start),end:Number(iv.end),value:String(iv.value),mouse:iv.mouse==null&&active.length===1?active[0]:Number(iv.mouse)}));
+    });
+    const intervalRepairs=this.canonicalizeMigratedTracks(tracks,assay,[...new Set(active)].sort((a,b)=>a-b),n,repairedFields);
+    let migratedVideo=null;
+    if(source.video&&typeof source.video==='object') {
+      const candidate={basename:source.video.basename||source.video.name,size_bytes:Number(source.video.size_bytes),duration_sec:Number(source.video.duration_sec??source.video.duration_seconds),sha256:source.video.sha256};
+      if(typeof candidate.basename==='string'&&Number.isInteger(candidate.size_bytes)&&candidate.size_bytes>0&&Number.isFinite(candidate.duration_sec)&&candidate.duration_sec>0&&typeof candidate.sha256==='string'&&/^[0-9a-f]{64}$/.test(candidate.sha256)) migratedVideo=candidate;
+      else repairedFields.push('video');
+    }
+    return {
+      schema:this.SCHEMA,format:this.FORMAT,tool_version:this.TOOL_VERSION,
+      primitive_set_version:this.PRIMITIVE_SET_VERSION,rubric_version:this.RUBRIC_VERSION,
+      interval_semantics:this.INTERVAL_SEMANTICS,analysis_window_semantics:this.WINDOW_SEMANTICS,analysis_window_confirmed:false,
+      trial:String(source.trial||'').trim(),assignment_id:assignment,assay,
+      annotator:String(source.annotator||'').trim(),annotator_role:'legacy_rater',
+      blind:false,pool:'train',prefill:Boolean(source.prefill),completed:false,completed_at:null,
+      created_at:source.created_at||stamp,updated_at:stamp,metadata_repaired:true,
+      provenance:{source_format:source.format||'legacy-schema2',source_paths:[sourceName],source_sha256:[sourceSha256],repaired_fields:[...new Set(repairedFields)],repair_reason:'Explicit V2.2 zero-rework migration into train-only legacy_rater data; semantic fields remain non-blind and unconfirmed.',repaired_by:repairedBy,repaired_at:stamp,migration_tool_version:this.TOOL_VERSION,migrated_from:'legacy-schema2',interval_repairs:intervalRepairs,original_versions:{format:source.format||null,tool_version:source.tool_version||null,primitive_set_version:source.primitive_set_version||null,rubric_version:source.rubric_version||null}},
+      fps:Number(source.fps)||0,n_frames:n,analysis_window:aw,active_mice:[...new Set(active)].sort((a,b)=>a-b),
+      video:migratedVideo,tracks
+    };
+  },
+
+  async loadFile(event) {
+    const file=event.target.files[0]; event.target.value=''; if(!file) return;
+    try {
+      const [sourceText,sourceSha256]=await Promise.all([file.text(),this.sha256File(file)]);
+      const source=JSON.parse(sourceText);
+      if(source.schema!==2) throw new Error('仅支持 schema=2；schema1/schema3 已正式退役并拒绝加载。');
+      let doc=source,migrated=false;
+      if(!this.isCanonicalIdentity(source)||!this.canonicalFieldsPresent(source)) {
+        if(!confirm('这是旧的/不完整的 schema2 文件。是否显式迁移为 V2.2 train-only legacy_rater 数据？\n迁移会写入 provenance、blind=false、metadata_repaired=true、completed=false；不会覆盖源文件。')) throw new Error('用户取消 V2.2 显式迁移。');
+        doc=this.migrateLegacyV2(source,file.name,sourceSha256); migrated=true;
+      }
+      const errors=this.validateDoc(doc,{requireVideo:this.isCanonicalIdentity(source)});
+      if(errors.length&&!migrated) throw new Error(errors.join('\n'));
+      this.doc=doc; this.currentMouse=doc.active_mice[0]; this.currentTrack=this.tracksFor(doc.assay)[0]; this.selectedIndex=-1;
+      this.loadDocIntoUI(); this.autosave();
+      if(migrated) this.showStatus('已显式迁移为 V2.2 train-only legacy_rater 草稿；同值区间已无损合并、TST axis 空洞已填 unknown。仍需绑定视频并处理 '+errors.length+' 项硬错误。');
+      else if(doc.metadata_repaired) this.showStatus('已加载 canonical V2.2 legacy recovery 文件：'+file.name+'；'+(this.videoSessionVerified()?'本会话源视频身份已核对。':'输出前请在本会话绑定匹配的源视频。'));
+      else this.showStatus('已加载 canonical V2.2 文件：'+file.name);
+    } catch(error) { this.fail('加载失败：'+error.message); }
+  },
+
+  touch() {
+    if(!this.doc) return;
+    this.doc.updated_at=this.now();
+    if(this.doc.completed) { this.doc.completed=false; this.doc.completed_at=null; document.getElementById('completedToggle').checked=false; }
+  },
+
+  setCompleted(checked) {
+    if(!this.doc) { document.getElementById('completedToggle').checked=false; return this.fail('请先创建或加载文档。'); }
+    if(checked) {
+      if(!this.updateWindow(false,false)) { document.getElementById('completedToggle').checked=false; return; }
+      if(this.doc.analysis_window_confirmed!==true) { document.getElementById('completedToggle').checked=false; return this.fail('必须显式点击“应用半开窗口”确认分析窗后，才能标记完成。'); }
+      if(!this.videoSessionVerified()) { document.getElementById('completedToggle').checked=false; return this.fail('标记完成前必须在本次会话重新加载并核对与文档身份完全一致的源视频。'); }
+      const errors=this.validateDoc(this.doc,{requireVideo:true,formal:true});
+      if(errors.length) { document.getElementById('completedToggle').checked=false; this.renderValidation(errors); return this.fail('不能标记完成：\n'+errors.join('\n')); }
+      this.doc.completed=true; this.doc.completed_at=this.now(); this.doc.updated_at=this.doc.completed_at;
+    } else { this.doc.completed=false; this.doc.completed_at=null; this.doc.updated_at=this.now(); }
+    this.autosave(); this.renderInfo();
+  },
+
+  prepareOutput({requireWindowConfirmed=false}={}) {
+    if(!this.doc) return this.fail('请先创建或加载文档。');
+    if(!this.updateWindow(false,false)) return false;
+    this.doc.schema=this.SCHEMA; this.doc.format=this.FORMAT; this.doc.tool_version=this.TOOL_VERSION;
+    this.doc.primitive_set_version=this.PRIMITIVE_SET_VERSION; this.doc.rubric_version=this.RUBRIC_VERSION;
+    this.doc.interval_semantics=this.INTERVAL_SEMANTICS; this.doc.analysis_window_semantics=this.WINDOW_SEMANTICS; this.doc.updated_at=this.now();
+    const errors=this.validateDoc(this.doc,{requireVideo:true,formal:this.doc.completed===true});
+    if(this.doc.completed===true&&!this.videoSessionVerified()) errors.push('completed 文件正式输出前必须在本次会话重新加载并核对源视频。');
+    if(requireWindowConfirmed&&this.doc.analysis_window_confirmed!==true) errors.push('analysis_window_confirmed 必须为 true；请显式点击“应用半开窗口”。');
+    this.renderValidation(errors);
+    if(errors.length) return this.fail('硬校验失败，禁止输出：\n'+errors.join('\n'));
+    return true;
+  },
+
+  saveFile() {
+    if(!this.prepareOutput()) return;
+    this.download(JSON.stringify(this.doc,null,2),'application/json',this.safeName(this.doc.trial+'_'+this.doc.annotator+'_v2.2.json'));
+    this.autosave(); this.showStatus('已保存 canonical V2.2 JSON。');
+  },
+
+  autosave() {
+    if(!this.doc) return;
+    try {
+      localStorage.setItem(this.AUTOSAVE_KEY,JSON.stringify(this.doc));
+      document.getElementById('autosave').textContent='autosave '+new Date().toLocaleTimeString();
+    } catch(error) { console.warn('autosave failed',error); }
+  },
+
+  restoreAutosave() {
+    try {
+      const raw=localStorage.getItem(this.AUTOSAVE_KEY); if(!raw) return;
+      const doc=JSON.parse(raw);
+      if(!this.isCanonicalIdentity(doc)||!this.canonicalFieldsPresent(doc)) { localStorage.removeItem(this.AUTOSAVE_KEY); return; }
+      if(!confirm('检测到 V2.2 自动保存，是否恢复？')) return;
+      this.doc=doc; this.currentMouse=doc.active_mice[0]; this.currentTrack=this.tracksFor(doc.assay)[0]; this.selectedIndex=-1; this.loadDocIntoUI();
+      this.showStatus('已恢复 V2.2 自动保存。');
+    } catch(error) { console.warn('restore autosave failed',error); }
+  },
+
+  async sha256File(file) {
+    if(!window.crypto||!window.crypto.subtle) throw new Error('当前页面环境不支持 WebCrypto SHA-256；请使用现代浏览器通过 HTTPS 或 localhost 打开。');
+    const digest=await crypto.subtle.digest('SHA-256',await file.arrayBuffer());
+    return [...new Uint8Array(digest)].map(b=>b.toString(16).padStart(2,'0')).join('');
+  },
+
+  sameVideoIdentity(a,b) {
+    return !!a&&!!b&&a.basename===b.basename&&a.size_bytes===b.size_bytes&&a.sha256===b.sha256&&
+      Number.isFinite(a.duration_sec)&&Number.isFinite(b.duration_sec)&&Math.abs(a.duration_sec-b.duration_sec)<=0.001;
+  },
+
+  videoSessionVerified() {
+    return !!this.currentVideoURL&&this.sameVideoIdentity(this.doc&&this.doc.video,this.pendingVideo);
+  },
+
+  videoDuration(file,url) {
+    return new Promise((resolve,reject)=>{
+      const onMeta=()=>{ cleanup(); Number.isFinite(this.video.duration)&&this.video.duration>0?resolve(this.video.duration):reject(new Error('无法读取视频时长。')); };
+      const onError=()=>{ cleanup(); reject(new Error('浏览器无法解码该视频。')); };
+      const cleanup=()=>{ this.video.removeEventListener('loadedmetadata',onMeta); this.video.removeEventListener('error',onError); };
+      this.video.addEventListener('loadedmetadata',onMeta); this.video.addEventListener('error',onError); this.video.src=url; this.video.load();
+    });
+  },
+
+  async loadVideo(event) {
+    const file=event.target.files[0]; event.target.value=''; if(!file) return;
+    const url=URL.createObjectURL(file); this.showStatus('正在计算视频 SHA-256 并读取元数据，请勿关闭页面……');
+    try {
+      const [duration,sha256]=await Promise.all([this.videoDuration(file,url),this.sha256File(file)]);
+      const metadata={basename:file.name,size_bytes:file.size,duration_sec:Number(duration.toFixed(6)),sha256};
+      const fps=this.doc?Number(this.doc.fps):Number(document.getElementById('newFps').value)||25;
+      const roughFrames=Math.floor(duration*fps);
+      if(this.doc&&this.doc.video&&!this.sameVideoIdentity(this.doc.video,metadata)) throw new Error('所选视频的 basename/size/duration/SHA-256 与文档已绑定视频身份不一致，拒绝替换。');
+      if(this.doc&&!this.doc.video) {
+        if(this.doc.metadata_repaired) {
+          const oldN=this.doc.n_frames;
+          const entered=Number(prompt('请输入已由 ffprobe/decoder 核对的权威 n_frames。\n浏览器 duration×fps 粗估仅为 '+roughFrames+'，不得直接作为权威值。',Number.isInteger(oldN)&&oldN>0?String(oldN):''));
+          if(!Number.isInteger(entered)||entered<=0) throw new Error('迁移文件绑定视频时必须人工提供权威正整数 n_frames。');
+          this.doc.n_frames=entered; this.doc.completed=false; this.doc.completed_at=null;
+          this.doc.provenance=this.doc.provenance||{};
+          this.doc.provenance.repaired_fields=[...new Set([...(this.doc.provenance.repaired_fields||[]),'video','n_frames'])];
+          this.doc.provenance.repaired_at=this.now();
+          this.doc.provenance.frame_count_repair={old_n_frames:oldN,new_n_frames:entered,browser_rough_estimate:roughFrames,authority:'operator-confirmed ffprobe/decoder',repaired_at:this.doc.provenance.repaired_at};
+          const laterRepairs=this.canonicalizeMigratedTracks(this.doc.tracks,this.doc.assay,this.doc.active_mice,this.doc.n_frames,this.doc.provenance.repaired_fields);
+          this.doc.provenance.repaired_fields=[...new Set(this.doc.provenance.repaired_fields)];
+          this.doc.provenance.interval_repairs=[...(this.doc.provenance.interval_repairs||[]),...laterRepairs];
+        }
+        this.doc.video=this.clone(metadata);
+        if(!Array.isArray(this.doc.analysis_window)||this.doc.analysis_window[1]===0||this.doc.analysis_window[1]>this.doc.n_frames) this.doc.analysis_window=[0,this.doc.n_frames];
+        this.doc.analysis_window_confirmed=false;
+        this.touch();
+      }
+      this.pendingVideo=metadata;
+      if(!this.doc) {
+        document.getElementById('newNFrames').placeholder='浏览器粗估 '+roughFrames+'；请用 ffprobe/decoder 核对';
+        document.getElementById('frameCountConfirm').checked=false;
+      }
+      if(this.currentVideoURL) URL.revokeObjectURL(this.currentVideoURL);
+      this.currentVideoURL=url; this.video.src=url;
+      this.loadDocIntoUI();
+      const delta=this.doc?Math.abs(this.doc.n_frames-roughFrames):0;
+      this.showStatus('视频身份已就绪：'+file.name+' · duration×fps 粗估 '+roughFrames+'帧（非权威） · SHA-256 '+sha256.slice(0,12)+'…'+(delta>1?'\n警告：权威 n_frames 与粗估相差 '+delta+' 帧，必须复核后才能完成。':''),delta>1);
+    } catch(error) {
+      URL.revokeObjectURL(url); this.video.removeAttribute('src'); this.video.load(); this.fail('视频绑定失败：'+error.message);
+    }
+  },
+
+  renderVideoIdentity() {
+    const v=this.doc&&this.doc.video?this.doc.video:this.pendingVideo;
+    const el=document.getElementById('videoIdentity');
+    el.textContent=v?'video='+v.basename+' | size='+v.size_bytes+' | duration='+v.duration_sec+'s | sha256='+v.sha256:'尚未绑定视频。保存、CSV 与一致性均要求 SHA-256 视频身份。';
+  },
+
+  safeName(name) { return name.replace(/[\\/:*?"<>|]+/g,'_'); },
+  download(content,type,name) {
+    const url=URL.createObjectURL(new Blob([content],{type})); const a=document.createElement('a'); a.href=url; a.download=name; a.click(); setTimeout(()=>URL.revokeObjectURL(url),0);
+  },
+
+  validateDoc(doc,{requireVideo=false,formal=false}={}) {
+    const errors=[]; const add=m=>errors.push(m);
+    if(!doc||typeof doc!=='object') return ['文档必须是对象。'];
+    if(doc.schema!==this.SCHEMA) add('schema 必须严格等于 2（schema1/3 已退役）。');
+    if(doc.format!==this.FORMAT) add('format 必须为 '+this.FORMAT+'。');
+    if(doc.tool_version!==this.TOOL_VERSION) add('tool_version 必须为 '+this.TOOL_VERSION+'。');
+    if(doc.primitive_set_version!==this.PRIMITIVE_SET_VERSION) add('primitive_set_version 必须为 '+this.PRIMITIVE_SET_VERSION+'。');
+    if(doc.rubric_version!==this.RUBRIC_VERSION) add('rubric_version 必须为 '+this.RUBRIC_VERSION+'。');
+    if(doc.interval_semantics!==this.INTERVAL_SEMANTICS) add('interval_semantics 必须为 closed。');
+    if(doc.analysis_window_semantics!==this.WINDOW_SEMANTICS) add('analysis_window_semantics 必须为 half_open。');
+    if(typeof doc.analysis_window_confirmed!=='boolean') add('analysis_window_confirmed 必须是显式 boolean。');
+    ['trial','assignment_id','annotator'].forEach(k=>{ if(typeof doc[k]!=='string'||!doc[k].trim()) add(k+' 必须为非空字符串。'); });
+    if(!['independent_rater','legacy_rater'].includes(doc.annotator_role)) add('annotator_role 只能是 independent_rater 或 legacy_rater。');
+    if(!this.ASSAY_PROFILES[doc.assay]) add('assay 只能是 TST 或 FST。');
+    if(!['validate','train'].includes(doc.pool)) add('pool 只能是 validate 或 train。');
+    ['blind','prefill','completed','metadata_repaired'].forEach(k=>{ if(typeof doc[k]!=='boolean') add(k+' 必须是显式 boolean。'); });
+    if(doc.pool==='validate'&&(doc.blind!==true||doc.prefill!==false)) add('validate 池必须 blind=true 且 prefill=false。');
+    if(doc.pool==='validate'&&doc.annotator_role!=='independent_rater') add('validate 池只允许 annotator_role=independent_rater。');
+    if(doc.annotator_role==='legacy_rater'&&doc.pool!=='train') add('legacy_rater 仅允许进入 train 池。');
+    if(doc.annotator_role==='legacy_rater'&&doc.blind!==false) add('legacy_rater 必须显式 blind=false。');
+    ['created_at','updated_at'].forEach(k=>{ if(!this.timestampWithZone(doc[k])) add(k+' 必须是带时区的 ISO8601 时间。'); });
+    if(doc.completed===true&&!this.timestampWithZone(doc.completed_at)) add('completed=true 时 completed_at 必须是带时区的 ISO8601 时间。');
+    if(doc.completed===true&&doc.analysis_window_confirmed!==true) add('completed=true 时 analysis_window_confirmed 必须为 true。');
+    if(doc.completed===false&&doc.completed_at!=null) add('completed=false 时 completed_at 必须为 null。');
+    if(doc.metadata_repaired===true) {
+      if(!doc.provenance||typeof doc.provenance!=='object') add('metadata_repaired=true 时 provenance 必须非空。');
+      else {
+        ['repair_reason','repaired_by','repaired_at','migration_tool_version'].forEach(k=>{ if(typeof doc.provenance[k]!=='string'||!doc.provenance[k].trim()) add('provenance.'+k+' 必须为非空字符串。'); });
+        ['source_paths','source_sha256','repaired_fields'].forEach(k=>{ if(!Array.isArray(doc.provenance[k])||!doc.provenance[k].length||doc.provenance[k].some(v=>typeof v!=='string'||!v.trim())) add('provenance.'+k+' 必须为非空字符串列表。'); });
+        if(Array.isArray(doc.provenance.source_sha256)) doc.provenance.source_sha256.forEach((hash,index)=>{ if(!/^[0-9a-f]{64}$/.test(hash)) add('provenance.source_sha256['+index+'] 必须是 64 位小写十六进制。'); });
+        if(Array.isArray(doc.provenance.source_paths)&&Array.isArray(doc.provenance.source_sha256)&&doc.provenance.source_paths.length!==doc.provenance.source_sha256.length) add('provenance.source_paths 与 source_sha256 数量必须一致。');
+        if(typeof doc.provenance.repaired_at==='string'&&!this.timestampWithZone(doc.provenance.repaired_at)) add('provenance.repaired_at 必须是带时区的 ISO8601 时间。');
+      }
+    }
+    else if(Object.prototype.hasOwnProperty.call(doc,'provenance')&&doc.provenance!=null&&(!(typeof doc.provenance==='object')||Object.keys(doc.provenance).length>0)) add('metadata_repaired=false 时 provenance 必须缺省、null 或空对象。');
+    if(!Number.isFinite(doc.fps)||doc.fps<=0) add('fps 必须为正数。');
+    if(!Number.isInteger(doc.n_frames)||doc.n_frames<=0) add('n_frames 必须为正整数。');
+    if(!Array.isArray(doc.analysis_window)||doc.analysis_window.length!==2) add('analysis_window 必须是 [start,end_exclusive)。');
+    else {
+      const [s,e]=doc.analysis_window;
+      if(!Number.isInteger(s)||!Number.isInteger(e)||s<0||s>=e||e>doc.n_frames) add('analysis_window 必须满足整数 0 ≤ start < end_exclusive ≤ n_frames。');
+    }
+    if(!Array.isArray(doc.active_mice)||!doc.active_mice.length) add('active_mice 必须是非空数组。');
+    else {
+      const seen=new Set();
+      doc.active_mice.forEach(m=>{ if(!Number.isInteger(m)||m<1||m>4) add('active_mice 只能包含整数 1..4。'); if(seen.has(m)) add('active_mice 不得重复：'+m); seen.add(m); });
+      if(doc.active_mice.some((m,index)=>index>0&&m<doc.active_mice[index-1])) add('active_mice 必须升序。');
+    }
+    if(requireVideo||doc.video!=null) {
+      const v=doc.video;
+      if(!v||typeof v!=='object') add('必须绑定 video 元数据。');
+      else {
+        if(typeof v.basename!=='string'||!v.basename.trim()) add('video.basename 必须非空。');
+        else if(/[\\/]/.test(v.basename)) add('video.basename 只能是文件名，不能含路径。');
+        if(!Number.isInteger(v.size_bytes)||v.size_bytes<=0) add('video.size_bytes 必须为正整数。');
+        if(!Number.isFinite(v.duration_sec)||v.duration_sec<=0) add('video.duration_sec 必须为正数。');
+        if(typeof v.sha256!=='string'||!/^[0-9a-f]{64}$/.test(v.sha256)) add('video.sha256 必须是 64 位小写十六进制。');
+        if(Number.isFinite(v.duration_sec)&&Number.isFinite(doc.fps)&&Number.isInteger(doc.n_frames)&&Math.abs(v.duration_sec*doc.fps-doc.n_frames)>1) add('video.duration_sec × fps 必须在 1 帧内与 n_frames 一致。');
+      }
+    }
+    if(!doc.tracks||typeof doc.tracks!=='object') add('tracks 必须是对象。');
+    else if(this.ASSAY_PROFILES[doc.assay]) {
+      const expected=this.tracksFor(doc.assay); const expectedSet=new Set(expected);
+      Object.keys(doc.tracks).forEach(t=>{ if(!expectedSet.has(t)) add('当前 assay 不允许额外轨道：'+t); });
+      expected.forEach(tid=>{
+        const def=this.TRACK_DEFS[tid]; const intervals=doc.tracks[tid];
+        if(!Array.isArray(intervals)) { add('缺少轨道数组：'+tid); return; }
+        const byMouse=new Map();
+        intervals.forEach((iv,index)=>{
+          const prefix=tid+'['+index+']';
+          if(!iv||typeof iv!=='object') { add(prefix+' 必须是对象。'); return; }
+          if(!Number.isInteger(iv.mouse)||!doc.active_mice.includes(iv.mouse)) add(prefix+'.mouse 必须属于 active_mice。');
+          if(!Number.isInteger(iv.start)||!Number.isInteger(iv.end)||iv.start<0||iv.start>iv.end||iv.end>=doc.n_frames) add(prefix+' 必须满足闭区间整数 0 ≤ start ≤ end < n_frames。');
+          if(!def.values.includes(iv.value)) add(prefix+'.value 非法：'+iv.value);
+          if(Number.isInteger(iv.mouse)) { if(!byMouse.has(iv.mouse)) byMouse.set(iv.mouse,[]); byMouse.get(iv.mouse).push({start:iv.start,end:iv.end,index}); }
+        });
+        byMouse.forEach((items,mouse)=>{
+          items.sort((a,b)=>a.start-b.start||a.end-b.end);
+          for(let i=1;i<items.length;i++) {
+            const a=items[i-1],b=items[i];
+            if(b.start<=a.end) add(tid+' mouse '+mouse+' 同轨区间重叠/重复：#'+a.index+' ['+a.start+','+a.end+'] 与 #'+b.index+' ['+b.start+','+b.end+']。');
+            else if(b.start===a.end+1&&intervals[a.index].value===intervals[b.index].value) add(tid+' mouse '+mouse+' 相邻同值区间必须合并：#'+a.index+' 与 #'+b.index+'。');
+          }
+        });
+        if((formal||doc.completed===true)&&(def.type==='cat'||def.type==='orient')&&Array.isArray(doc.analysis_window)&&doc.analysis_window.length===2) {
+          const [ws,we]=doc.analysis_window;
+          (doc.active_mice||[]).forEach(mouse=>{
+            const spans=(byMouse.get(mouse)||[]).map(x=>[Math.max(x.start,ws),Math.min(x.end,we-1)]).filter(x=>x[0]<=x[1]).sort((a,b)=>a[0]-b[0]);
+            let cursor=ws;
+            for(const [start,end] of spans) { if(start>cursor) break; cursor=Math.max(cursor,end+1); }
+            if(cursor<we) add(tid+' mouse '+mouse+' 在分析窗内存在未显式标注的类别空洞（从 frame '+cursor+' 起）。');
+          });
+        }
+      });
+    }
+    if((formal||doc.completed===true)&&doc.pool==='validate'&&doc.assay==='TST'&&Array.isArray(doc.analysis_window)&&doc.analysis_window.length===2) {
+      if(doc.fps!==25) add('正式 validate TST 必须 fps=25。');
+      if(doc.analysis_window[1]-doc.analysis_window[0]<9000) add('正式 validate TST 分析窗不得少于 9000 帧；允许采用完整视频窗口。');
+    }
+    return [...new Set(errors)];
+  },
+
+  renderValidation(errors=this.doc?this.validateDoc(this.doc,{requireVideo:false}):[]) {
+    const el=document.getElementById('validation');
+    if(!errors.length) { el.classList.add('hidden'); el.textContent=''; return; }
+    el.classList.remove('hidden'); el.textContent='硬校验：\n• '+errors.join('\n• ');
+  },
+
+  loadDocIntoUI() {
+    if(!this.doc) { this.renderVideoIdentity(); return; }
+    document.getElementById('awStart').value=this.doc.analysis_window[0];
+    document.getElementById('awEnd').value=this.doc.analysis_window[1];
+    document.getElementById('completedToggle').checked=this.doc.completed===true;
+    this.updateWindowLabel(); this.renderInfo(); this.renderVideoIdentity(); this.renderMice(); this.renderTracks(); this.renderIntervals(); this.renderValueOptions(); this.renderValidation(); this.populateStatsSelectors(); this.updateFrameDisplay();
+  },
+
+  renderInfo() {
+    const el=document.getElementById('docInfo'); if(!this.doc) return;
+    el.textContent='trial='+this.doc.trial+' | assignment='+this.doc.assignment_id+' | assay='+this.doc.assay+' | annotator='+this.doc.annotator+' | role='+this.doc.annotator_role+' | pool='+this.doc.pool+' | blind='+this.doc.blind+' | prefill='+this.doc.prefill+' | window_confirmed='+this.doc.analysis_window_confirmed+' | completed='+this.doc.completed+' | metadata_repaired='+this.doc.metadata_repaired;
+  },
+
+  renderMice() {
+    const box=document.getElementById('mouseButtons'); box.replaceChildren(); if(!this.doc) return;
+    this.doc.active_mice.forEach(mouse=>{
+      const b=document.createElement('button'); b.textContent='mouse '+mouse; b.classList.toggle('active',mouse===this.currentMouse);
+      b.onclick=()=>{ this.currentMouse=mouse; this.selectedIndex=-1; this.renderMice(); this.renderTracks(); this.renderIntervals(); this.renderValueOptions(); };
+      box.appendChild(b);
+    });
+  },
+
+  renderTracks() {
+    const box=document.getElementById('trackButtons'); box.replaceChildren(); if(!this.doc) return;
+    this.tracksFor(this.doc.assay).forEach(tid=>{
+      const count=(this.doc.tracks[tid]||[]).filter(iv=>iv.mouse===this.currentMouse).length;
+      const b=document.createElement('button'); b.textContent=this.TRACK_DEFS[tid].label+' ('+count+')'; b.title=tid; b.classList.toggle('active',tid===this.currentTrack);
+      b.onclick=()=>{ this.currentTrack=tid; this.selectedIndex=-1; this.renderTracks(); this.renderIntervals(); this.renderValueOptions(); };
+      box.appendChild(b);
+    });
+  },
+
+  currentIntervalItems() {
+    if(!this.doc||!this.currentTrack) return [];
+    return (this.doc.tracks[this.currentTrack]||[]).map((iv,index)=>({iv,index})).filter(x=>x.iv.mouse===this.currentMouse).sort((a,b)=>a.iv.start-b.iv.start||a.iv.end-b.iv.end);
+  },
+
+  renderIntervals() {
+    const box=document.getElementById('intervals'); box.replaceChildren();
+    if(!this.doc||!this.currentTrack) { box.textContent='暂无间隔'; return; }
+    document.getElementById('trackTitle').textContent=this.currentTrack+' · '+this.TRACK_DEFS[this.currentTrack].label+' · mouse '+this.currentMouse;
+    const items=this.currentIntervalItems();
+    if(!items.length) { const d=document.createElement('div'); d.className='interval'; d.textContent='暂无间隔'; box.appendChild(d); return; }
+    items.forEach(({iv,index})=>{
+      const d=document.createElement('div'); d.className='interval'+(index===this.selectedIndex?' active':'');
+      const left=document.createElement('span'); left.className='mono'; left.textContent='['+iv.start+','+iv.end+'] '+iv.value+' · '+(iv.end-iv.start+1)+' frames';
+      const right=document.createElement('span'); right.textContent=(iv.end-iv.start+1)/this.doc.fps+'s'; d.append(left,right);
+      d.onclick=()=>this.selectInterval(index); box.appendChild(d);
+    });
+  },
+
+  renderValueOptions() {
+    const select=document.getElementById('ivValue'); select.replaceChildren(); if(!this.currentTrack) return;
+    this.TRACK_DEFS[this.currentTrack].values.forEach(value=>{ const o=document.createElement('option'); o.value=value; o.textContent=value; select.appendChild(o); });
+    if(this.selectedIndex>=0) { const iv=this.doc.tracks[this.currentTrack][this.selectedIndex]; if(iv) select.value=iv.value; }
+  },
+
+  selectInterval(index) {
+    const iv=this.doc&&this.doc.tracks[this.currentTrack][index]; if(!iv||iv.mouse!==this.currentMouse) return;
+    this.selectedIndex=index; document.getElementById('ivStart').value=iv.start; document.getElementById('ivEnd').value=iv.end; this.renderIntervals(); this.renderValueOptions();
+  },
+
+  clearSelection() {
+    this.selectedIndex=-1; document.getElementById('ivStart').value=''; document.getElementById('ivEnd').value=''; this.renderIntervals(); this.renderValueOptions();
+  },
+
+  upsertInterval() {
+    if(!this.doc||!this.currentTrack) return this.fail('请先创建文档并选择轨道。');
+    const start=Number(document.getElementById('ivStart').value),end=Number(document.getElementById('ivEnd').value),value=document.getElementById('ivValue').value;
+    if(!Number.isInteger(start)||!Number.isInteger(end)||start<0||start>end||end>=this.doc.n_frames) return this.fail('区间必须满足闭区间整数 0 ≤ start ≤ end < n_frames。');
+    if(!this.TRACK_DEFS[this.currentTrack].values.includes(value)) return this.fail('非法原语值。');
+    const intervals=this.doc.tracks[this.currentTrack];
+    const collision=intervals.find((iv,index)=>index!==this.selectedIndex&&iv.mouse===this.currentMouse&&start<=iv.end&&end>=iv.start);
+    if(collision) return this.fail('硬失败：同 track+mouse 不允许重叠或重复。冲突区间 ['+collision.start+','+collision.end+']。');
+    const adjacent=intervals.find((iv,index)=>index!==this.selectedIndex&&iv.mouse===this.currentMouse&&iv.value===value&&(end+1===iv.start||start===iv.end+1));
+    if(adjacent) return this.fail('硬失败：同 track+mouse 的相邻同值区间必须合并。相邻区间 ['+adjacent.start+','+adjacent.end+']。');
+    const next={start,end,value,mouse:this.currentMouse};
+    if(this.selectedIndex>=0) intervals[this.selectedIndex]=next; else intervals.push(next);
+    intervals.sort((a,b)=>a.mouse-b.mouse||a.start-b.start||a.end-b.end);
+    this.selectedIndex=intervals.indexOf(next); this.touch(); this.renderIntervals(); this.renderTracks(); this.renderValueOptions(); this.renderValidation(); this.autosave();
+    this.showStatus('已写入 '+this.currentTrack+' mouse '+this.currentMouse+' ['+start+','+end+']='+value+'。');
+  },
+
+  deleteSelected() {
+    if(!this.doc||!this.currentTrack||this.selectedIndex<0) return this.fail('请先选择要删除的区间。');
+    if(!confirm('确认删除所选区间？')) return;
+    this.doc.tracks[this.currentTrack].splice(this.selectedIndex,1); this.selectedIndex=-1; this.touch(); this.renderIntervals(); this.renderTracks(); this.renderValueOptions(); this.renderValidation(); this.autosave();
+  },
+
+  useCurrentFrame(which) {
+    if(!this.video||!Number.isFinite(this.video.currentTime)) return;
+    document.getElementById(which==='start'?'ivStart':'ivEnd').value=this.currentFrame();
+  },
+
+  currentFrame() {
+    const n=this.doc?this.doc.n_frames:(this.pendingVideo?Math.floor(this.pendingVideo.duration_sec*(Number(document.getElementById('newFps').value)||25)):0);
+    return Math.max(0,Math.min(Math.max(0,n-1),Math.round((this.video.currentTime||0)*(this.doc?this.doc.fps:(Number(document.getElementById('newFps').value)||25)))));
+  },
+
+  step(delta) {
+    if(!this.video||!this.video.duration) return this.fail('请先加载视频。');
+    const fps=this.doc?this.doc.fps:(Number(document.getElementById('newFps').value)||25); const n=this.doc?this.doc.n_frames:Math.floor(this.video.duration*fps);
+    const target=Math.max(0,Math.min(n-1,this.currentFrame()+delta)); this.video.currentTime=(target+0.4)/fps; this.updateFrameDisplay();
+  },
+
+  seekPct(value) { if(this.video&&this.video.duration) this.video.currentTime=Number(value)/100*this.video.duration; },
+  updateFrameDisplay() {
+    const n=this.doc?this.doc.n_frames:(this.pendingVideo?Math.floor(this.pendingVideo.duration_sec*(Number(document.getElementById('newFps').value)||25)):0);
+    document.getElementById('frameDisplay').textContent='frame '+this.currentFrame()+' / '+n;
+    if(this.video&&this.video.duration) document.getElementById('progress').value=(this.video.currentTime/this.video.duration)*100;
+  },
+
+  updateWindow(showAlert=true,markConfirmed=true) {
+    if(!this.doc) { if(showAlert) this.fail('请先创建或加载文档。'); return false; }
+    const start=Number(document.getElementById('awStart').value),end=Number(document.getElementById('awEnd').value);
+    if(!Number.isInteger(start)||!Number.isInteger(end)||start<0||start>=end||end>this.doc.n_frames) { if(showAlert) this.fail('分析窗口必须满足半开区间整数 0 ≤ start < end_exclusive ≤ n_frames。'); return false; }
+    const changed=start!==this.doc.analysis_window[0]||end!==this.doc.analysis_window[1];
+    const confirmationChanged=markConfirmed&&this.doc.analysis_window_confirmed!==true;
+    this.doc.analysis_window=[start,end]; this.doc.analysis_window_semantics=this.WINDOW_SEMANTICS;
+    if(markConfirmed) this.doc.analysis_window_confirmed=true;
+    else if(changed) this.doc.analysis_window_confirmed=false;
+    if(changed||confirmationChanged) this.touch();
+    this.updateWindowLabel(); this.renderInfo(); this.autosave(); return true;
+  },
+
+  updateWindowLabel() {
+    if(!this.doc) return;
+    const [s,e]=this.doc.analysis_window; document.getElementById('awDuration').textContent='['+s+','+e+') · '+((e-s)/this.doc.fps).toFixed(3)+' s';
+  },
+
+  populateStatsSelectors() {
+    if(!this.doc) return;
+    const rubrics=document.getElementById('statsRubric'); rubrics.replaceChildren();
+    Object.keys(this.RUBRICS).filter(k=>k.endsWith(this.doc.assay.toLowerCase())).forEach(k=>{ const o=document.createElement('option'); o.value=k; o.textContent=k; rubrics.appendChild(o); });
+    const mice=document.getElementById('statsMouse'); mice.replaceChildren();
+    const all=document.createElement('option'); all.value='all'; all.textContent='全部 active_mice（分别计算）'; mice.appendChild(all);
+    this.doc.active_mice.forEach(m=>{ const o=document.createElement('option'); o.value=String(m); o.textContent='mouse '+m; mice.appendChild(o); });
+  },
+
+  showStats(show=true) {
+    if(show&&!this.doc) return this.fail('请先创建或加载文档。');
+    document.getElementById('statsCard').classList.toggle('hidden',!show); if(show) this.populateStatsSelectors();
+  },
+
+  frameSeries(doc,track,mouse) {
+    const [windowStart,windowEnd]=doc.analysis_window; const def=this.TRACK_DEFS[track];
+    const result=new Array(windowEnd-windowStart).fill(this.defaultValue(track));
+    (doc.tracks[track]||[]).filter(iv=>iv.mouse===mouse).forEach(iv=>{
+      const start=Math.max(iv.start,windowStart),end=Math.min(iv.end,windowEnd-1);
+      for(let frame=start;frame<=end;frame++) result[frame-windowStart]=iv.value;
+    });
+    return result;
+  },
+
+  primitiveFrames(doc,mouse) {
+    const tracks=this.tracksFor(doc.assay),series={}; tracks.forEach(t=>series[t]=this.frameSeries(doc,t,mouse));
+    const length=doc.analysis_window[1]-doc.analysis_window[0],frames=[];
+    for(let i=0;i<length;i++) { const state={}; tracks.forEach(t=>state[t]=series[t][i]); frames.push(state); }
+    return frames;
+  },
+
+  classifyFrames(doc,mouse,rubric) {
+    const table=this.RUBRICS[rubric],priority=this.PRIORITY[rubric]||Object.keys(table);
+    return this.primitiveFrames(doc,mouse).map(state=>{
+      if(state.visibility!=='clear') return 'unknown';
+      const hits=Object.entries(table).filter(([,predicate])=>predicate(state)).map(([name])=>name);
+      return priority.find(name=>hits.includes(name))||hits[0]||'none';
+    });
+  },
+
+  summarizeLabels(doc,labels) {
+    const [windowStart]=doc.analysis_window,total=labels.length,classes=[...new Set(labels)].sort(),summary={};
+    classes.forEach(label=>{
+      let frames=0,start=null; const bouts=[];
+      for(let i=0;i<total;i++) {
+        if(labels[i]===label) { frames++; if(start===null) start=i; }
+        else if(start!==null) { bouts.push([windowStart+start,windowStart+i]); start=null; }
+      }
+      if(start!==null) bouts.push([windowStart+start,windowStart+total]);
+      summary[label]={frames,seconds:frames/doc.fps,duration_pct:total?100*frames/total:0,bouts:bouts.length,bout_intervals_half_open:bouts};
+    });
+    return {window:doc.analysis_window,window_semantics:this.WINDOW_SEMANTICS,total_frames:total,total_seconds:total/doc.fps,summary};
+  },
+
+  computeStats() {
+    if(!this.prepareOutput({requireWindowConfirmed:true})) return;
+    if(this.doc.completed!==true) return this.fail('正式窗口统计只允许从 completed=true 的文件计算；请先完成复核。');
+    const rubric=document.getElementById('statsRubric').value;
+    const selection=document.getElementById('statsMouse').value;
+    const mice=selection==='all'?[...this.doc.active_mice]:[Number(selection)];
+    const output={format:this.FORMAT,tool_version:this.TOOL_VERSION,primitive_set_version:this.PRIMITIVE_SET_VERSION,rubric_version:this.RUBRIC_VERSION,trial:this.doc.trial,rubric,per_mouse:{}};
+    mice.forEach(mouse=>{ output.per_mouse[mouse]=this.summarizeLabels(this.doc,this.classifyFrames(this.doc,mouse,rubric)); });
+    document.getElementById('statsOutput').textContent=JSON.stringify(output,null,2);
+  },
+
+  csvEscape(value) {
+    if(value==null) return ''; const text=String(value); return /[",\n\r]/.test(text)?'"'+text.replace(/"/g,'""')+'"':text;
+  },
+
+  exportCSV() {
+    if(!this.prepareOutput({requireWindowConfirmed:true})) return;
+    if(this.doc.completed!==true) return this.fail('正式 enriched CSV 只允许从 completed=true 的文件导出；请先完成复核。');
+    const formalErrors=this.validateDoc(this.doc,{requireVideo:true,formal:true});
+    if(formalErrors.length) return this.fail('正式 CSV 硬门失败：\n'+formalErrors.join('\n'));
+    const d=this.doc,v=d.video,[ws,we]=d.analysis_window,mouse=this.currentMouse;
+    const header=['row_type','csv_format','csv_version','schema','format','tool_version','primitive_set_version','rubric_version','interval_semantics','analysis_window_semantics','trial','assay','annotator','annotator_role','assignment_id','fps','n_frames','video_basename','video_size_bytes','video_duration_sec','video_sha256','active_mice','analysis_start','analysis_end_exclusive','analysis_window_confirmed','pool','prefill','blind','completed','created_at','updated_at','completed_at','metadata_repaired','provenance','track','interval_index','start','end','value','mouse','duration_frames','duration_sec'];
+    const metadata=['depressionplex.annotation.v2.csv','1.0.0',d.schema,d.format,d.tool_version,d.primitive_set_version,d.rubric_version,d.interval_semantics,d.analysis_window_semantics,d.trial,d.assay,d.annotator,d.annotator_role,d.assignment_id,d.fps,d.n_frames,v.basename,v.size_bytes,v.duration_sec,v.sha256,JSON.stringify([mouse]),ws,we,d.analysis_window_confirmed,d.pool,d.prefill,d.blind,d.completed,d.created_at,d.updated_at,d.completed_at,d.metadata_repaired,d.provenance==null?'':JSON.stringify(d.provenance)];
+    const rows=[header,['metadata',...metadata,...Array(8).fill('')]];
+    this.tracksFor(d.assay).forEach(track=>{
+      let index=0;
+      (d.tracks[track]||[]).filter(iv=>iv.mouse===mouse).sort((a,b)=>a.start-b.start||a.end-b.end).forEach(iv=>{
+        index++; const frames=iv.end-iv.start+1;
+        rows.push(['interval',...metadata,track,index,iv.start,iv.end,iv.value,mouse,frames,(frames/d.fps).toFixed(6)]);
+      });
+    });
+    const csv='\ufeff'+rows.map(row=>row.map(v=>this.csvEscape(v)).join(',')).join('\r\n');
+    this.download(csv,'text/csv;charset=utf-8',this.safeName(d.trial+'_'+d.annotator+'_mouse'+mouse+'_v2.2_enriched.csv'));
+    this.showStatus('已导出 mouse '+mouse+' 的 lossless enriched V2 CSV；没有回退到其他 mouse。');
+  },
+
+  showAgreement(show=true) {
+    document.getElementById('agreeCard').classList.toggle('hidden',!show); if(show) document.getElementById('agreeOutput').replaceChildren();
+  },
+
+  confusion(a,b,values) {
+    const matrix=values.map(()=>values.map(()=>0)),index=new Map(values.map((v,i)=>[v,i]));
+    for(let i=0;i<a.length;i++) matrix[index.get(a[i])][index.get(b[i])]++;
+    return matrix;
+  },
+
+  exactMetrics(matrix) {
+    const k=matrix.length,n=matrix.flat().reduce((a,b)=>a+b,0);
+    if(!n) return {raw_agreement:null,kappa:null};
+    let diagonal=0,expected=0; const row=matrix.map(r=>r.reduce((a,b)=>a+b,0)),col=[];
+    for(let j=0;j<k;j++) col[j]=matrix.reduce((sum,r)=>sum+r[j],0);
+    for(let i=0;i<k;i++) { diagonal+=matrix[i][i]; expected+=row[i]*col[i]; }
+    const po=diagonal/n,pe=expected/(n*n),denom=1-pe;
+    return {raw_agreement:po,kappa:Math.abs(denom)<1e-12?(po===1?null:0):(po-pe)/denom};
+  },
+
+  linearWeightedKappa(matrix) {
+    const k=matrix.length,n=matrix.flat().reduce((a,b)=>a+b,0); if(!n||k<2) return null;
+    const row=matrix.map(r=>r.reduce((a,b)=>a+b,0)),col=[]; for(let j=0;j<k;j++) col[j]=matrix.reduce((sum,r)=>sum+r[j],0);
+    let observed=0,expected=0;
+    for(let i=0;i<k;i++) for(let j=0;j<k;j++) {
+      const weight=1-Math.abs(i-j)/(k-1); observed+=weight*matrix[i][j]/n; expected+=weight*row[i]*col[j]/(n*n);
+    }
+    const denom=1-expected; return Math.abs(denom)<1e-12?(observed===1?null:0):(observed-expected)/denom;
+  },
+
+  pabak(rawAgreement,classCount) {
+    return rawAgreement==null?null:(classCount*rawAgreement-1)/(classCount-1);
+  },
+
+  metricCore(docA,docB,track,a,b) {
+    const def=this.TRACK_DEFS[track],matrix=this.confusion(a,b,def.values),exact=this.exactMetrics(matrix);
+    const supportA=Object.fromEntries(def.values.map(value=>[value,a.filter(x=>x===value).length]));
+    const supportB=Object.fromEntries(def.values.map(value=>[value,b.filter(x=>x===value).length]));
+    const supportedValues=def.values.filter(value=>supportA[value]+supportB[value]>0),degenerate=supportedValues.length<2;
+    const defaultValue=this.defaultValue(track);
+    const nondefaultRateA=a.length?a.filter(value=>value!==defaultValue).length/a.length:null;
+    const nondefaultRateB=b.length?b.filter(value=>value!==defaultValue).length/b.length:null;
+    const prevalence=a.length?a.filter((value,i)=>value!==defaultValue||b[i]!==defaultValue).length/a.length:null;
+    const rareApplicable=def.type==='bool'||def.type==='level',rare=rareApplicable&&prevalence!=null&&prevalence<0.05;
+    const result={track,label:def.label,kind:def.type,type:def.type,values:def.values,frames:a.length,n_frames:a.length,rate_a:nondefaultRateA,rate_b:nondefaultRateB,nondefault_rate_a:nondefaultRateA,nondefault_rate_b:nondefaultRateB,prevalence,union_prevalence:prevalence,rare_applicable:rareApplicable,rare,degenerate,degenerate_exact:degenerate,supported_values:supportedValues,support_a:supportA,support_b:supportB,support:{annotator_a:supportA,annotator_b:supportB},raw_agreement:exact.raw_agreement,kappa:exact.kappa,exact_unweighted_kappa:exact.kappa,confusion:{rows_annotator_a:docA.annotator,columns_annotator_b:docB.annotator,labels:def.values,matrix}};
+    if(def.type==='bool'&&rare) { result.pabak_exact=this.pabak(exact.raw_agreement,2); result.pabak=result.pabak_exact; }
+    if(def.type==='level') {
+      const activeA=a.map(v=>v==='none'?'inactive':'active'),activeB=b.map(v=>v==='none'?'inactive':'active'),activeValues=['inactive','active'];
+      const activeMatrix=this.confusion(activeA,activeB,activeValues),active=this.exactMetrics(activeMatrix);
+      const activeSupportA={inactive:activeA.filter(v=>v==='inactive').length,active:activeA.filter(v=>v==='active').length},activeSupportB={inactive:activeB.filter(v=>v==='inactive').length,active:activeB.filter(v=>v==='active').length};
+      const activeDegenerate=activeValues.filter(value=>activeSupportA[value]+activeSupportB[value]>0).length<2;
+      result.linear_weighted_kappa=this.linearWeightedKappa(matrix);
+      result.weighted_kappa=result.linear_weighted_kappa;
+      result.active_binary_kappa=active.kappa; result.active_raw_agreement=active.raw_agreement;
+      result.degenerate_active=activeDegenerate; result.active_support={annotator_a:activeSupportA,annotator_b:activeSupportB};
+      result.active_confusion={labels:activeValues,matrix:activeMatrix}; if(rare) result.pabak_active=this.pabak(active.raw_agreement,2);
+      result.pilot_gate=degenerate||activeDegenerate?'not_applicable_degenerate':(rare?'rare_report_raw_and_pabak':(exact.kappa!=null&&active.kappa!=null&&exact.kappa>=0.8&&active.kappa>=0.8?'pass':'fail'));
+      result.occurrence={kappa:active.kappa,raw_agreement:active.raw_agreement,prevalence,rate_a:nondefaultRateA,rate_b:nondefaultRateB,rare,degenerate:activeDegenerate,confusion:result.active_confusion,...(rare?{pabak:result.pabak_active}:{})};
+    } else result.pilot_gate=degenerate?'not_applicable_degenerate':(rare?'rare_report_raw_and_pabak':(exact.kappa!=null&&exact.kappa>=0.8?'pass':'fail'));
+    result.passes_common_threshold=result.pilot_gate==='pass'?true:(result.pilot_gate==='fail'?false:null);
+    return result;
+  },
+
+  metricForTrack(docA,docB,track,mouse) {
+    const fullA=this.frameSeries(docA,track,mouse),fullB=this.frameSeries(docB,track,mouse);
+    if(track==='visibility') return {...this.metricCore(docA,docB,track,fullA,fullB),scope:'full_window'};
+    const visibilityA=this.frameSeries(docA,'visibility',mouse),visibilityB=this.frameSeries(docB,'visibility',mouse);
+    const jointlyClear=visibilityA.map((value,i)=>value==='clear'&&visibilityB[i]==='clear');
+    const mainA=fullA.filter((_,i)=>jointlyClear[i]),mainB=fullB.filter((_,i)=>jointlyClear[i]);
+    const fullWindow={...this.metricCore(docA,docB,track,fullA,fullB),scope:'full_window'};
+    return {...this.metricCore(docA,docB,track,mainA,mainB),scope:'jointly_clear',jointly_clear_frames:mainA.length,full_window_frames:fullA.length,excluded_non_jointly_clear_frames:fullA.length-mainA.length,full_window:fullWindow,full_window_diagnostic:fullWindow};
+  },
+
+  visibilityDistribution(docA,docB,mouse) {
+    const values=this.TRACK_DEFS.visibility.values,a=this.frameSeries(docA,'visibility',mouse),b=this.frameSeries(docB,'visibility',mouse);
+    const summarize=series=>{
+      const counts=Object.fromEntries(values.map(value=>[value,series.filter(x=>x===value).length]));
+      const proportions=Object.fromEntries(values.map(value=>[value,series.length?counts[value]/series.length:null]));
+      return {counts,proportions,by_value:Object.fromEntries(values.map(value=>[value,{frames:counts[value],fraction:proportions[value]}]))};
+    };
+    const summaryA=summarize(a),summaryB=summarize(b),jointlyClear=a.filter((value,i)=>value==='clear'&&b[i]==='clear').length;
+    return {n_frames:a.length,jointly_clear_frames:jointlyClear,jointly_clear_fraction:a.length?jointlyClear/a.length:null,visibility_a:summaryA.by_value,visibility_b:summaryB.by_value,annotator_a:{id:docA.annotator,...summaryA},annotator_b:{id:docB.annotator,...summaryB}};
+  },
+
+  strictAgreementErrors(a,b) {
+    const errors=[];
+    this.validateDoc(a,{requireVideo:true,formal:true}).forEach(e=>errors.push('A: '+e)); this.validateDoc(b,{requireVideo:true,formal:true}).forEach(e=>errors.push('B: '+e));
+    [['schema'],['format'],['tool_version'],['primitive_set_version'],['rubric_version'],['interval_semantics'],['analysis_window_semantics'],['trial'],['assay'],['fps'],['n_frames']].forEach(([key])=>{ if(a[key]!==b[key]) errors.push(key+' 不一致。'); });
+    if(JSON.stringify(a.analysis_window)!==JSON.stringify(b.analysis_window)) errors.push('analysis_window 不一致。');
+    if(a.analysis_window_confirmed!==true||b.analysis_window_confirmed!==true) errors.push('两份文件都必须 analysis_window_confirmed=true。');
+    const miceA=[...(a.active_mice||[])].sort((x,y)=>x-y),miceB=[...(b.active_mice||[])].sort((x,y)=>x-y);
+    if(JSON.stringify(miceA)!==JSON.stringify(miceB)) errors.push('active_mice 不一致。');
+    ['basename','size_bytes','duration_sec','sha256'].forEach(key=>{ if(!a.video||!b.video||a.video[key]!==b.video[key]) errors.push('video.'+key+' 不一致。'); });
+    if(a.annotator===b.annotator) errors.push('annotator 必须是两位不同标注员。');
+    [a,b].forEach((d,i)=>{
+      const name=i===0?'A':'B';
+      if(d.annotator_role!=='independent_rater') errors.push(name+' annotator_role 必须为 independent_rater。');
+      if(d.pool!=='validate'||d.prefill!==false||d.blind!==true||d.completed!==true) errors.push(name+' 必须满足 pool=validate、prefill=false、blind=true、completed=true。');
+    });
+    if(!errors.some(error=>error.includes('analysis_window')||error.includes('active_mice')||error.includes('visibility'))) {
+      miceA.forEach(mouse=>{ if(this.visibilityDistribution(a,b,mouse).jointly_clear_frames===0) errors.push('mouse '+mouse+' jointly_clear_frames=0，行为一致性不可计算。'); });
+    }
+    return [...new Set(errors)];
+  },
+
+  async computeAgreement() {
+    const fileA=document.getElementById('agreeA').files[0],fileB=document.getElementById('agreeB').files[0];
+    if(!fileA||!fileB) return this.fail('请选择两份 canonical V2.2 JSON。');
+    try {
+      const [a,b]=await Promise.all([fileA.text().then(JSON.parse),fileB.text().then(JSON.parse)]);
+      const errors=this.strictAgreementErrors(a,b); if(errors.length) throw new Error(errors.join('\n'));
+      const report={format:'depressionplex.annotation.agreement.v2',trial:a.trial,assay:a.assay,video_sha256:a.video.sha256,analysis_window:a.analysis_window,annotators:[a.annotator,b.annotator],rare_threshold:0.05,common_kappa_threshold:0.80,tool_version:this.TOOL_VERSION,primitive_set_version:this.PRIMITIVE_SET_VERSION,rubric_version:this.RUBRIC_VERSION,agreement_contract:{window_semantics:this.WINDOW_SEMANTICS,behavior_primary_scope:'frames where both annotators mark visibility=clear',behavior_diagnostic_scope:'full analysis window',visibility_scope:'full analysis window',level_primary:'exact 3-class unweighted Cohen kappa',level_diagnostic:'linear weighted Cohen kappa',level_secondary_gate:'active-vs-none binary Cohen kappa',common_prevalence_gate:'exact and active kappa >= 0.80 for level tracks; exact kappa >= 0.80 otherwise',rare_prevalence:'union(A active OR B active)/N < 0.05 for bool and level-active only: raw agreement and PABAK reported; no kappa gate',categorical:'cat/orient/visibility always report exact unweighted kappa; no rare/PABAK shortcut'},identity:{trial:a.trial,assignment_id_a:a.assignment_id,assignment_id_b:b.assignment_id,assay:a.assay,video:a.video,fps:a.fps,n_frames:a.n_frames,analysis_window:a.analysis_window,annotator_a:a.annotator,annotator_b:b.annotator},mice:{}};
+      a.active_mice.forEach(mouse=>{ const visibility=this.visibilityDistribution(a,b,mouse); report.mice[mouse]={window_frames:visibility.n_frames,jointly_clear_frames:visibility.jointly_clear_frames,jointly_clear_fraction:visibility.jointly_clear_fraction,visibility_a:visibility.visibility_a,visibility_b:visibility.visibility_b,visibility_distribution:visibility,tracks:this.tracksFor(a.assay).map(track=>this.metricForTrack(a,b,track,mouse))}; });
+      const out=document.getElementById('agreeOutput'); out.replaceChildren();
+      Object.entries(report.mice).forEach(([mouse,mouseReport])=>{
+        const h=document.createElement('h3'); h.textContent='mouse '+mouse; out.appendChild(h);
+        const vis=document.createElement('pre'); vis.textContent='visibility distribution\n'+JSON.stringify(mouseReport.visibility_distribution,null,2); out.appendChild(vis);
+        const table=document.createElement('table');
+        const thead=document.createElement('thead'); thead.innerHTML='<tr><th>track</th><th>scope</th><th>type</th><th>union prevalence</th><th>raw</th><th>exact κ</th><th>linear weighted κ</th><th>active κ</th><th>pilot gate</th></tr>'; table.appendChild(thead);
+        const tbody=document.createElement('tbody'); mouseReport.tracks.forEach(m=>{ const tr=document.createElement('tr'); [m.track,m.scope,m.type,m.union_prevalence,m.raw_agreement,m.exact_unweighted_kappa,m.linear_weighted_kappa,m.active_binary_kappa,m.pilot_gate].forEach(value=>{ const td=document.createElement('td'); td.textContent=typeof value==='number'?value.toFixed(4):(value==null?'—':String(value)); tr.appendChild(td); }); tbody.appendChild(tr); }); table.appendChild(tbody); out.appendChild(table);
+      });
+      const pre=document.createElement('pre'); pre.textContent=JSON.stringify(report,null,2); out.appendChild(pre); this.showStatus('一致性计算完成：严格 identity 门禁通过，结果已逐 active_mice 分开。');
+    } catch(error) { this.fail('一致性计算失败：'+error.message); }
+  },
+};
+window.addEventListener('DOMContentLoaded',()=>app.init());
+</script>
+</body>
+</html>
