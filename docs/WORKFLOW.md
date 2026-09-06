@@ -32,6 +32,22 @@ git fetch origin && git log --oneline origin/main | head -30 && git show origin/
 
 一个分支一个关注点。分支名对应 `docs/ISSUES.md` 里的一条。
 
+### 1.1 叠加 PR（stacked PR）的坑（2026-09-06 实测踩到）
+
+把 PR-B 的 base 设成 PR-A 的分支（为避开同一文件尾部冲突）是可行的，
+但**合并 PR-A 时绝对不能带 `--delete-branch`**：base 分支一被删，
+**GitHub 会直接把 PR-B 关掉（state=CLOSED），且关闭后无法再改 base**，
+只能另开一条新 PR。分支和 commit 不会丢，丢的是 PR 上的讨论与评审记录。
+
+正确顺序：
+
+```bash
+gh pr merge <A> --merge                    # 先不删分支
+gh pr edit <B> --base main                 # 把 B 的 base 改回 main
+gh pr merge <B> --merge --delete-branch    # B 合完再删
+git push origin --delete <A的分支>          # 最后单独删 A
+```
+
 ## 2. Issue
 
 **GitHub remote 一直可用**（`dylanchen2000/depressionplex`，私有，8-24 建）。
