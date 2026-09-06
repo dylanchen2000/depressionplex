@@ -88,3 +88,39 @@ git push -u origin <分支>
 ```
 
 `git bundle` 保留为**离线备份**手段，不再是主交付通道。
+
+## 6. 收工守卫（2026-09-06 加，起因是真事故）
+
+**收工、交接、换账号前必须跑：**
+
+```bash
+bash scripts/closeout_check.sh
+```
+
+六节任一非空 = **收工未完成**：未提交改动 / 未跟踪文件 / stash / 无 upstream 的分支 /
+领先 origin 的分支 / `tools/` 改动。
+
+起因（DP-050）：2026-09-06 接手时，一台 Mac 上同时存在——两条**从未推送**的分支
+（6 和 12 个 commit，里面装着**人工秒表工具 v1→v1.4 的全部源码**，而
+DP-006/007/008/010/011/027 六条 open issue 全是在改这个工具）、490 行 trial 级代码
+**只以未跟踪文件形式存在**、一个只在本机的 stash、9 个在仓库根目录堆了三天的重复导出。
+
+**共同点不是谁偷懒，是流程里没有任何一步会强制暴露这些状态。** `git push` 不带 stash，
+`git status` 不提示分支没有 upstream，工具目录的改动和代码改动混在一起根本看不见。
+靠人记得叮嘱是不可靠的——道俊同时负责多个项目会忘，agent 改完工具也会忘。
+所以这件事必须机械化：**不是提醒，是一条会返回非零退出码的命令。**
+
+## 7. `gh` CLI（2026-09-06 更正 §5）
+
+§5 记的「`gh` 不可用」**只对沙箱成立**。**Mac 上 `gh` 可用且已登录**
+（`/opt/homebrew/bin/gh`，account `dylanchen2000`，凭证在 keyring）。
+通过 Bridge 在 Mac 上开 PR：
+
+```bash
+gh pr create --repo dylanchen2000/depressionplex --base main \
+  --head <分支> --title "..." --body-file <文件>
+```
+
+补充实测：沙箱侧**没有** `~/.git-credentials`（那是 Account A 沙箱才有的），
+Mac 侧也没有该文件（凭证在 macOS keychain，所以 `git push` 能成但 `grep` 拿不到 token）。
+⇒ **PR 一律在 Mac 侧用 `gh` 开，token 不出本机。**
