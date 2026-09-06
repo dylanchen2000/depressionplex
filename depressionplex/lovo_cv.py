@@ -32,11 +32,19 @@
   immobility = window − mobile；软件侧同样 mobile = bout 流水线后的 Mobility
   时长（raw 变体同报，DP-014 要求两侧同时施加 bout 时不迷路）。
 - 分母随行携带（G9）：total_frames / scoreable_frames / unknown_fraction。
-- **DP-035（G11 逐秒 Jaccard 门）**：总时长一致 ≠ 判断一致（实测有试次总差 0.9 s
-  而逐秒 Jaccard 仅 0.51）。软件-人工的 Jaccard 与人工-人工基线（0.738，13 试次
-  实测，DP-035）**同式同口径**（复用 `scorer_disagreement` 的交集实现，不许两套账），
-  与 G7/G8 捆在同一份报告里出，**任一不过即不过**；逐试次值全部列出（升序 =
-  拖累项排前）。算不出 ⇒ 判不过并写明原因，不许"不报=过"。
+- **DP-035（G11 逐秒 Jaccard）**：总时长一致 ≠ 判断一致（实测有试次总差 0.9 s
+  而逐秒 Jaccard 仅 0.51）。软件-人工的 Jaccard 与人工-人工基线**同式同口径**
+  （复用 `scorer_disagreement` 的交集实现，不许两套账），与 G7/G8 捆在同一份报告
+  里出；逐试次值全部列出（升序 = 拖累项排前）。**算不出 ⇒ 判不过并写明原因，
+  不许"不报=过"。**
+- **DP-047（2026-09-06 道俊定）：G7/G8 定门，G11 只报不判。**G7/G8 量的是
+  trial 级**总量**（排序与偏差），人怎么看视频几乎不动总量 ⇒ 用现有混杂基线定门
+  站得住；G11 量的是**逐秒时间轴**，恰恰是对"看得多细"最敏感的那个量（实测：
+  一粗一细两人 0.738，两人同档 0.819——变的只是人的看法，不是软件）⇒ 拿混杂
+  基线给它定门，定的是"当初那两个人看得多粗"。故 G11 门槛置 `None`（待 T1 精标
+  数据定标），**照算照报、不作判定门**，处理手法与 DP-043 对 G10 召回率的处置
+  相同（照报 + 写明基准不可靠 + 不当门）。三支仍全报，"不报≠过"性质不变——
+  G11 缺报本身仍然让捆绑判定不过。
 - 阈值单位：θ 是 BL² 归一化残差（无量纲物理量），搜索网格边界只是搜索范围
   声明，不是判定阈值。时间一律秒。
 - assay_core 纪律沿用：只依赖 numpy。
@@ -69,10 +77,31 @@ THETA_SEARCH_MAX = 0.05
 # 三个门槛的来源全部是**人工侧**实测或 SPEC，与软件输出无关——
 # "禁止用自己的输出调阈值"在这里是构造性成立，不是口头承诺。
 G7_MIN_R = 0.818          # G7：样本外 Pearson r 下限（SPEC §9，人工-人工一致性推导）
-G8_MAX_BIAS_S = 28.6      # G8：|Bland-Altman 偏差| 上限 = 两位人工评分员的实测最大偏差（DP-036）
-G11_MIN_JACCARD = 0.738   # G11：软件-人工逐秒 Jaccard 下限 = 人工-人工 A 组 n=13 平均
-                          # （DP-035 唯一**预先登记**值；B 组 0.816/n=3 只作参考记账，
-                          # 拿 n=3 抬门槛属小样本过拟合——门槛维持 0.738 不动）
+                          # DP-047 复核后**不动**：0.818 就是人工-人工一致性上限，
+                          # 门不该高过人自己。
+G8_MAX_BIAS_S = 17.7      # G8：|Bland-Altman 偏差| 上限（DP-047，道俊 2026-09-06 定）
+                          # = B 组全体 n=13 两位评分员实测偏差。B 组全体是**预先登记**
+                          # 里就写明要用的口径 ⇒ 选它不是事后挑数字。旧值 28.6 s 来自
+                          # DP-036 的混杂配对，已知偏松。总量对"人怎么看"不敏感，
+                          # 用混杂基线定这一门站得住（推理见 DP-047）。
+#: G11：软件-人工逐秒 Jaccard 下限。**None = 门槛待 T1 精标数据定标（DP-047/DP-048）。**
+#: 不是"没门槛"也不是"随便过"：G11 照算、照报、逐试次全列，只是**暂不作为判定门**
+#: ——因为逐秒重合恰恰是对"人看得多细"最敏感的量（0.738 一粗一细 vs 0.819 两人同档），
+#: 拿混杂基线定门等于给"当初那两个人看得多粗"定门。手法与 DP-043 处理 G10 召回率一致。
+#: **给它填任何数字前必须先有 T1 数据**（可暂停可回看、两人评 + 裁决），并写进 SPEC。
+G11_MIN_JACCARD: float | None = None
+#: 人工自身在逐秒时间轴上的天花板（DP-035 实测：同一人隔天重评自己 0.821、
+#: 两人同档 0.819）。**报告里必须紧挨 G11 印这个数**——否则客户会拿 0.9 之类
+#: 不可达指标来要求，那是不懂这个量在算什么。它是参考线，不是判定门。
+G11_HUMAN_CEILING = 0.82
+
+
+def _g11_threshold_note() -> str:
+    """G11 门槛怎么写进报告。未定标时**必须写明待定标**，不许留空让人误读为已过。"""
+    if G11_MIN_JACCARD is None:
+        return ("门槛**待 T1 精标定标**（DP-047）：逐秒重合对'人看得多细'敏感，"
+                "混杂基线不能当门——本支照报不判定")
+    return f"门槛 ≥{G11_MIN_JACCARD} = 人工-人工实测，DP-035"
 
 
 # ---------------------------------------------------------------- 样本与结果模型
@@ -207,7 +236,7 @@ class LovoResult:
             f"min={thetas.min():.4f} max={thetas.max():.4f}",
             f"  G2 = θ_mob 跨折变异系数 = {self.theta_cv_pct:.1f}%（门槛 ≤15%）",
             f"  样本外 Pearson r = {self.pooled_pearson_r:.3f}"
-            f"（G7 门槛 ≥0.818，合成口径仅验管道）",
+            f"（G7 门槛 ≥{G7_MIN_R}，合成口径仅验管道）",
             f"  Bland-Altman: 偏差 {self.ba_bias_s:+.2f} s, "
             f"LoA [{self.ba_loa_low_s:.2f}, {self.ba_loa_high_s:.2f}] s",
         ]
@@ -224,8 +253,10 @@ class LovoResult:
             lines.append(
                 f"  G11 逐秒 Jaccard（软件-人工，与人工-人工基线同式）"
                 f" mean = {self.g11_mean_jaccard:.3f}（分母 n={len(per_trial)}/"
-                f"{len(all_p)}{excl}，门槛 ≥{G11_MIN_JACCARD} = 人工-人工实测，"
-                f"DP-035）")
+                f"{len(all_p)}{excl}，{_g11_threshold_note()}）")
+            lines.append(
+                f"    人工自身天花板 ≈ {G11_HUMAN_CEILING}（同一人隔天重评自己 "
+                f"0.821、两人同档 0.819，DP-035 实测）⇒ 0.9 之类是不可达指标")
             lines.append("    逐试次升序（拖累项排前）：")
             for t, j in sorted(per_trial, key=lambda kv: kv[1]):
                 lines.append(f"      {j:.3f}  {t}")
@@ -239,10 +270,18 @@ class LovoResult:
                 "——算不出按不过处理，不报≠过")
         g7_ok = self.pooled_pearson_r >= G7_MIN_R
         g8_ok = abs(self.ba_bias_s) <= G8_MAX_BIAS_S
-        g11_ok = (self.g11_mean_jaccard is not None
-                  and self.g11_mean_jaccard >= G11_MIN_JACCARD)
-        marks = (("G7 r≥0.818", g7_ok), ("G8 |bias|≤28.6s", g8_ok),
-                 ("G11 Jaccard≥0.738", g11_ok))
+        # DP-047：G11 门槛未定标 ⇒ 判的是**报没报**，不是过没过。
+        # "不报≠过"性质不变：算不出照旧让捆绑判定不过（缺一支不算全过）。
+        if G11_MIN_JACCARD is None:
+            g11_ok = self.g11_mean_jaccard is not None
+            g11_label = "G11 已报（门槛待 T1 定标）"
+        else:
+            g11_ok = (self.g11_mean_jaccard is not None
+                      and self.g11_mean_jaccard >= G11_MIN_JACCARD)
+            g11_label = f"G11 Jaccard≥{G11_MIN_JACCARD}"
+        marks = ((f"G7 r≥{G7_MIN_R}", g7_ok),
+                 (f"G8 |bias|≤{G8_MAX_BIAS_S}s", g8_ok),
+                 (g11_label, g11_ok))
         lines.append(
             "  验收门捆绑（G7/G8/G11 同时报告，任一不过即不过）: "
             + "; ".join(f"{n} {'过' if ok else '**不过**'}" for n, ok in marks)

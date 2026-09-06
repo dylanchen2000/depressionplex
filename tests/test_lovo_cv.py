@@ -330,8 +330,12 @@ def test_g11_travels_in_summary_and_rows() -> None:
     assert res.g11_mean_jaccard is not None, "合成生成器带真值段，G11 必须可算"
     assert 0.0 <= res.g11_mean_jaccard <= 1.0
     txt = res.summary()
-    for needle in ("G11", "0.738", "G7", "G8", "任一不过即不过", "拖累项"):
+    for needle in ("G11", "G7", "G8", "任一不过即不过", "拖累项"):
         assert needle in txt, f"summary 缺 {needle!r}——G7/G8/G11 必须同报告"
+    # DP-047：G11 门槛未定标 ⇒ 报告必须**写明**待定标，并印人工天花板。
+    # 留空最危险：读者会把"没写门槛"读成"过了"。
+    assert "待 T1 精标定标" in txt
+    assert "人工自身天花板" in txt and "0.9" in txt
     # 逐试次升序：前一行数值 ≤ 后一行
     listed = [float(l.split()[0]) for l in txt.splitlines()
               if l.startswith("      ") and "." in l.split()[0]]
@@ -403,8 +407,11 @@ def test_gate_bundle_flags_synthetic_as_pipeline_only() -> None:
     txt = res.summary()
     assert "管道演示" in txt and "DP-014" in txt
     # 门槛常量写死且来源是人工侧（纪律护栏：改这三个数需要 SPEC 依据，不需要新代码）
-    assert L.G7_MIN_R == 0.818 and L.G8_MAX_BIAS_S == 28.6
-    assert L.G11_MIN_JACCARD == 0.738
+    # DP-047（道俊 2026-09-06 定）：G7 不动、G8 收紧到 B 组全体实测、G11 门槛留空。
+    assert L.G7_MIN_R == 0.818
+    assert L.G8_MAX_BIAS_S == 17.7
+    assert L.G11_MIN_JACCARD is None, "G11 门槛必须留空待 T1 定标，不许随手填数"
+    assert L.G11_HUMAN_CEILING == 0.82
 
 
 def test_objective_comparison_prints_both_G2s() -> None:
