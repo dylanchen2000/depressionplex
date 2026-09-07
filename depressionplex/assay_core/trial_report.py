@@ -59,6 +59,13 @@ class CategoryStat:
     pct_of_window: float              # 100 × frames / 窗口帧数
     pct_of_scorable: float | None     # 100 × frames / 可评分帧数；分母为 0 ⇒ None
     first_onset_s: float | None       # 首个 bout 起点，相对**窗口起点**（秒）
+    #: 流水线后每段的时间区间，**相对窗口起点**的半开区间秒 `[start, end)`。
+    #: 换算与 `lovo_cv.evaluate_trial` 逐字同式：`(iv.start / fps, (iv.end + 1) / fps)`
+    #: ——`bouts.Interval` 是**闭区间帧号**，`+1` 是闭尾转半开尾，不是补一帧。
+    #: 只此一处换算；`lovo_cv.jaccard_segs` 吃的就是这个形状。导出到文件时
+    #: 由 `timeline` 层再加 `window_start_s` 平移到**录像起点**时基（FST 差
+    #: 120 s，抹平即口径事故）——本字段自己**不**含那个平移。
+    segments_s: tuple[tuple[float, float], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -175,6 +182,8 @@ def build_trial_report(
                              else 100.0 * summary.frames / scorable),
             first_onset_s=(None if summary.first_onset_frame is None
                            else summary.first_onset_frame / fps),
+            segments_s=tuple((iv.start / fps, (iv.end + 1) / fps)
+                             for iv in summary.intervals),
         )
 
     window_s = window_frames / fps

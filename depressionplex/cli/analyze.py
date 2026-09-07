@@ -21,7 +21,7 @@ import sys
 from pathlib import Path
 
 from .. import runner, video
-from ..assay_core import trial_report
+from ..assay_core import timeline, trial_report
 
 
 def _plan_text(info: video.VideoInfo, plan: runner.TrialPlan) -> str:
@@ -92,6 +92,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--body-area-prior", type=float, default=None,
                     help="身体级面积绝对先验（硬件规格级）；整批脱落时相对判据不可决")
     ap.add_argument("--csv", type=Path, default=None)
+    ap.add_argument("--timeline-csv", type=Path, default=None,
+                    help="逐段时间线（Mobility 段，**录像起点**时基）。"
+                         "给了才写；与人工侧 export_human_timeline 同一种行形状，"
+                         "两张表可直接拼起来比。总量比不出分歧长在哪一段，段比得出")
     args = ap.parse_args(argv)
 
     try:
@@ -119,6 +123,19 @@ def main(argv: list[str] | None = None) -> int:
                 w.writerow(_row(reports[k]))
         print(f"\nCSV 已写：{args.csv}（{len(reports)} 行；"
               f"未产出的 {len(skipped)} 个隔间不写进 CSV，见上面的原因）")
+
+    if args.timeline_csv:
+        rows: list[dict[str, object]] = []
+        for k in sorted(reports):
+            rows += timeline.rows_from_report(reports[k])
+        n = timeline.write_csv(rows, args.timeline_csv)
+        seg = sum(1 for r in rows if r["start_s"] != "")
+        print(f"\n时间线已写：{args.timeline_csv}（{n} 行，其中段 {seg} 行，"
+              f"说明行 {n - seg} 行）")
+        if skipped:
+            # 与上面的 CSV 同一处理：未产出的隔间不进表，原因在上面的报告里。
+            print(f"  未产出数字的 {len(skipped)} 个隔间不进时间线，"
+                  "原因见上面各 ch 的说明——不是悄悄少行")
 
     if not reports:
         print("\n[结果] 没有任何隔间产出数字——退出码 2", file=sys.stderr)

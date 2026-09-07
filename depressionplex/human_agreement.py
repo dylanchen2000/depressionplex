@@ -114,6 +114,11 @@ class UnionStats:
     unsorted: bool          # holds 数组是否乱序（后段起点 < 前段起点）
     zero_length: int        # 零长/负长段个数（按键抖动），并集口径下自动为 0
     naive_sum_s: float      # Σ max(b-a,0)：乱序自嵌套时虚高，仅记账用
+    #: 排序取并集之后的**互不重叠**段，录像起点时基的半开区间秒 `[start, end)`。
+    #: `total_s` 就是这些段长之和（四舍五入到两位）——**不是**另算一遍，
+    #: 由 tests/test_timeline.py 钉住。人工秒表只记"在动"，所以这就是人工侧的
+    #: Mobility 段；零长/负长段（按键抖动）不产生段。
+    segments: tuple[tuple[float, float], ...] = ()
 
 
 def union_holds(holds: Sequence[Sequence[float]]) -> UnionStats:
@@ -127,6 +132,7 @@ def union_holds(holds: Sequence[Sequence[float]]) -> UnionStats:
     zero_length = sum(1 for a, b in pairs if b <= a)
     naive = sum(max(b - a, 0.0) for a, b in pairs)
     total = 0.0
+    merged: list[tuple[float, float]] = []
     cur_a = cur_b = None
     for a, b in sorted(pairs):
         if b <= a:
@@ -134,17 +140,20 @@ def union_holds(holds: Sequence[Sequence[float]]) -> UnionStats:
         if cur_b is None or a > cur_b:
             if cur_b is not None:
                 total += cur_b - cur_a
+                merged.append((cur_a, cur_b))
             cur_a, cur_b = a, b
         else:
             cur_b = max(cur_b, b)
     if cur_b is not None:
         total += cur_b - cur_a
+        merged.append((cur_a, cur_b))
     return UnionStats(
         total_s=round(total, 2),
         n_segments=len(pairs),
         unsorted=unsorted,
         zero_length=zero_length,
         naive_sum_s=round(naive, 2),
+        segments=tuple(merged),
     )
 
 
