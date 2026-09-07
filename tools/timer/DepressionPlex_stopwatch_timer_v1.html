@@ -1,6 +1,6 @@
 <!doctype html>
 <!--
-  DepressionPlex · TST 人工评分计时工具 v1（SPEC_人工比对与验收_v1 §8）
+  DepressionPlex · 人工评分计时工具 v1（TST + FST，SPEC_人工比对与验收_v1 §8）
 
   规矩与它为什么存在：
   - 评分员「在动就按住键、松开即停」；界面只显示进度条，永不显示累计秒数
@@ -19,6 +19,20 @@
     本批评完自动导出 partial 审计与 CSV。审计 delivered_order 恒为全量
     种子序。换电脑不共享 localStorage——固定一台机评到底，或每次导出
     partial 后由本人下一台机器重开（重开=新会话，会重评旧场次，不建议）。
+  - v1.5：支持 FST。范式来自清单可选列 assay（缺列/留空 = TST，旧清单照旧能用），
+    一份清单只能一个范式。三处按范式变：① 收尾第一问（TST「爬自己的尾巴」/
+    FST「靠着杯壁或杯里的支架不动过」）**并且各写各的列**——不共用 tail_climbing，
+    因为 primitives 里 TailClimbing 是试次级排除区，而 FST 的靠壁不动对应
+    WallSupportedFloat（正常类别），共用会把 FST 的答案当排除信号；
+    ② 秒数上界改成**本段录像时长**（原来写死 360，FST 录像 362–468 s，
+    评满会弹「越界」把评分员卡死）；③ 每场记 window_s = 录像时长——FST 入水时刻
+    不在画面内、各段长度不同，窗口只能来自录像本身，不许写死常数（DP-057）。
+    CSV 纯追加三列 assay / window_s / wall_support_still，没问到的布尔列留空
+    （空 = 没问过，不是 false；DP-032）。
+    另加可选清单列 declared_empty：声明"这个位置本来就没有动物"（`抑郁8-10` 第 4 个杯子
+    只有水）。SOP 说这种不要评，但问卷本来只在播完后出现 ⇒ 评分员得干看 7.8 分钟。
+    声明过的试次多一个「直接记为无法评分」按钮；**只有清单声明过的才有**，
+    评分员不能自行跳过任何试次。跳过的试次 window_s 与两个问句列全留空。
   - v1.3：可见「暂停/继续」按钮（P 键等效；区间模型下暂停不加秒）；
     「导出当前进度」随时可导出已完成试次的 CSV+审计（文件名带
     _partial<k>of<n> 标记，只作中途保存，最终分析以全部完成后的导出为准）；
@@ -37,7 +51,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>TST 人工计时 v1</title>
+<title>人工计时 v1（TST / FST）</title>
 <style>
   :root { color-scheme: light dark; }
   body { font-family: -apple-system, "PingFang SC", sans-serif; margin: 0 auto;
@@ -59,17 +73,21 @@
 </style>
 </head>
 <body>
-<h1>TST 人工计时（秒表法）· 只评"在动"，看不见任何软件结果</h1>
+<h1 id="pageTitle">人工计时（秒表法）· 只评"在动"，看不见任何软件结果</h1>
 
 <!-- ============ 设置 ============ -->
 <section id="setup">
-  <p class="hint">依据 SOP_悬尾实验人工评分_v1：全程 6 分钟都计分；在动按<b>空格</b>（按住=在动，松开=停）；
-     拿不准按"不算在动"。开始前先做两人共同校准，练习视频不在此工具计数。</p>
+  <p class="hint">范式由清单 CSV 的 <code>assay</code> 列决定（没有这一列 = TST），一份清单只能是一个范式。
+     两个范式都是：在动按<b>空格</b>（按住=在动，松开=停）；拿不准按"不算在动"。
+     开始前先做两人共同校准，练习视频不在此工具计数。</p>
+  <p class="hint"><b>TST</b>（依据 SOP_悬尾实验人工评分_v1）：全程 6 分钟都计分。<br>
+     <b>FST</b>（依据 SOP_强迫游泳人工评分_v1）：<b>评全程</b>——入水时刻不在画面内、各段录像长度不同，
+     所以不许自己划 4 分钟窗口（DP-057）；一次只评一个杯子，其余杯子请按 SOP 用纸物理遮住。</p>
   <p class="hint"><b>可以分批评！</b>每次只选部分视频文件（清单 CSV 始终选全量那份），
      评完本批自动导出 partial 进度；下次回来用「继续上次未完成的评分」接上。
      顺序、呈现号按种子全局固定，与分几批无关。分批只能分"天"，不能分"人"。</p>
   <p>评分员编号 <input type="text" id="scorerId" placeholder="如 张三 或 R1"></p>
-  <p>试次清单 CSV（列头 <code>trial_id,video_filename</code>）
+  <p>试次清单 CSV（列头 <code>trial_id,video_filename</code>，可选 <code>assay</code>、<code>declared_empty</code>）
      <input type="file" id="manifestFile" accept=".csv,text/csv"></p>
   <p>视频文件（全部一起选） <input type="file" id="videoFiles" accept="video/*" multiple></p>
   <p>随机种子 <input type="number" id="seed" style="width:120px">
@@ -103,10 +121,13 @@
      <button id="redoGo" type="button">确认重做</button>
      <button id="redoCancel" type="button">取消</button></p>
   <p class="err" id="redoErr"></p>
+  <p id="emptyBox" hidden>本试次在清单里被声明为<b>空位（无鼠）</b>——按 SOP 不要评它：
+     <button id="emptyBtn" type="button">直接记为无法评分（无鼠）</button>
+     <span class="hint">只有清单声明过的试次才有这个按钮，评分员不能自行跳过任何试次。</span></p>
 
   <fieldset id="quiz" hidden>
     <legend>本试次收尾必答</legend>
-    <label><input type="checkbox" id="qTail"> 出现过爬自己的尾巴</label><br>
+    <span id="q1Row"><label><input type="checkbox" id="qTail"> <span id="q1Label">出现过爬自己的尾巴</span></label><br></span>
     <label><input type="checkbox" id="qUnsc"> 无法评分（脱落/遮挡等）</label><br>
     <label>备注 <input type="text" id="qNote" style="width:60%" placeholder="如：第90秒胶带脱落"></label><br>
     <button id="nextBtn" class="primary" type="button">下一个试次</button>
@@ -187,8 +208,36 @@ const $ = (id) => document.getElementById(id);
  * 跨批次不重不漏；done 按 trial_id 索引，与队列解耦。 */
 const state = { scorer: "", seed: 0, fullOrder: [], queue: [], qidx: 0, done: [],
                 files: null, acc: null, rate: 1, redoTrialId: null,
-                started: false, lastTime: undefined, maxT: 0, confirmBatch: null };
+                started: false, lastTime: undefined, maxT: 0, confirmBatch: null,
+                assay: "TST", windowS: null, declaredEmpty: false };
 const TRIAL_ID_RE = /^(.+)-ch([1-9][0-9]*)$/;
+
+/* v1.5 双范式：范式来自清单的 assay 列（缺列 = TST），一份清单只能一个范式。
+ * 收尾必答第一题按范式换问题**并换导出列**——不共用一列。理由是产品语义不同：
+ * TST 的 TailClimbing 在 primitives 里是**试次级排除区**，FST 的「靠壁不动」对应
+ * WallSupportedFloat，是一个正常类别。共用一列会让 FST 的答案被当成排除信号。 */
+const ASSAYS = {
+  TST: { q1: "出现过爬自己的尾巴", q1_col: "tail_climbing", requirePrefix: false },
+  FST: { q1: "靠着杯壁或杯里的支架不动过", q1_col: "wall_support_still", requirePrefix: true },
+};
+/* 两列都写，没问到的那一列留空（不是 false）：DP-032——空 = 没问过，false = 问了答没有。
+ * asked=false（清单声明的空位）时两列都留空：对着一个没有鼠的杯子答"没爬尾巴"是假数据。 */
+function q1Fields(checked, asked) {
+  const out = { tail_climbing: null, wall_support_still: null };
+  if (asked !== false) out[ASSAYS[state.assay].q1_col] = checked;
+  return out;
+}
+function parseFlag(raw) {
+  const v = (raw || "").trim().toLowerCase();
+  if (v === "" || v === "false" || v === "0" || v === "no") return false;
+  if (v === "true" || v === "1" || v === "yes") return true;
+  throw "declared_empty 只能是 true/false（留空=false），得到：" + raw;
+}
+function applyAssay() {
+  const a = ASSAYS[state.assay];
+  $("pageTitle").textContent = state.assay + ' 人工计时（秒表法）· 只评"在动"，看不见任何软件结果';
+  $("q1Label").textContent = a.q1;
+}
 
 /* localStorage 续评。v1.2 起记录含重做留痕；前缀升 v2 使旧版半成品存档失效
  * （旧存档没有 first_pass 字段结构，混用会污染审计）。
@@ -198,7 +247,7 @@ function saveProgress() {
   try {
     localStorage.setItem(LS(), JSON.stringify({
       seed: state.seed, order: state.fullOrder.map(t => t.trial_id),
-      done: state.done, ts: Date.now(),
+      assay: state.assay, done: state.done, ts: Date.now(),
     }));
   } catch (e) { /* 隐私模式等：无存档继续，导出不受影响 */ }
 }
@@ -218,6 +267,7 @@ document.addEventListener("DOMContentLoaded", () => {
     $(id).onclick = () => setRate(r);
   }
   setRate(1);
+  $("emptyBtn").onclick = markDeclaredEmpty;
   $("redoBtn").onclick = openRedoPanel;
   $("redoCancel").onclick = () => { $("redoPanel").hidden = true; };
   $("redoGo").onclick = startRedo;
@@ -243,14 +293,34 @@ function parseManifest(text) {
   const lines = text.replace(/^﻿/, "").split(/\r?\n/).filter(l => l.trim());
   const head = lines.shift().split(",").map(s => s.trim());
   const iT = head.indexOf("trial_id"), iV = head.indexOf("video_filename");
+  const iA = head.indexOf("assay");   // 可选列；没有这一列 = 老的纯 TST 清单，照旧能用
+  const iE = head.indexOf("declared_empty");   // 可选列；声明"这个位置本来就没有动物"
   if (iT < 0 || iV < 0) throw "清单缺少列头 trial_id,video_filename";
-  return lines.map(l => {
+  const rows = lines.map(l => {
     const c = l.split(",");
     const tid = c[iT].trim(), fn = c[iV].trim();
+    const raw = iA < 0 ? "" : (c[iA] || "").trim().toUpperCase();
+    const assay = raw === "" ? "TST" : raw;
+    if (!ASSAYS[assay]) throw "assay 只能是 TST 或 FST（留空=TST），得到：" + raw;
     if (!TRIAL_ID_RE.test(tid)) throw "trial_id 格式应为 <video>-ch<N>，得到：" + tid;
+    /* FST 录像名与 TST 切片名只差一个空格/下划线（`10mg 2周` vs `10mg_2周`）⇒
+     * SOP §166 的 `FST-` 前缀是**防撞的**，不是装饰，所以在这里硬校验。 */
+    if (ASSAYS[assay].requirePrefix && !tid.startsWith("FST-")) {
+      throw "FST 的 trial_id 必须写成 FST-<录像名>-ch<N>（SOP §166），得到：" + tid;
+    }
+    if (!ASSAYS[assay].requirePrefix && tid.startsWith("FST-")) {
+      throw "trial_id 带 FST- 前缀但 assay 不是 FST：" + tid;
+    }
     if (/[",;]/.test(fn)) throw "video_filename 不支持引号/分号：" + fn;
-    return { trial_id: tid, filename: fn };
+    return { trial_id: tid, filename: fn, assay: assay,
+             declared_empty: iE < 0 ? false : parseFlag(c[iE]) };
   });
+  if (!rows.length) throw "清单里没有任何试次";
+  /* 一份清单 = 一个范式。混排会让同一次会话里两种问题交替出现、导出列也混，
+   * 而且两个范式的窗口口径不同 ⇒ 宁可拒收。 */
+  const kinds = Array.from(new Set(rows.map(r => r.assay)));
+  if (kinds.length > 1) throw "同一份清单里混了 " + kinds.join(" 和 ") + "；一份清单只能一个范式，请分开两份";
+  return rows;
 }
 
 function onStart() {
@@ -266,12 +336,14 @@ function onStart() {
   mf.text().then((text) => {
     let manifest;
     try { manifest = parseManifest(text); } catch (e) { $("setupErr").textContent = String(e); return; }
+    state.assay = manifest[0].assay; applyAssay();
     const byName = new Map(vids.map(v => [v.name, v]));
     const extra = vids.filter(v => !manifest.some(m => m.filename === v.name)).map(v => v.name);
     if (extra.length) { $("setupErr").textContent = "多余视频（不在清单）：\n" + extra.join("\n"); state.confirmBatch = null; return; }
     const seed = Number($("seed").value);
     const full = shuffled(manifest, mulberry32(seed)).map(m => ({
-      trial_id: m.trial_id, filename: m.filename, file: byName.get(m.filename) || null, pos: 0 }));
+      trial_id: m.trial_id, filename: m.filename, file: byName.get(m.filename) || null,
+      declared_empty: m.declared_empty, pos: 0 }));
     full.forEach((m, i) => { m.pos = i + 1; });
     const missing = full.filter(m => !m.file);
     if (missing.length) {
@@ -318,9 +390,15 @@ function onResume() {
     const byName = new Map(vids.map(v => [v.name, v]));
     const tid2m = new Map(manifest.map(m => [m.trial_id, m]));
     if (saved.order.some(t => !tid2m.has(t))) { $("setupErr").textContent = "清单与上次不一致，无法续评"; return; }
+    if (saved.assay && saved.assay !== manifest[0].assay) {
+      $("setupErr").textContent = "上次评的是 " + saved.assay + "，这份清单是 " + manifest[0].assay
+        + "，不能混着续评"; return;
+    }
+    state.assay = manifest[0].assay; applyAssay();
     state.seed = saved.seed;
     state.fullOrder = saved.order.map((t, i) => ({ trial_id: t, filename: tid2m.get(t).filename,
-      file: byName.get(tid2m.get(t).filename) || null, pos: i + 1 }));
+      file: byName.get(tid2m.get(t).filename) || null,
+      declared_empty: tid2m.get(t).declared_empty, pos: i + 1 }));
     state.done = saved.done || []; state.files = vids;
     rebuildQueue();
     beginSession();
@@ -371,7 +449,24 @@ function startRedo() {
   if (!m || !state.done.some(d => d.trial_id === tid)) return;
   state.redoTrialId = tid;
   $("redoPanel").hidden = true;
-  loadTrial({ trial_id: m.trial_id, file: m.file });   // 重做不动队列，按 trial_id 找回记录
+  // 重做不动队列，按 trial_id 找回记录
+  loadTrial({ trial_id: m.trial_id, file: m.file, declared_empty: m.declared_empty });
+}
+
+/* 清单声明的空位（如 `抑郁8-10` 第 4 个杯子只有水）：SOP 说"不要评它"，
+ * 但收尾问卷本来只在视频播完后才出现 ⇒ 评分员得对着空杯子干看 7.8 分钟。
+ * 这个按钮是**清单授权的**跳过：只有 declared_empty=true 的试次才有，
+ * 评分员自己不能跳过任何试次。跳过的试次 window_s / 两个问句列全留空
+ * （从没播过、也没问过 ⇒ 空，不是 0、也不是 false）。 */
+function markDeclaredEmpty() {
+  if (!state.declaredEmpty || state.started) return;
+  $("qUnsc").checked = true;
+  if (!$("qNote").value.trim()) $("qNote").value = "全程无鼠（清单声明）";
+  state.windowS = null;
+  $("beginBtn").hidden = true; $("emptyBox").hidden = true;
+  $("q1Row").hidden = true;             // 对不存在的鼠不提问
+  $("quiz").hidden = false;
+  $("nextBtn").focus();
 }
 
 function loadTrial(t) {
@@ -382,8 +477,11 @@ function loadTrial(t) {
     + " · 本批剩 " + Math.max(0, state.queue.length - state.qidx);
   state.acc = mobileAccumulator();
   state.started = false;
-  state.lastTime = undefined; state.maxT = 0;
+  state.lastTime = undefined; state.maxT = 0; state.windowS = null;
+  state.declaredEmpty = !!t.declared_empty;
   $("quiz").hidden = true; $("beginBtn").hidden = false;
+  $("emptyBox").hidden = !state.declaredEmpty;
+  $("q1Row").hidden = false;
   $("redoPanel").hidden = true; $("redoErr").textContent = "";
   $("qTail").checked = false; $("qUnsc").checked = false; $("qNote").value = "";
   const v = $("vid");
@@ -453,6 +551,9 @@ function bindKeys() {
 function onVideoEnded() {
   const v = $("vid");
   const dur = v.duration || state.maxT;
+  /* 窗口 = 本段录像时长，随试次记账。TST 是 360 s；FST 各段 362–468 s 不等，
+   * 且入水时刻不在画面内 ⇒ 窗口只能来自「这段录像有多长」，不许写死常数（DP-057）。 */
+  state.windowS = Math.round(dur * 100) / 100;
   if (state.acc.holding) state.acc.add(state.lastTime || 0, dur);
   state.acc.endHold(dur);
   state.started = false;
@@ -466,9 +567,13 @@ function onVideoEnded() {
 function nextTrial() {
   const unsc = $("qUnsc").checked;
   const mobile = unsc ? null : Math.round(state.acc.value * 100) / 100;
-  if (mobile !== null && (mobile < 0 || mobile > 360 + 0.5)) {
-    alert("内部错误：秒数越界，请联系开发"); return;
+  /* 上界是**本段录像时长**，不是写死的 360——FST 录像 362–468 s，
+   * 写死 360 会让评满的 FST 试次弹「越界」卡在这一场过不去。 */
+  const cap = state.windowS !== null ? state.windowS : 360;
+  if (mobile !== null && (mobile < 0 || mobile > cap + 0.5)) {
+    alert("内部错误：秒数越界（" + mobile + " s > 窗口 " + cap + " s），请联系开发"); return;
   }
+  const asked = !$("q1Row").hidden;     // 清单声明的空位不提问 ⇒ 两个问句列都留空
   const userNote = $("qNote").value.trim();
   const note = state.rate !== 1 ? (userNote ? userNote + "; " : "") + "慢放" + state.rate + "x" : userNote;
 
@@ -478,11 +583,13 @@ function nextTrial() {
     const d = state.done.find(x => x.trial_id === state.redoTrialId);
     if (!d.first_pass) {
       d.first_pass = { mobile_seconds: d.mobile_seconds, tail_climbing: d.tail_climbing,
+                       wall_support_still: d.wall_support_still, window_s: d.window_s,
                        unscoreable: d.unscoreable, note: d.note, scored_at: d.scored_at,
                        holds: d.holds, playback_rate: d.playback_rate };
     }
     d.holds = state.acc.holds;
-    d.mobile_seconds = mobile; d.tail_climbing = $("qTail").checked;
+    d.mobile_seconds = mobile; d.window_s = state.windowS;
+    Object.assign(d, q1Fields($("qTail").checked, asked));
     d.unscoreable = unsc; d.note = note;
     d.scored_at = new Date().toISOString().slice(0, 10);
     d.redo_count = (d.redo_count || 0) + 1;
@@ -496,17 +603,20 @@ function nextTrial() {
   }
 
   const q = state.queue[state.qidx];
-  state.done.push({
+  state.done.push(Object.assign({
     trial_id: q.trial_id,
+    assay: state.assay,
     mobile_seconds: mobile,
-    tail_climbing: $("qTail").checked,
+    window_s: state.windowS,
+    declared_empty: !!q.declared_empty,
+  }, q1Fields($("qTail").checked, asked), {
     unscoreable: unsc,
     note,
     playback_rate: state.rate,
     holds: state.acc.holds,   // 审计侧记录，CSV 八列 schema 不变
     presentation_order: q.pos,          // 全局呈现序（跨批次不重不漏）
     scored_at: new Date().toISOString().slice(0, 10),
-  });
+  }));
   state.qidx += 1;
   saveProgress();
   if (state.qidx >= state.queue.length) {
@@ -527,14 +637,19 @@ function batchDone() {
 
 /* ---------------- 完成与导出 ---------------- */
 function csvFromDone() {
-  const cols = ["scorer_id", "trial_id", "mobile_seconds", "tail_climbing",
+  /* v1.5 加了 assay / window_s / wall_support_still 三列（纯追加，列序不敏感：
+   * 入库侧一律 DictReader）。没问到的布尔列写空串——空 = 没问过（DP-032）。 */
+  const cols = ["scorer_id", "trial_id", "assay", "mobile_seconds", "window_s",
+                "tail_climbing", "wall_support_still",
                 "unscoreable", "note", "scored_at", "presentation_order"];
   const esc = (s) => /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+  const b = (x) => (x === null || x === undefined) ? "" : (x ? "true" : "false");
   // 分批后 done 是完成序——导出前按呈现序排，报表更好读（§2.1 校验本来就不依赖行序）
-  const rows = state.done.slice().sort((a, b) => a.presentation_order - b.presentation_order).map(d => [
-    state.scorer, d.trial_id,
+  const rows = state.done.slice().sort((a, b2) => a.presentation_order - b2.presentation_order).map(d => [
+    state.scorer, d.trial_id, d.assay || state.assay,
     d.mobile_seconds === null ? "" : d.mobile_seconds.toFixed(1),
-    d.tail_climbing ? "true" : "false",
+    (d.window_s === null || d.window_s === undefined) ? "" : d.window_s.toFixed(2),
+    b(d.tail_climbing), b(d.wall_support_still),
     d.unscoreable ? "true" : "false",
     // 重做标记随导出生成（不污染存储的 note 本体，重复重做不会堆叠"重评×N"）
     esc(d.redo_count ? (d.note ? d.note + "; " : "") + "重评×" + d.redo_count : d.note),
@@ -554,13 +669,16 @@ function exportSnapshot(final) {
   const date = new Date().toISOString().slice(0, 10);
   const n = state.done.length, m = state.fullOrder.length;
   const suffix = final ? "" : "_partial" + n + "of" + m;
-  download("human_scores_" + state.scorer + "_" + date + suffix + ".csv", csvFromDone(), "text/csv");
-  download("timer_audit_" + state.scorer + "_" + date + suffix + ".json", JSON.stringify({
+  download("human_scores_" + state.assay + "_" + state.scorer + "_" + date + suffix + ".csv",
+           csvFromDone(), "text/csv");
+  download("timer_audit_" + state.assay + "_" + state.scorer + "_" + date + suffix + ".json",
+           JSON.stringify({
     format: "depressionplex.stopwatch-audit.v1",
+    assay: state.assay,
     partial: !final, done_count: n, total_trials: m,
     scorer_id: state.scorer, seed: state.seed,
     delivered_order: state.fullOrder.map(o => o.trial_id),   // 恒为该种子序全量，含未评场次
-    tool_version: "v1.4", exported_at: new Date().toISOString(), records: state.done,
+    tool_version: "v1.5", exported_at: new Date().toISOString(), records: state.done,
   }, null, 2), "application/json");
 }
 
