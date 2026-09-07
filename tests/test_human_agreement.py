@@ -21,6 +21,7 @@ from depressionplex.human_agreement import (
     TST_WINDOW_S,
     TrialRejected,
     build_table,
+    crosscheck_summary_csv,
     load_audit_json,
     load_salvaged_csv,
     table_csv_text,
@@ -266,3 +267,102 @@ def test_salvaged_loader_passthrough() -> None:
     assert rows[0].mobile_union_s == 112.36 and rows[0].immobility_s == 247.64
     assert rows[0].naive_inflation_s is None  # 抢救件无 holds 明细，如实留空不猜
     assert all("union_precomputed_by_salvage_tool" in r.warnings for r in rows)
+# ---------------------------------------------------------------- DP-076：配套 CSV 交叉核对
+
+
+def _write_summary_csv(tmp: Path, name: str, recs) -> Path:
+    """写一份 `human_scores_*.csv`。recs 里每项是 (trial_id, mobile_seconds, 呈现序)。"""
+    lines = ["scorer_id,trial_id,mobile_seconds,tail_climbing,unscoreable,"
+             "note,scored_at,presentation_order"]
+    for tid, mob, order in recs:
+        lines.append("测试员,%s,%s,false,false,,2026-09-07,%d" % (tid, mob, order))
+    p = tmp / name
+    p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return p
+
+
+def _two_trial_rows(tmp: Path):
+    a = _mk_record(trial_id="v-ch1", mobile=10.0)
+    b = _mk_record(trial_id="v-ch2", mobile=12.0)
+    b["presentation_order"] = 2
+    _, rows = load_audit_json(_write_doc(tmp, [a, b]))
+    return rows
+
+
+def test_crosscheck_json_only_trial_is_reported_not_crashed() -> None:
+    """DP-076 回归：JSON 有、CSV 无 这条分支原本 NameError——**报错的路径自己炸了**。
+
+    干净数据永远走不到它，所以这个缺陷能一直躺着。测试必须直接踩这条分支。
+    """
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        rows = _two_trial_rows(tmp)
+        p = _write_summary_csv(tmp, "human_scores_测试员_2026-09-07_partial1of2.csv",
+                               [("v-ch1", "10.0", 1)])
+        out = crosscheck_summary_csv(rows, p)
+        assert out == ["human_scores_测试员_2026-09-07_partial1of2.csv: "
+                       "JSON 有 CSV 无 → 测试员/v-ch2"], out
+
+
+def test_crosscheck_judges_missing_on_the_union_of_partial_exports() -> None:
+    """分次导出的两份 CSV 各覆盖一半 ⇒ 合起来不缺，**不许逐份判**。
+
+    逐份判的话每份都会把另一份的试次报成缺失——纯误报，而误报会让人学会忽略这张表。
+    """
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        rows = _two_trial_rows(tmp)
+        p1 = _write_summary_csv(tmp, "human_scores_测试员_2026-09-06_partial1of2.csv",
+                                [("v-ch1", "10.0", 1)])
+        p2 = _write_summary_csv(tmp, "human_scores_测试员_2026-09-07_partial1of2.csv",
+                                [("v-ch2", "12.0", 2)])
+        assert crosscheck_summary_csv(rows, [p1, p2]) == []
+        # 顺序不影响结论
+        assert crosscheck_summary_csv(rows, [p2, p1]) == []
+
+
+def test_crosscheck_value_mismatch_stays_per_file() -> None:
+    """并集只用于判缺失；逐条数值核对仍是逐文件的，报错必须点出**哪一份**。"""
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        rows = _two_trial_rows(tmp)
+        p1 = _write_summary_csv(tmp, "human_scores_测试员_2026-09-06_partial1of2.csv",
+                                [("v-ch1", "10.0", 1)])
+        p2 = _write_summary_csv(tmp, "human_scores_测试员_2026-09-07_partial1of2.csv",
+                                [("v-ch2", "99.9", 2)])
+        out = crosscheck_summary_csv(rows, [p1, p2])
+        assert len(out) == 1, out
+        assert "2026-09-07" in out[0] and "mobile_seconds" in out[0]
+        assert "2026-09-06" not in out[0]
+
+
+def test_crosscheck_refuses_empty_path_list() -> None:
+    """一份 CSV 都没给却返回空清单 = 静默假装「全部一致」⇒ 必须炸。"""
+    with tempfile.TemporaryDirectory() as td:
+        rows = _two_trial_rows(Path(td))
+        try:
+            crosscheck_summary_csv(rows, [])
+            assert False, "空路径列表必须拒绝"
+        except ValueError as e:
+            assert "假装" in str(e)
+
+
+def test_build_table_handles_multiple_partial_exports_per_scorer() -> None:
+    """端到端：一个评分员两份分次导出（现在的常态）必须核对干净。
+
+    这正是 2026-09-07 那批新标注的形状——两份都叫 `partial4of27`、各覆盖不同的 4 个
+    试次。改之前 `build_table` 在这里直接 NameError，新数据连校验都进不去。
+    """
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        a = _mk_record(trial_id="v-ch1", mobile=10.0)
+        b = _mk_record(trial_id="v-ch2", mobile=12.0)
+        b["presentation_order"] = 2
+        _write_doc(tmp, [a, b])
+        _write_summary_csv(tmp, "human_scores_测试员_2026-09-06_partial1of2.csv",
+                           [("v-ch1", "10.0", 1)])
+        _write_summary_csv(tmp, "human_scores_测试员_2026-09-07_partial1of2.csv",
+                           [("v-ch2", "12.0", 2)])
+        res = build_table(tmp)
+        assert res.n_trials == 2
+        assert res.crosscheck_mismatches == [], res.crosscheck_mismatches
