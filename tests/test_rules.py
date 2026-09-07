@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from depressionplex.assay_core import rules as R
+from depressionplex.assay_core import rad, rules as R
 from synth import draw_body, pendulum_series
 
 
@@ -190,3 +190,40 @@ def test_passive_swing_is_fps_invariant() -> None:
     lab50 = R.label_tst_events(
         R.build_tst_features(m50, suspension=piv, fps=50.0))
     assert lab50.passive_swing.any(), "高帧率下周期归一化 gap 应保住事件"
+
+
+def test_features_bl_injection_matches_internal_estimate() -> None:
+    """注入 `bl` 必须与不注入**逐位相同**（DP-058 的兼容性锚）。
+
+    `build_tst_features(bl=...)` 加进来的唯一目的是省掉重复计算并让分母可审计，
+    **不是改判据**。所以缺省路径与显式传 `trial_body_length` 必须一字不差；
+    这条一旦红，说明有人顺手改了归一化，而不是接了个参数。
+    """
+    masks, piv = _pendulum_masks(75, 3)
+    bl = rad.trial_body_length(masks)
+    assert bl > 0
+    a = R.build_tst_features(masks, suspension=piv, fps=25.0)
+    b = R.build_tst_features(masks, suspension=piv, fps=25.0, bl=bl)
+    np.testing.assert_array_equal(np.isnan(a.residual), np.isnan(b.residual))
+    m = ~np.isnan(a.residual)
+    np.testing.assert_array_equal(a.residual[m], b.residual[m])
+    np.testing.assert_array_equal(a.rho_hind[~np.isnan(a.rho_hind)],
+                                  b.rho_hind[~np.isnan(b.rho_hind)])
+
+
+def test_features_bl_scales_residual_quadratically() -> None:
+    """分母是 BL²：BL 折半 ⇒ 残差 ×4。这条证明这个旋钮**是活的**。
+
+    为什么要单独钉住：DP-058 第一版探针把 BL 在 ×0.70…×1.30 之间扰了一遍，
+    immobility 全幅摆动 **0.0 s**——因为它扰的是 `label_tst_events(bl=)`
+    （只管爬尾巴，本批 0 段），而真正的分母在 `decompose_series` 里自己算。
+    有了这条测试，那种"扰了个不存在的旋钮"的探针一开跑就能被识破。
+    """
+    masks, piv = _pendulum_masks(75, 3)
+    bl = rad.trial_body_length(masks)
+    base = R.build_tst_features(masks, suspension=piv, fps=25.0, bl=bl)
+    half = R.build_tst_features(masks, suspension=piv, fps=25.0, bl=bl / 2.0)
+    m = ~np.isnan(base.residual) & ~np.isnan(half.residual)
+    assert m.sum() > 0
+    np.testing.assert_allclose(half.residual[m], base.residual[m] * 4.0,
+                               rtol=1e-9, atol=0.0)
