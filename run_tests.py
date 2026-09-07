@@ -22,7 +22,7 @@ TEST_MODULES = ("test_bouts", "test_rad", "test_geometry", "test_segment",
                 "test_scorer_disagreement", "test_human_agreement",
                 "test_lovo_cv", "test_trial_report",
                 "test_maskseq", "test_video", "test_runner",
-                "test_analyze_cli",
+                "test_analyze_cli", "test_timeline",
                 # 元守卫：新增 tests/test_*.py 必须同时进这张表，否则此测试变红
                 "test_run_tests_registry")
 
