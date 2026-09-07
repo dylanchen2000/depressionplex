@@ -1,0 +1,29 @@
+trial_id,video_filename,assay,declared_empty
+FST-10mg 2周-ch1,10mg 2周.mp4,FST,false
+FST-10mg 2周-ch2,10mg 2周.mp4,FST,false
+FST-10mg 2周-ch3,10mg 2周.mp4,FST,false
+FST-10mg 2周-ch4,10mg 2周.mp4,FST,false
+FST-20mg 2周-ch1,20mg 2周.mp4,FST,false
+FST-20mg 2周-ch2,20mg 2周.mp4,FST,false
+FST-20mg 2周-ch3,20mg 2周.mp4,FST,false
+FST-20mg 2周-ch4,20mg 2周.mp4,FST,false
+FST-20mg1周-ch1,20mg1周.mp4,FST,false
+FST-20mg1周-ch2,20mg1周.mp4,FST,false
+FST-20mg1周-ch3,20mg1周.mp4,FST,false
+FST-20mg1周-ch4,20mg1周.mp4,FST,false
+FST-抑郁4-7-ch1,抑郁4-7.mp4,FST,false
+FST-抑郁4-7-ch2,抑郁4-7.mp4,FST,false
+FST-抑郁4-7-ch3,抑郁4-7.mp4,FST,false
+FST-抑郁4-7-ch4,抑郁4-7.mp4,FST,false
+FST-抑郁8-10-ch1,抑郁8-10.mp4,FST,false
+FST-抑郁8-10-ch2,抑郁8-10.mp4,FST,false
+FST-抑郁8-10-ch3,抑郁8-10.mp4,FST,false
+FST-抑郁8-10-ch4,抑郁8-10.mp4,FST,true
+FST-正常1-4-ch1,正常1-4.mp4,FST,false
+FST-正常1-4-ch2,正常1-4.mp4,FST,false
+FST-正常1-4-ch3,正常1-4.mp4,FST,false
+FST-正常1-4-ch4,正常1-4.mp4,FST,false
+FST-正常5+抑郁1-3-ch1,正常5+抑郁1-3.mp4,FST,false
+FST-正常5+抑郁1-3-ch2,正常5+抑郁1-3.mp4,FST,false
+FST-正常5+抑郁1-3-ch3,正常5+抑郁1-3.mp4,FST,false
+FST-正常5+抑郁1-3-ch4,正常5+抑郁1-3.mp4,FST,false
