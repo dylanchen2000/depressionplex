@@ -53,6 +53,30 @@ _SCORER_IN_NAME_RE = re.compile(r"^human_scores_(.+?)_\d{4}-\d{2}-\d{2}")
 
 TRIAL_ID_RE = re.compile(r"^(?P<video>.+)-ch(?P<chamber>[1-9][0-9]*)$")
 
+
+def _is_fst(rec: dict[str, Any], trial_id: str) -> bool:
+    """FST 判据用工具自己的两个约定：记录里的 `assay`，或 trial_id 的 `FST-` 前缀
+    （工具 v1.5 对 FST 设 requirePrefix=true，前缀是规范而非习惯）。"""
+    return (str(rec.get("assay", "")).upper() == "FST"
+            or trial_id.startswith("FST-"))
+
+
+def window_bound_s(rec: dict[str, Any]) -> tuple[float, bool]:
+    """本试次的时基上界，返回 (上界秒, 是否取自记录本身)。
+
+    秒表工具 v1.5 起逐场落 `window_s` ＝ **该场录像实长**；v1.x 旧件没有这一列。
+    FST 录像实测 362.20–467.56 s，若沿用 TST 的 360 s 当上界，会把每段录像尾部
+    2–108 s 全判成越窗，并让 `immobility_s` 算成负数——这是分母错，不是数据错。
+
+    **本函数不发明窗口。** 要不要把 FST 截成 2–6 min 计分窗是 DP-057/DP-074
+    未决的口径问题（开录时鼠已在水里、入水时刻不可知），这里只如实用录像实长。
+    `window_s` 缺失时退回 TST_WINDOW_S，且调用方对 FST 记录必须打标。
+    """
+    w = _f(rec.get("window_s"))
+    if w is not None and w > 0:
+        return w, True
+    return TST_WINDOW_S, False
+
 _TRUES = {"true", "1", "yes", "是"}
 _FALSES = {"false", "0", "no", "否"}
 
@@ -177,7 +201,7 @@ class TrialRow:
     holds_unsorted: bool
     zero_length_segments: int
     mobile_union_s: float | None   # rule 1 的唯一 mobile 口径；rejected 为 None
-    immobility_s: float | None     # TST_WINDOW_S − mobile_union_s
+    immobility_s: float | None     # 录像实长（window_s；缺则 TST_WINDOW_S）− mobile_union_s
     mobile_seconds_DISCARDED: float | None
     naive_inflation_s: float | None    # rule 2 记账：naive − union（乱序才有意义）
     per_key_excess_wallclock_s: float | None  # (discarded−union)/段数/倍速（§2 证据链）
@@ -304,14 +328,18 @@ def _row_from_record(rec: dict, *, scorer: str, seed: Any,
         if a < -TIMESTAMP_RESOLUTION_S or b < -TIMESTAMP_RESOLUTION_S:
             warns.append("hold_negative_time")
             break
+    wbound, w_from_rec = window_bound_s(rec)
+    if not w_from_rec and _is_fst(rec, trial_id):
+        # TST 的 360 s 是有据的名义窗口；FST 没有，缺 window_s 就是分母不明
+        warns.append("fst_window_s_missing:fallback_360s")
     for b in (float(y) for _, y in holds):
-        if b > TST_WINDOW_S + TIMESTAMP_RESOLUTION_S:
+        if b > wbound + TIMESTAMP_RESOLUTION_S:
             warns.append("hold_beyond_window")
             break
 
     status = STATUS_UNSCOREABLE if unscoreable else STATUS_ACCEPTED
     union = u.total_s if status == STATUS_ACCEPTED else None
-    immob = round(TST_WINDOW_S - u.total_s, 2) if status == STATUS_ACCEPTED else None
+    immob = round(wbound - u.total_s, 2) if status == STATUS_ACCEPTED else None
     inflation = round(u.naive_sum_s - u.total_s, 2) if (u.unsorted and status == STATUS_ACCEPTED) else None
     if inflation is not None and inflation >= NAIVE_INFLATION_FLAG_S:
         warns.append("naive_sum_inflation>=5s")

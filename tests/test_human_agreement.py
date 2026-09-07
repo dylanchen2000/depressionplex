@@ -175,6 +175,57 @@ def test_window_exceeded_alarms_not_clamped() -> None:
         assert rows[0].immobility_s == TST_WINDOW_S - 400.0  # 负数可见，让下游炸
 
 
+def test_window_bound_follows_recording_length_not_tst_360() -> None:
+    """FST 录像比 360 s 长，分母必须是该场 window_s——否则 immobility 算成负数。"""
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        rec = _mk_record(trial_id="FST-抑郁8-10-ch3", mobile=400.0,
+                         holds=[[0.0, 400.0]])
+        rec["assay"] = "FST"
+        rec["window_s"] = 467.56
+        p = _write_doc(tmp, [rec], "timer_audit_FST_测试员_a.json")
+        _, rows = load_audit_json(p)
+        r = rows[0]
+        assert r.mobile_union_s == 400.0
+        assert r.immobility_s == round(467.56 - 400.0, 2)      # 67.56，不是 −40
+        assert "hold_beyond_window" not in r.warnings          # 400 < 467.56，没越窗
+        assert "fst_window_s_missing:fallback_360s" not in r.warnings
+
+
+def test_fst_without_window_s_is_flagged_not_silently_360() -> None:
+    """FST 记录缺 window_s ⇒ 分母不明，必须打标；不许静默按 360 s 算。"""
+    with tempfile.TemporaryDirectory() as td:
+        rec = _mk_record(trial_id="FST-抑郁8-10-ch3", mobile=300.0,
+                         holds=[[0.0, 300.0]])
+        p = _write_doc(Path(td), [rec], "timer_audit_FST_测试员_b.json")
+        _, rows = load_audit_json(p)
+        assert "fst_window_s_missing:fallback_360s" in rows[0].warnings
+        assert rows[0].immobility_s == TST_WINDOW_S - 300.0    # 兜底如实，不隐瞒
+
+
+def test_beyond_window_still_alarms_against_own_window_s() -> None:
+    """越窗判据跟着本场 window_s 走：超过自己的录像实长照样报警、照样不 clamp。"""
+    with tempfile.TemporaryDirectory() as td:
+        rec = _mk_record(trial_id="FST-抑郁8-10-ch3", mobile=380.0,
+                         holds=[[0.0, 380.0]])
+        rec["assay"] = "FST"
+        rec["window_s"] = 362.20
+        p = _write_doc(Path(td), [rec], "timer_audit_FST_测试员_c.json")
+        _, rows = load_audit_json(p)
+        assert "hold_beyond_window" in rows[0].warnings
+        assert rows[0].mobile_union_s == 380.0                 # 如实，不截到 362.20
+        assert rows[0].immobility_s == round(362.20 - 380.0, 2)  # 负数可见
+
+
+def test_tst_legacy_files_unchanged_by_window_bound_change() -> None:
+    """旧 TST 件没有 window_s，行为必须与改动前逐字一致（历史真值不许被搅动）。"""
+    with tempfile.TemporaryDirectory() as td:
+        p = _write_doc(Path(td), [_mk_record(mobile=50.0, holds=[[0.0, 100.0]])])
+        _, rows = load_audit_json(p)
+        assert rows[0].immobility_s == TST_WINDOW_S - 100.0
+        assert not [w for w in rows[0].warnings if "window_s_missing" in w]
+
+
 def test_unknown_format_rejected() -> None:
     with tempfile.TemporaryDirectory() as td:
         p = Path(td) / "timer_audit_w.json"
