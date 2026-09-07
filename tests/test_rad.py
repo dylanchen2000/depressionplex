@@ -14,15 +14,29 @@ from depressionplex.assay_core import silhouette as sil
 import synth
 
 
-def _residuals(masks: list[np.ndarray], lag: int = 1) -> np.ndarray:
-    """用试次级 BL 归一化——与正式分析口径一致。"""
+def _residuals(masks: list[np.ndarray], lag: int = 1,
+               mode: str = "binary_xor") -> np.ndarray:
+    """用试次级 BL 归一化——与正式分析口径一致。
+
+    `mode` **必须显式**，缺省钉在 `"binary_xor"`：下面三条基线数字（0.0070/0.0103/
+    0.0202…）是 2026-08-24 在**旧口径**上实测的，它们记的是「旧口径当时是什么样」，
+    换口径后那些数字就不再描述同一个量 ⇒ 与其跟着默认值漂，不如把它们焊死在
+    产生它们的那个口径上。新口径的基线另立（见 `_SDF_BASELINE`）。
+    """
     bl = R.trial_body_length(masks)
     out = []
     for i in range(lag, len(masks)):
-        res = R.decompose(masks[i - lag], masks[i], lag=lag, bl=bl)
+        res = R.decompose(masks[i - lag], masks[i], lag=lag, bl=bl,
+                          residual_mode=mode)
         assert res is not None
         out.append(res.residual)
     return np.asarray(out)
+
+
+def _shift(du: float, dv: float, c: tuple[float, float]) -> R.RigidTransform:
+    """纯平移的 RigidTransform：把中心从 c−(du,dv) 搬到 c。"""
+    return R.RigidTransform(dx=du, dy=dv, dtheta=0.0, scale=1.0,
+                            c_prev=(c[0] - du, c[1] - dv), c_cur=c)
 
 
 def test_pendulum_residual_near_zero() -> None:
@@ -237,3 +251,180 @@ def test_refine_default_is_off() -> None:
     assert sig.parameters["refine"].default is False
     sig2 = inspect.signature(R.decompose)
     assert sig2.parameters["refine"].default is False
+
+
+# ------------------------------------------------------------- DP-071 距离场口径
+
+#: 2026-09-07 在合成序列上实测的**新口径**基线（`sdf_coverage`）。
+#: 钟摆 mean 0.01277 / max 0.01456；关节 mean 0.04111 / min 0.02305。
+#: 新口径的噪声底比旧口径高（旧：0.00760 / 0.01025），这**不是回退**：
+#: 旧口径的钟摆残差之所以低，是因为 0.5 px 死区把亚像素失配四舍五入掉了
+#: （DP-071：不动帧估计位移中位 0.106 px、逐位空转率中位 78%）。
+#: 新口径把那部分失配照实算进来 ⇒ 底抬高、区分度收窄，**但仍不重叠**。
+#: 这两组数字都写在这里，是为了让「换口径的代价」始终看得见。
+_SDF_BASELINE = {"pend_mean": 0.01277, "pend_max": 0.01456,
+                 "arti_mean": 0.04111, "arti_min": 0.02305}
+
+
+def test_coverage_reconstructs_mask_exactly() -> None:
+    """`coverage(signed_distance(m))` 必须**逐位**还原 m，且没有任何小数像素。
+
+    这条钉住半像素约定：内部像素 phi <= −0.5、外部 >= +0.5 ⇒ clip 后只有 0 和 1。
+    它同时是"不动 ⇒ 0 残差"的前提——若这里出现小数，静止帧就会凭空长出残差，
+    那正是 DP-071 已否掉的"软掩膜"修法的病（软对硬，沿整条轮廓累账）。
+    """
+    for deg in (0.0, 0.3, 1.1):
+        m = synth.draw_body((200, 200), (100.0, 100.0), deg, 60.0, 22.0)
+        cov = R.coverage(R.signed_distance(m))
+        assert np.array_equal(cov > 0.5, m), "还原不出原掩膜"
+        frac = int(np.count_nonzero((cov > 0.0) & (cov < 1.0)))
+        assert frac == 0, "出现了 %d 个小数覆盖率像素" % frac
+
+
+def test_warp_mask_is_dead_below_half_pixel() -> None:
+    """把 DP-071 的病灶本身钉成测试：warp **二值掩膜**在 |u| < 0.5 px 下逐位空转。
+
+    这不是在测一个 bug 等着修——`warp_mask` 的输出是像素掩膜，量化下限就是半像素，
+    这条测试存在的意义是**防止有人以后拿它去算残差**并以为补偿生效了。
+    """
+    m = synth.draw_body((200, 200), (100.0, 100.0), 0.3, 60.0, 22.0)
+    for u in (0.05, 0.1, 0.2, 0.3, 0.45, 0.49):
+        w = np.asarray(R.warp_mask(m, _shift(u, 0.0, (100.0, 100.0)), m.shape), bool)
+        assert np.array_equal(w, m), "u=%.2f 竟然改变了掩膜" % u
+    w = np.asarray(R.warp_mask(m, _shift(1.0, 0.0, (100.0, 100.0)), m.shape), bool)
+    assert not np.array_equal(w, m), "整数位移也没动 ⇒ warp 本身坏了"
+
+
+def test_coverage_response_is_linear_in_subpixel_shift() -> None:
+    """距离场口径对亚像素平移**线性**响应，且比例常数就是轮廓周长。
+
+    实测（60x22 的体，1 px 环带周长 124）：每 1 px 位移 54.0 px 覆盖率差，
+    u=0.05 读 2.700 = 0.05 x 54.0 ⇒ 死区没了，且量纲是"位移 x 周长"。
+    """
+    m = synth.draw_body((200, 200), (100.0, 100.0), 0.3, 60.0, 22.0)
+    phi = R.signed_distance(m)
+    cov = R.coverage(phi)
+    unit = float(np.abs(R.coverage(
+        R.warp_field(phi, _shift(1.0, 0.0, (100.0, 100.0)), m.shape)) - cov).sum())
+    assert unit > 20.0, "1 px 位移只读到 %.1f px，太小" % unit
+    for u in (0.05, 0.1, 0.2, 0.3, 0.45):
+        got = float(np.abs(R.coverage(
+            R.warp_field(phi, _shift(u, 0.0, (100.0, 100.0)), m.shape)) - cov).sum())
+        assert abs(got - u * unit) < 0.02 * unit, (
+            "u=%.2f 非线性：读 %.3f，线性预期 %.3f" % (u, got, u * unit))
+
+
+def test_integer_shift_two_modes_are_identical() -> None:
+    """整数位移下新旧口径必须**逐位相等**——向后兼容的锚。
+
+    在 `warp_mask` 精确的那些位移上（整数）两个口径给同一张图，
+    说明新口径不是"另一个测量"，而是同一个测量在亚像素处的延拓。
+    """
+    m = synth.draw_body((200, 200), (100.0, 100.0), 0.3, 60.0, 22.0)
+    phi = R.signed_distance(m)
+    for du, dv in ((1, 0), (0, 1), (2, -3), (-4, 5)):
+        t = _shift(float(du), float(dv), (100.0, 100.0))
+        hard = np.asarray(R.warp_mask(m, t, m.shape), bool).astype(np.float64)
+        soft = R.coverage(R.warp_field(phi, t, m.shape))
+        assert np.array_equal(hard, soft), "(%d,%d) 两个口径不一致" % (du, dv)
+
+
+def test_identical_frames_give_exactly_zero_residual() -> None:
+    """两帧完全相同 ⇒ 两个口径的残差都**恰好** 0，不是"很小"。
+
+    这条把新口径与 DP-071 已否掉的软掩膜修法分开：软掩膜在静止时也有底噪
+    （实测 u=0.02 就读 8.0 px），本口径静止时逐位相等。
+    """
+    m = synth.draw_body((200, 200), (100.0, 100.0), 0.3, 60.0, 22.0)
+    for mode in R.RESIDUAL_MODES:
+        res = R.decompose(m, m, bl=60.0, residual_mode=mode)
+        assert res is not None
+        assert res.residual == 0.0, "%s 的同帧残差是 %r" % (mode, res.residual)
+        assert all(v == 0.0 for v in res.segment_residuals)
+
+
+def test_residual_mode_is_declared_and_validated() -> None:
+    """口径必须是白名单里的一个，且默认值必须在白名单里。"""
+    assert R.DEFAULT_RESIDUAL_MODE in R.RESIDUAL_MODES
+    m = synth.draw_body((80, 80), (40.0, 40.0), 0.0, 30.0, 12.0)
+    try:
+        R.decompose(m, m, residual_mode="tolerant_xor")
+    except ValueError as exc:
+        assert "residual_mode" in str(exc)
+    else:
+        raise AssertionError("非法口径没有报错")
+
+
+def test_field_cache_must_match_its_mask() -> None:
+    """距离场缓存传错必须**报错**，不许静默改变残差。
+
+    缓存是性能手段，不是第二份真相：`decompose_series` 传的场若和帧对不上，
+    残差会悄悄变，而残差是整条链的核心量。
+    """
+    a = synth.draw_body((120, 120), (60.0, 60.0), 0.0, 40.0, 16.0)
+    b = synth.draw_body((120, 120), (66.0, 60.0), 0.0, 40.0, 16.0)
+    try:
+        R.decompose(a, b, bl=40.0, residual_mode="sdf_coverage",
+                    prev_field=R.signed_distance(b))
+    except ValueError as exc:
+        assert "距离场" in str(exc)
+    else:
+        raise AssertionError("传错的距离场没有被挡下")
+
+
+def test_series_rolling_cache_matches_uncached() -> None:
+    """`decompose_series` 的滚动缓存不得改变任何一个残差值。
+
+    缓存只留最近 max(lags)+1 帧（9000 帧的全量距离场是 2.3 GB，存不下），
+    这条测试钉住"省内存没有省掉正确性"。
+    """
+    masks = synth.pendulum_series(n_frames=10)
+    bl = R.trial_body_length(masks)
+    rows = R.decompose_series(masks, lags=(1, 4), bl=bl,
+                              residual_mode="sdf_coverage")
+    for i in range(len(masks)):
+        for lag in (1, 4):
+            got = rows[i]["residual_lag%d" % lag]
+            if i - lag < 0:
+                assert got is None
+                continue
+            want = R.decompose(masks[i - lag], masks[i], lag=lag, bl=bl,
+                               residual_mode="sdf_coverage")
+            assert want is not None
+            assert abs(got - want.residual) < 1e-12, (
+                "帧 %d lag %d：缓存路径 %r 与直算 %r 不一致"
+                % (i, lag, got, want.residual))
+
+
+def test_both_modes_keep_pendulum_and_articulation_separable() -> None:
+    """**两个口径都必须**做到「钟摆最大 < 关节最小」——这条是方案成立的判据本身。
+
+    新口径的代价在这里量得见：区分度（均值比）由 5.16 收窄到 3.22，
+    间隙由 1.97x 收窄到 1.58x。**收窄但不重叠** ⇒ 仍存在单一门槛能无误分开两类。
+    若哪天这条真的重叠了，说明换来的亚像素灵敏度已经被噪声吃掉，那时该退回旧口径。
+    """
+    for mode in R.RESIDUAL_MODES:
+        pend = _residuals(synth.pendulum_series(), mode=mode)
+        arti = _residuals(synth.articulated_series(), mode=mode)
+        assert float(pend.max()) < float(arti.min()), (
+            "%s 下分布重叠：钟摆 max=%.5f 未低于关节 min=%.5f"
+            % (mode, pend.max(), arti.min()))
+        ratio = float(np.mean(arti) / max(np.mean(pend), 1e-9))
+        assert ratio > 3.0, "%s 下区分度只有 %.1f" % (mode, ratio)
+
+
+def test_sdf_baselines_are_pinned() -> None:
+    """把新口径的合成基线钉住，容差 10%——任何抬高噪声底的改动都应让本条失败。
+
+    与旧口径那条 `test_pendulum_residual_near_zero` 平行：那条守旧口径的
+    0.0070/0.0103，这条守新口径的 0.01277/0.01456。**两条都在**，
+    所以"换口径的代价"不会随时间被人忘掉。
+    """
+    pend = _residuals(synth.pendulum_series(), mode="sdf_coverage")
+    arti = _residuals(synth.articulated_series(), mode="sdf_coverage")
+    for got, key in ((float(pend.mean()), "pend_mean"), (float(pend.max()), "pend_max"),
+                     (float(arti.mean()), "arti_mean"), (float(arti.min()), "arti_min")):
+        want = _SDF_BASELINE[key]
+        assert abs(got - want) < 0.1 * want, (
+            "%s 实测 %.5f 偏离基线 %.5f 超过 10%%" % (key, got, want))
+
