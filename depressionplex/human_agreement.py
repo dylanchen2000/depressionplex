@@ -402,18 +402,19 @@ def load_salvaged_csv(path: Path | str, *, on_reject: str = "mark") -> list[Tria
 # ---------------------------------------------------------------- 交叉核对：CSV 摘要
 
 
-def crosscheck_summary_csv(rows: Sequence[TrialRow], path: Path | str) -> list[str]:
-    """配套 `human_scores_*.csv` 与审计 JSON 的一致性核对（只核对，不采信其数值）。
+def _crosscheck_one_csv(by_trial: dict[str, "TrialRow"], path: Path,
+                        ) -> tuple[list[str], set[str]]:
+    """核对**单份** CSV 的逐条数值 → (不一致清单, 这份 CSV 覆盖到的试次集合)。
 
-    返回不一致清单（空 = 一致）。CSV 无 holds，mobile_seconds 列不可采信——
-    它的存在价值就是被拿来和 JSON 对账。
+    覆盖集合是返回值而不是就地判缺失：缺失只能对同一评分员**全部**分次导出的
+    并集判，见 `crosscheck_summary_csv`（DP-076）。
     """
-    path = Path(path)
-    by_trial = {r.trial_id: r for r in rows if r.source == "audit_json"}
     mismatches: list[str] = []
+    seen: set[str] = set()
     with path.open(encoding="utf-8-sig", newline="") as fh:
         for rec in csv.DictReader(fh):
             tid = rec.get("trial_id", "")
+            seen.add(tid)
             row = by_trial.get(tid)
             if row is None:
                 mismatches.append(f"{path.name}: CSV 有 JSON 无 → {tid}")
@@ -430,15 +431,39 @@ def crosscheck_summary_csv(rows: Sequence[TrialRow], path: Path | str) -> list[s
                 mismatches.append(f"{path.name}/{tid}: unscoreable 不一致")
             if parse_bool(rec.get("tail_climbing")) != row.tail_climbing:
                 mismatches.append(f"{path.name}/{tid}: tail_climbing 不一致")
-    missing_in_csv = [r.scorer_id + "/" + t for t in by_trial
-                      if t not in {rec for rec in _csv_trial_ids(path)}]
-    mismatches.extend(f"{path.name}: JSON 有 CSV 无 → {m}" for m in missing_in_csv)
+    return mismatches, seen
+
+
+def crosscheck_summary_csv(
+    rows: Sequence[TrialRow],
+    paths: Path | str | Sequence[Path | str],
+) -> list[str]:
+    """配套 `human_scores_*.csv` 与审计 JSON 的一致性核对（只核对，不采信其数值）。
+
+    返回不一致清单（空 = 一致）。CSV 无 holds，mobile_seconds 列不可采信——
+    它的存在价值就是被拿来和 JSON 对账。
+
+    `paths` 收的是**同一个评分员的全部**配套 CSV（也接受单个路径）。逐条数值核对
+    是**逐文件**的，那是它该有的粒度；但「JSON 有 CSV 无」这一条必须对**并集**判
+    ——计时工具是分次导出的，每份各覆盖一部分试次（文件名都写 `partialNofM`），
+    逐份判会把别份文件里的试次全报成缺失（DP-076）。
+    """
+    ps = ([Path(paths)] if isinstance(paths, (str, Path))
+          else [Path(p) for p in paths])
+    if not ps:
+        raise ValueError("没给任何配套 CSV ⇒ 拒绝返回空清单假装「全部一致」")
+    by_trial = {r.trial_id: r for r in rows if r.source == "audit_json"}
+    mismatches: list[str] = []
+    in_csv: set[str] = set()
+    for p in ps:
+        ms, seen = _crosscheck_one_csv(by_trial, p)
+        mismatches.extend(ms)
+        in_csv |= seen
+    where = ps[0].name if len(ps) == 1 else "%s 等 %d 份" % (ps[0].name, len(ps))
+    mismatches.extend(
+        "%s: JSON 有 CSV 无 → %s/%s" % (where, by_trial[t].scorer_id, t)
+        for t in sorted(t for t in by_trial if t not in in_csv))
     return mismatches
-
-
-def _csv_trial_ids(path: Path) -> set[str]:
-    with path.open(encoding="utf-8-sig", newline="") as fh:
-        return {rec.get("trial_id", "") for rec in csv.DictReader(fh)}
 
 
 # ---------------------------------------------------------------- 装配 + 报告
@@ -535,14 +560,15 @@ def build_table(data_dir: Path | str) -> TableResult:
 
     # 配套 CSV 交叉核对（有 JSON 的评分员才核）
     json_scorers = {r.scorer_id for r in result.rows if r.source == "audit_json"}
-    for p in sorted(data_dir.glob("human_scores_*.csv")):
-        if "SALVAGED" in p.name:
-            continue
-        # 用文件名里的评分员名过滤（文件名形如 human_scores_<评分员>_<日期>_partialNofM.csv）
-        for s in json_scorers:
-            if f"_{s}_" in p.name:
-                result.crosscheck_mismatches.extend(
-                    crosscheck_summary_csv([r for r in result.rows if r.scorer_id == s], p))
+    csvs = [p for p in sorted(data_dir.glob("human_scores_*.csv"))
+            if "SALVAGED" not in p.name]
+    for s in sorted(json_scorers):
+        # 用文件名里的评分员名过滤（文件名形如 human_scores_<评分员>_<日期>_partialNofM.csv）。
+        # 一个评分员可能有多份分次导出 ⇒ 一次全给，缺失对并集判（DP-076）。
+        mine = [p for p in csvs if f"_{s}_" in p.name]
+        if mine:
+            result.crosscheck_mismatches.extend(
+                crosscheck_summary_csv([r for r in result.rows if r.scorer_id == s], mine))
     return result
 
 

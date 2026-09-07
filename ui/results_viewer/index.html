@@ -1,0 +1,720 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DP-060 只读结果查看器 — 软件 ↔ 人工不动时长对比</title>
+<style>
+  :root {
+    --border: #d0d4d9;
+    --bg: #f6f7f8;
+    --panel: #ffffff;
+    --ink: #1d2129;
+    --ink-dim: #5b6168;
+    --accent: #2563a8;
+    --fail-bg: #fdecec;
+    --fail-bar: #c0392b;
+    --empty: #9aa0a6;
+    --notice-bg: #fff8e6;
+    --notice-border: #e0a800;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Segoe UI", sans-serif;
+    background: var(--bg);
+    color: var(--ink);
+    font-size: 14px;
+  }
+  header.page {
+    padding: 14px 20px 10px;
+    background: var(--panel);
+    border-bottom: 1px solid var(--border);
+  }
+  header.page h1 { margin: 0 0 4px; font-size: 18px; }
+  header.page .sub { color: var(--ink-dim); font-size: 13px; }
+
+  /* 告示条：三条，一字不少，来自 data/frozen/README.md */
+  .notices {
+    margin: 12px 20px;
+    padding: 10px 14px;
+    background: var(--notice-bg);
+    border: 1px solid var(--notice-border);
+    border-radius: 6px;
+  }
+  .notices strong { display: block; margin-bottom: 6px; }
+  .notices ol { margin: 0; padding-left: 22px; }
+  .notices li { margin: 3px 0; line-height: 1.55; }
+
+  /* 数据加载区 */
+  #loader {
+    margin: 12px 20px;
+    padding: 28px 20px;
+    border: 2px dashed var(--border);
+    border-radius: 8px;
+    background: var(--panel);
+    text-align: center;
+    color: var(--ink-dim);
+  }
+  #loader.dragover { border-color: var(--accent); background: #eef4fb; color: var(--accent); }
+  #loader .big { font-size: 16px; margin-bottom: 8px; color: var(--ink); }
+  #loader button {
+    margin-top: 10px;
+    padding: 6px 18px;
+    border: 1px solid var(--accent);
+    background: var(--accent);
+    color: #fff;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 14px;
+  }
+  #loadstatus { margin: 0 20px 8px; font-size: 13px; color: var(--ink-dim); }
+  #loadstatus .err { color: var(--fail-bar); }
+
+  /* 筛选工具栏 */
+  .toolbar {
+    display: flex; flex-wrap: wrap; gap: 10px; align-items: center;
+    margin: 12px 20px; padding: 10px 14px;
+    background: var(--panel); border: 1px solid var(--border); border-radius: 6px;
+  }
+  .toolbar label { font-size: 13px; color: var(--ink-dim); display: flex; align-items: center; gap: 5px; }
+  .toolbar input[type="search"], .toolbar select {
+    padding: 4px 8px; border: 1px solid var(--border); border-radius: 4px; font-size: 13px;
+    background: #fff; color: var(--ink);
+  }
+  #rowcount { margin-left: auto; font-weight: 600; }
+
+  /* 表格 */
+  .tablewrap {
+    margin: 0 20px 16px;
+    overflow: auto;
+    max-height: 62vh;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--panel);
+  }
+  table { border-collapse: collapse; font-size: 13px; white-space: nowrap; }
+  thead th {
+    position: sticky; top: 0; z-index: 3;
+    background: #eceff2; border-bottom: 2px solid var(--border);
+    padding: 6px 8px; cursor: pointer; user-select: none; text-align: left;
+    line-height: 1.3; vertical-align: bottom;
+  }
+  thead th .colname { display: block; font-size: 11px; color: var(--ink-dim); font-weight: 400; }
+  thead th .arrow { color: var(--accent); }
+  tbody td { padding: 5px 8px; border-bottom: 1px solid #edf0f2; }
+  tbody tr { cursor: pointer; }
+  tbody tr:hover { background: #f2f6fb; }
+  tbody tr.selected { background: #dbe9f8; }
+  tbody tr.g8fail { background: var(--fail-bg); box-shadow: inset 3px 0 0 var(--fail-bar); }
+  tbody tr.g8fail:hover { background: #fbe0e0; }
+  tbody tr.g8fail.selected { background: #f5d2d2; }
+  td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  td.empty, span.empty { color: var(--empty); }
+  th.stick, td.stick { position: sticky; left: 0; z-index: 2; background: #fff; box-shadow: 1px 0 0 var(--border); }
+  thead th.stick { z-index: 4; background: #eceff2; }
+  tbody tr.g8fail td.stick { background: var(--fail-bg); }
+  tbody tr.selected td.stick { background: #dbe9f8; }
+  .legend { margin: 0 20px 12px; font-size: 12px; color: var(--ink-dim); }
+  .legend .swatch { display: inline-block; width: 12px; height: 12px; border-radius: 2px; vertical-align: -2px; margin: 0 4px 0 12px; }
+
+  /* 图 */
+  .charts { display: flex; flex-wrap: wrap; gap: 16px; margin: 0 20px 24px; }
+  figure.chart {
+    margin: 0; padding: 12px; background: var(--panel);
+    border: 1px solid var(--border); border-radius: 6px;
+  }
+  figure.chart h2 { margin: 0 0 6px; font-size: 15px; }
+  figure.chart figcaption { margin-top: 8px; font-size: 12px; color: var(--ink-dim); line-height: 1.5; max-width: 520px; }
+  canvas { display: block; }
+
+  /* 详情面板 */
+  #detail {
+    position: fixed; top: 0; right: 0; bottom: 0; width: 380px; max-width: 92vw;
+    background: var(--panel); border-left: 1px solid var(--border);
+    box-shadow: -4px 0 14px rgba(0,0,0,0.12);
+    transform: translateX(105%); transition: transform 0.18s ease-out;
+    z-index: 20; display: flex; flex-direction: column;
+  }
+  #detail.open { transform: translateX(0); }
+  #detail .dhead {
+    padding: 12px 14px; border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; justify-content: space-between;
+  }
+  #detail .dhead h2 { margin: 0; font-size: 15px; }
+  #detail .dhead button {
+    border: 1px solid var(--border); background: #fff; border-radius: 4px;
+    cursor: pointer; padding: 2px 10px; font-size: 13px;
+  }
+  #detail .dbody { overflow: auto; padding: 8px 14px 20px; }
+  #detail table { width: 100%; white-space: normal; }
+  #detail td { padding: 5px 6px; border-bottom: 1px solid #edf0f2; vertical-align: top; word-break: break-all; }
+  #detail td.k { width: 46%; color: var(--ink-dim); font-size: 12px; }
+  #detail td.k .colname { display: block; color: var(--ink); font-weight: 600; font-size: 12px; }
+
+  #tooltip {
+    position: fixed; pointer-events: none; z-index: 30;
+    background: rgba(29,33,41,0.92); color: #fff; font-size: 12px;
+    padding: 4px 8px; border-radius: 4px; display: none; white-space: pre;
+  }
+</style>
+</head>
+<body>
+
+<header class="page">
+  <h1>DP-060 只读结果查看器</h1>
+  <div class="sub">软件不动时长 ↔ 人工不动时长 逐试次对比 ｜ 数据源：DP-059 冻结快照（2026-09-07）｜ 本页只读展示，所有口径数字均直接读自 CSV，页面不做任何计算</div>
+</header>
+
+<!-- 告示条：照抄 data/frozen/README.md 的三条，一字不少 -->
+<div class="notices">
+  <strong>读之前必须知道的三件事（摘自 data/frozen/README.md）</strong>
+  <ol>
+    <li><strong>这不是真值，是快照。</strong> 软件那一列是 DP-053 落地时那版代码跑的，代码一改就旧。</li>
+    <li><strong>人工那一列也不是金标准。</strong> 是两位评分员 <strong>T2 档</strong>的平均，两人极差中位 19.33 s、最大 66.79 s。<strong>T1 精标才是定门锚点。</strong></li>
+    <li><strong><code>bias_s</code> 是「软件 − 人工平均」，不是误差。</strong> 谁错还没归因（DP-055 仍开着）。</li>
+  </ol>
+</div>
+
+<!-- 数据加载：拖拽 / 文件选择（主路径），或 ?csv= 参数（http.server 下） -->
+<div id="loader">
+  <div class="big">还没有数据，请拖入 CSV</div>
+  <div>把 <code>DP-059_软件人工对比_2026-09-07.csv</code> 拖到此页任意位置，或点下方按钮选择文件。</div>
+  <div>在 <code>python3 -m http.server</code> 下也可用 <code>?csv=../../data/frozen/DP-059_软件人工对比_2026-09-07.csv</code> 直接加载。</div>
+  <button id="pickbtn" type="button">选择 CSV 文件</button>
+  <input id="pickfile" type="file" accept=".csv,text/csv" hidden>
+</div>
+<div id="loadstatus"></div>
+
+<div id="app" hidden>
+  <div class="toolbar">
+    <label>试次搜索 <input type="search" id="f_kw" placeholder="trial_id 关键字"></label>
+    <label>有效性
+      <select id="f_validity"><option value="">全部</option></select>
+    </label>
+    <label>G8 达标
+      <select id="f_g8">
+        <option value="">全部</option>
+        <option value="True">是（g8_pass=True）</option>
+        <option value="False">否（g8_pass=False）</option>
+        <option value="__EMPTY__">空（无判定）</option>
+      </select>
+    </label>
+    <label>人工评分
+      <select id="f_human">
+        <option value="">全部</option>
+        <option value="yes">有人工评分</option>
+        <option value="no">无人工评分</option>
+      </select>
+    </label>
+    <span id="rowcount"></span>
+  </div>
+
+  <div class="legend">
+    行标记说明：
+    <span class="swatch" style="background:var(--fail-bg);border-left:3px solid var(--fail-bar);"></span>g8_pass = False（读自 CSV 的 g8_pass 列，对应 abs_bias_s 超 G8 门槛 17.7 s）
+    <span class="swatch" style="background:var(--empty);"></span>「—」= 空值（没有，不是 0；悬停看 note）
+  </div>
+
+  <div class="tablewrap">
+    <table id="grid">
+      <thead><tr id="headrow"></tr></thead>
+      <tbody id="bodyrows"></tbody>
+    </table>
+  </div>
+
+  <div class="charts">
+    <figure class="chart">
+      <h2>散点图：软件 vs 人工</h2>
+      <canvas id="cv_scatter" width="520" height="400"></canvas>
+      <figcaption id="cap_scatter"></figcaption>
+    </figure>
+    <figure class="chart">
+      <h2>Bland–Altman：偏差分布</h2>
+      <canvas id="cv_ba" width="520" height="400"></canvas>
+      <figcaption id="cap_ba"></figcaption>
+    </figure>
+  </div>
+</div>
+
+<aside id="detail" aria-label="试次详情">
+  <div class="dhead">
+    <h2 id="d_title">试次详情</h2>
+    <button id="d_close" type="button">关闭</button>
+  </div>
+  <div class="dbody"><table><tbody id="d_rows"></tbody></table></div>
+</aside>
+
+<div id="tooltip"></div>
+
+<script>
+'use strict';
+/* ============================================================
+ * DP-060 只读结果查看器
+ * 铁律：本页只画不算。
+ *   - bias_s / abs_bias_s / g8_pass / 人工均值 全部直接读 CSV 列；
+ *   - 页面唯一做的「计算」是筛选后的行数计数，以及画图必需的坐标换算；
+ *   - 空值一律渲染为「—」，绝不渲染成 0，排序时恒排末尾，不画到图上。
+ * ============================================================ */
+
+/* 21 列定义：顺序与 CSV 表头一致；num=true 表示按数值排序（显示仍用原始字符串） */
+var COLS = [
+  { key: 'trial_id',                 zh: '试次',            stick: true },
+  { key: 'assay',                    zh: '实验' },
+  { key: 'validity_status',          zh: '有效性' },
+  { key: 'scored',                   zh: '软件已评分' },
+  { key: 'software_immobility_s',    zh: '软件不动(s)',     num: true },
+  { key: 'software_immobility_raw_s',zh: '软件不动原始(s)', num: true },
+  { key: 'software_mobility_s',      zh: '软件可动(s)',     num: true },
+  { key: 'software_mobility_bouts',  zh: '可动回合数',      num: true },
+  { key: 'unknown_frames_window',    zh: '未知帧数(窗口)',  num: true },
+  { key: 'unknown_fraction_window',  zh: '未知占比(窗口)',  num: true },
+  { key: 'n_human_scorers',          zh: '评分员数',        num: true },
+  { key: 'human_immobility_mean_s',  zh: '人工不动均值(s)', num: true },
+  { key: 'human_immobility_min_s',   zh: '人工最小(s)',     num: true },
+  { key: 'human_immobility_max_s',   zh: '人工最大(s)',     num: true },
+  { key: 'human_range_s',            zh: '人工极差(s)',     num: true },
+  { key: 'human_scorers',            zh: '评分员' },
+  { key: 'human_playback_rates',     zh: '播放倍速' },
+  { key: 'bias_s',                   zh: '偏差bias(s)',     num: true },
+  { key: 'abs_bias_s',               zh: '绝对偏差(s)',     num: true },
+  { key: 'g8_pass',                  zh: 'G8达标' },
+  { key: 'note',                     zh: '备注' }
+];
+var NUM_COLS = {};
+COLS.forEach(function (c) { if (c.num) NUM_COLS[c.key] = true; });
+
+var EMPTY_MARK = '—';
+
+/* ---------- CSV 解析（支持引号转义；跳过 # 开头的注释行，供假数据夹具用） ---------- */
+function parseCSV(text) {
+  var rows = [], row = [], field = '', inQ = false, i, ch;
+  for (i = 0; i < text.length; i++) {
+    ch = text[i];
+    if (inQ) {
+      if (ch === '"') {
+        if (text[i + 1] === '"') { field += '"'; i++; }
+        else inQ = false;
+      } else field += ch;
+    } else if (ch === '"') {
+      inQ = true;
+    } else if (ch === ',') {
+      row.push(field); field = '';
+    } else if (ch === '\n' || ch === '\r') {
+      if (ch === '\r' && text[i + 1] === '\n') i++;
+      row.push(field); field = '';
+      if (row.length > 1 || row[0] !== '') rows.push(row);
+      row = [];
+    } else field += ch;
+  }
+  if (field !== '' || row.length) { row.push(field); rows.push(row); }
+  rows = rows.filter(function (r) { return !/^#/.test(r[0]); });
+  if (!rows.length) return { header: [], records: [] };
+  var header = rows[0].map(function (h) { return h.trim(); });
+  var records = rows.slice(1).map(function (r) {
+    var o = {};
+    header.forEach(function (h, idx) { o[h] = (r[idx] === undefined ? '' : r[idx]); });
+    return o;
+  });
+  return { header: header, records: records };
+}
+
+function isEmpty(v) { return v === undefined || v === null || String(v).trim() === ''; }
+
+/* ---------- 状态 ---------- */
+var DATA = { name: '', rows: [] };      /* rows: 对象数组，值为 CSV 原始字符串 */
+var sortState = { key: null, dir: 'asc' };
+var selectedId = null;
+
+/* ---------- 数据加载：两条路 ---------- */
+var loader = document.getElementById('loader');
+var loadstatus = document.getElementById('loadstatus');
+
+function setStatus(html, isErr) {
+  loadstatus.innerHTML = isErr ? '<span class="err">' + html + '</span>' : html;
+}
+
+function ingest(text, sourceName) {
+  var parsed = parseCSV(text);
+  if (!parsed.records.length) {
+    setStatus('文件解析不到数据行：' + sourceName, true);
+    return;
+  }
+  var missing = COLS.filter(function (c) { return parsed.header.indexOf(c.key) < 0; });
+  if (missing.length) {
+    setStatus('表头缺少列：' + missing.map(function (c) { return c.key; }).join('、') + '（文件：' + sourceName + '）。请确认用的是 DP-059 对比表。', true);
+    return;
+  }
+  DATA.name = sourceName;
+  DATA.rows = parsed.records;
+  sortState = { key: null, dir: 'asc' };
+  selectedId = null;
+  closeDetail();
+  buildValidityOptions();
+  renderAll();
+  document.getElementById('app').hidden = false;
+  setStatus('已加载：' + sourceName + '（' + DATA.rows.length + ' 行）。本页所有数字均读自该文件，未做任何计算。');
+  loader.querySelector('.big').textContent = '换一份数据？把 CSV 拖进来即可';
+}
+
+function readFile(file) {
+  var rd = new FileReader();
+  rd.onload = function () { ingest(String(rd.result), file.name); };
+  rd.onerror = function () { setStatus('读文件失败：' + file.name, true); };
+  rd.readAsText(file, 'utf-8');
+}
+
+document.getElementById('pickbtn').addEventListener('click', function () {
+  document.getElementById('pickfile').click();
+});
+document.getElementById('pickfile').addEventListener('change', function (e) {
+  if (e.target.files && e.target.files[0]) readFile(e.target.files[0]);
+  e.target.value = '';
+});
+['dragover', 'dragenter'].forEach(function (ev) {
+  document.addEventListener(ev, function (e) { e.preventDefault(); loader.classList.add('dragover'); });
+});
+['dragleave', 'drop'].forEach(function (ev) {
+  document.addEventListener(ev, function (e) { e.preventDefault(); loader.classList.remove('dragover'); });
+});
+document.addEventListener('drop', function (e) {
+  if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0]) readFile(e.dataTransfer.files[0]);
+});
+
+/* URL 参数路径：?csv=相对路径（供 python3 -m http.server 使用；file:// 下浏览器会拦截 fetch） */
+(function tryUrlCsv() {
+  var m = new URLSearchParams(location.search).get('csv');
+  if (!m) return;
+  setStatus('正在通过 ?csv= 参数加载：' + m + ' …');
+  fetch(m).then(function (resp) {
+    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+    return resp.text();
+  }).then(function (text) {
+    ingest(text, m);
+  }).catch(function (err) {
+    setStatus('?csv= 加载失败（' + err.message + '）。file:// 下浏览器不允许读本地文件，请直接拖入 CSV，或在仓库根目录起 python3 -m http.server 再访问。', true);
+  });
+})();
+
+/* ---------- 筛选 ---------- */
+var f_kw = document.getElementById('f_kw');
+var f_validity = document.getElementById('f_validity');
+var f_g8 = document.getElementById('f_g8');
+var f_human = document.getElementById('f_human');
+
+function buildValidityOptions() {
+  var seen = {}, cur = f_validity.value;
+  DATA.rows.forEach(function (r) { if (!isEmpty(r.validity_status)) seen[r.validity_status] = true; });
+  f_validity.innerHTML = '<option value="">全部</option>';
+  Object.keys(seen).sort().forEach(function (v) {
+    var op = document.createElement('option');
+    op.value = v; op.textContent = v;
+    f_validity.appendChild(op);
+  });
+  f_validity.value = cur || '';
+}
+
+function passFilters(r) {
+  var kw = f_kw.value.trim().toLowerCase();
+  if (kw && String(r.trial_id).toLowerCase().indexOf(kw) < 0) return false;
+  if (f_validity.value && r.validity_status !== f_validity.value) return false;
+  if (f_g8.value === '__EMPTY__') { if (!isEmpty(r.g8_pass)) return false; }
+  else if (f_g8.value && r.g8_pass !== f_g8.value) return false;
+  if (f_human.value === 'yes' && isEmpty(r.human_immobility_mean_s)) return false;
+  if (f_human.value === 'no' && !isEmpty(r.human_immobility_mean_s)) return false;
+  return true;
+}
+
+[f_kw, f_validity, f_g8, f_human].forEach(function (el) {
+  el.addEventListener('input', renderTable);
+  el.addEventListener('change', renderTable);
+});
+
+/* ---------- 排序：空值恒排末尾（升序降序都在末尾） ---------- */
+function compareRows(a, b, key, dir) {
+  var va = a[key], vb = b[key];
+  var ea = isEmpty(va), eb = isEmpty(vb);
+  if (ea && eb) return 0;
+  if (ea) return 1;
+  if (eb) return -1;
+  var c;
+  if (NUM_COLS[key]) c = parseFloat(va) - parseFloat(vb);
+  else c = String(va).localeCompare(String(vb), 'zh-Hans-CN');
+  if (c === 0) c = String(a.trial_id).localeCompare(String(b.trial_id), 'zh-Hans-CN');
+  return dir === 'asc' ? c : -c;
+}
+
+/* ---------- 渲染：表格 ---------- */
+function emptyCellHtml(row) {
+  var note = row.note;
+  var title = isEmpty(note) ? '空值：没有，不是 0' : String(note);
+  return '<span class="empty" title="' + escapeHtml(title) + '">' + EMPTY_MARK + '</span>';
+}
+function escapeHtml(s) {
+  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+function renderHead() {
+  var tr = document.getElementById('headrow');
+  tr.innerHTML = '';
+  COLS.forEach(function (c) {
+    var th = document.createElement('th');
+    if (c.stick) th.className = 'stick';
+    var arrow = '';
+    if (sortState.key === c.key) arrow = ' <span class="arrow">' + (sortState.dir === 'asc' ? '▲' : '▼') + '</span>';
+    th.innerHTML = escapeHtml(c.zh) + arrow + '<span class="colname">' + escapeHtml(c.key) + '</span>';
+    th.addEventListener('click', function () {
+      if (sortState.key === c.key) sortState.dir = (sortState.dir === 'asc' ? 'desc' : 'asc');
+      else { sortState.key = c.key; sortState.dir = 'asc'; }
+      renderAll();
+    });
+    tr.appendChild(th);
+  });
+}
+
+function currentRows() {
+  var rows = DATA.rows.filter(passFilters);
+  if (sortState.key) {
+    var key = sortState.key, dir = sortState.dir;
+    rows = rows.slice().sort(function (a, b) { return compareRows(a, b, key, dir); });
+  }
+  return rows;
+}
+
+function renderTable() {
+  renderHead();
+  var tb = document.getElementById('bodyrows');
+  tb.innerHTML = '';
+  var rows = currentRows();
+  rows.forEach(function (r) {
+    var tr = document.createElement('tr');
+    if (r.g8_pass === 'False') tr.className = 'g8fail';   /* 视觉标记读自 CSV 的 g8_pass 列，不自己比大小 */
+    if (r.trial_id === selectedId) tr.className += (tr.className ? ' ' : '') + 'selected';
+    COLS.forEach(function (c) {
+      var td = document.createElement('td');
+      if (c.stick) td.className = 'stick';
+      if (c.num) td.className += (td.className ? ' ' : '') + 'num';
+      if (isEmpty(r[c.key])) td.innerHTML = emptyCellHtml(r);
+      else td.textContent = r[c.key];
+      tr.appendChild(td);
+    });
+    tr.addEventListener('click', function () { openDetail(r); });
+    tb.appendChild(tr);
+  });
+  /* 行数计数：本页唯一允许做的「计算」 */
+  document.getElementById('rowcount').textContent =
+    '显示 ' + rows.length + ' / ' + DATA.rows.length + ' 行';
+}
+
+/* ---------- 渲染：详情面板（21 列原样列出，空值 —） ---------- */
+function openDetail(r) {
+  selectedId = r.trial_id;
+  document.getElementById('d_title').textContent = '试次详情：' + r.trial_id;
+  var tb = document.getElementById('d_rows');
+  tb.innerHTML = '';
+  COLS.forEach(function (c) {
+    var tr = document.createElement('tr');
+    var k = document.createElement('td');
+    k.className = 'k';
+    k.innerHTML = '<span class="colname">' + escapeHtml(c.key) + '</span>' + escapeHtml(c.zh);
+    var v = document.createElement('td');
+    if (isEmpty(r[c.key])) v.innerHTML = emptyCellHtml(r);
+    else v.textContent = r[c.key];
+    tr.appendChild(k); tr.appendChild(v);
+    tb.appendChild(tr);
+  });
+  document.getElementById('detail').classList.add('open');
+  renderTable();
+}
+function closeDetail() {
+  document.getElementById('detail').classList.remove('open');
+}
+document.getElementById('d_close').addEventListener('click', function () {
+  selectedId = null; closeDetail(); renderTable();
+});
+
+/* ---------- 渲染：两张图（原生 canvas 手画，无任何图表库） ---------- */
+function setupCanvas(id) {
+  var cv = document.getElementById(id);
+  var dpr = window.devicePixelRatio || 1;
+  var w = cv.width, h = cv.height;
+  cv.style.width = w + 'px'; cv.style.height = h + 'px';
+  cv.width = Math.round(w * dpr); cv.height = Math.round(h * dpr);
+  var ctx = cv.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  return { cv: cv, ctx: ctx, w: w, h: h };
+}
+
+function niceTicks(min, max, n) {
+  if (min === max) { min -= 1; max += 1; }
+  var span = max - min, step0 = span / n, mag = Math.pow(10, Math.floor(Math.log10(step0)));
+  var norm = step0 / mag, step;
+  if (norm < 1.5) step = mag; else if (norm < 3) step = 2 * mag;
+  else if (norm < 7) step = 5 * mag; else step = 10 * mag;
+  var lo = Math.floor(min / step) * step, hi = Math.ceil(max / step) * step, t = [];
+  for (var v = lo; v <= hi + step * 0.5; v += step) t.push(Math.round(v * 1e6) / 1e6);
+  return { lo: lo, hi: hi, ticks: t };
+}
+
+/* 图配色：点的颜色读自 CSV 的 g8_pass 列 */
+function g8Color(row) {
+  if (row.g8_pass === 'False') return '#c0392b';
+  if (row.g8_pass === 'True') return '#1e8449';
+  return '#9aa0a6';
+}
+
+function drawChart(canvasId, capId, spec) {
+  var s = setupCanvas(canvasId), ctx = s.ctx;
+  var W = s.w, H = s.h, padL = 62, padR = 18, padT = 18, padB = 48;
+  var pw = W - padL - padR, ph = H - padT - padB;
+  ctx.clearRect(0, 0, W, H);
+
+  /* 可画行：该图所需的每一列都非空；空值行不画，且必须在图注里交代 */
+  var drawable = DATA.rows.filter(spec.canDraw);
+  var missing = DATA.rows.filter(function (r) { return !spec.canDraw(r); });
+
+  var xs = drawable.map(spec.x), ys = drawable.map(spec.y);
+  var xr = niceTicks(Math.min.apply(null, xs.concat([spec.forceXmin])), Math.max.apply(null, xs.concat([spec.forceXmax])), 5);
+  var yr = niceTicks(Math.min.apply(null, ys.concat([spec.forceYmin])), Math.max.apply(null, ys.concat([spec.forceYmax])), 5);
+  function X(v) { return padL + (v - xr.lo) / (xr.hi - xr.lo) * pw; }
+  function Y(v) { return padT + ph - (v - yr.lo) / (yr.hi - yr.lo) * ph; }
+
+  ctx.font = '11px sans-serif'; ctx.fillStyle = '#5b6168'; ctx.strokeStyle = '#d0d4d9'; ctx.lineWidth = 1;
+  xr.ticks.forEach(function (t) {
+    ctx.beginPath(); ctx.moveTo(X(t), padT); ctx.lineTo(X(t), padT + ph); ctx.stroke();
+    ctx.textAlign = 'center'; ctx.fillText(String(t), X(t), padT + ph + 16);
+  });
+  yr.ticks.forEach(function (t) {
+    ctx.beginPath(); ctx.moveTo(padL, Y(t)); ctx.lineTo(padL + pw, Y(t)); ctx.stroke();
+    ctx.textAlign = 'right'; ctx.fillText(String(t), padL - 8, Y(t) + 4);
+  });
+  ctx.strokeStyle = '#1d2129';
+  ctx.beginPath(); ctx.moveTo(padL, padT); ctx.lineTo(padL, padT + ph); ctx.lineTo(padL + pw, padT + ph); ctx.stroke();
+
+  ctx.textAlign = 'center'; ctx.fillStyle = '#1d2129'; ctx.font = '12px sans-serif';
+  ctx.fillText(spec.xLabel, padL + pw / 2, H - 12);
+  ctx.save(); ctx.translate(14, padT + ph / 2); ctx.rotate(-Math.PI / 2);
+  ctx.fillText(spec.yLabel, 0, 0); ctx.restore();
+
+  if (spec.refLine) spec.refLine(ctx, X, Y, xr, yr, padL, padT, pw, ph);
+
+  var pts = [];
+  drawable.forEach(function (r) {
+    var px = X(spec.x(r)), py = Y(spec.y(r));
+    ctx.beginPath(); ctx.arc(px, py, 4.5, 0, Math.PI * 2);
+    ctx.fillStyle = g8Color(r); ctx.fill();
+    ctx.strokeStyle = '#fff'; ctx.lineWidth = 1; ctx.stroke();
+    pts.push({ x: px, y: py, row: r, cv: s.cv });
+  });
+
+  /* 图注：画了几行、漏了几行、为什么漏 —— 静默少画一个点是不允许的 */
+  var cap = document.getElementById(capId);
+  var msg = DATA.rows.length + ' 行中 ' + drawable.length + ' 行可画';
+  if (missing.length) {
+    msg += '；' + missing.length + ' 行未画：' + missing.map(function (r) {
+      return r.trial_id + '（' + spec.whyMissing(r) + '）';
+    }).join('、');
+  } else msg += '，无遗漏';
+  msg += '。点颜色：红=g8_pass False，绿=True（均读自 CSV）。';
+  cap.textContent = msg;
+  return pts;
+}
+
+var hoverPts = [];
+function bindHover() {
+  var tip = document.getElementById('tooltip');
+  ['cv_scatter', 'cv_ba'].forEach(function (id) {
+    var cv = document.getElementById(id);
+    cv.addEventListener('mousemove', function (e) {
+      var rect = cv.getBoundingClientRect();
+      var mx = e.clientX - rect.left, my = e.clientY - rect.top, best = null, bd = 64;
+      hoverPts.forEach(function (p) {
+        if (p.cv !== cv) return;
+        var d = (p.x - mx) * (p.x - mx) + (p.y - my) * (p.y - my);
+        if (d < bd) { bd = d; best = p; }
+      });
+      if (best) {
+        tip.style.display = 'block';
+        tip.style.left = (e.clientX + 12) + 'px';
+        tip.style.top = (e.clientY + 12) + 'px';
+        tip.textContent = best.row.trial_id +
+          '\n人工均值 ' + best.row.human_immobility_mean_s + ' s / 软件 ' + best.row.software_immobility_s + ' s' +
+          '\nbias_s ' + best.row.bias_s + ' s（读自 CSV）';
+        cv.style.cursor = 'pointer';
+      } else { tip.style.display = 'none'; cv.style.cursor = 'default'; }
+    });
+    cv.addEventListener('mouseleave', function () { tip.style.display = 'none'; });
+    cv.addEventListener('click', function (e) {
+      var rect = cv.getBoundingClientRect();
+      var mx = e.clientX - rect.left, my = e.clientY - rect.top, best = null, bd = 64;
+      hoverPts.forEach(function (p) {
+        if (p.cv !== cv) return;
+        var d = (p.x - mx) * (p.x - mx) + (p.y - my) * (p.y - my);
+        if (d < bd) { bd = d; best = p; }
+      });
+      if (best) openDetail(best.row);
+    });
+  });
+}
+bindHover();
+
+function whyMissing(r) {
+  var reasons = [];
+  if (isEmpty(r.human_immobility_mean_s)) reasons.push('无人工评分');
+  if (isEmpty(r.software_immobility_s)) reasons.push('软件未产出数字');
+  return reasons.join('、') || '数据不全';
+}
+
+function renderCharts() {
+  hoverPts = [];
+  /* 散点图：x = 人工均值，y = 软件不动；y = x 参考线 */
+  hoverPts = hoverPts.concat(drawChart('cv_scatter', 'cap_scatter', {
+    x: function (r) { return parseFloat(r.human_immobility_mean_s); },
+    y: function (r) { return parseFloat(r.software_immobility_s); },
+    canDraw: function (r) { return !isEmpty(r.human_immobility_mean_s) && !isEmpty(r.software_immobility_s); },
+    whyMissing: whyMissing,
+    forceXmin: 0, forceXmax: 360, forceYmin: 0, forceYmax: 360,
+    xLabel: 'human_immobility_mean_s 人工不动均值 (s)',
+    yLabel: 'software_immobility_s 软件不动 (s)',
+    refLine: function (ctx, X, Y, xr, yr) {
+      var lo = Math.max(xr.lo, yr.lo), hi = Math.min(xr.hi, yr.hi);
+      ctx.save(); ctx.setLineDash([6, 5]); ctx.strokeStyle = '#2563a8'; ctx.lineWidth = 1.2;
+      ctx.beginPath(); ctx.moveTo(X(lo), Y(lo)); ctx.lineTo(X(hi), Y(hi)); ctx.stroke();
+      ctx.restore();
+      ctx.fillStyle = '#2563a8'; ctx.font = '11px sans-serif'; ctx.textAlign = 'left';
+      ctx.fillText('y = x', X(hi) - 34, Y(hi) + 14);
+    }
+  }));
+  /* Bland–Altman：x = 两者均值（绘图坐标，(软件+人工)/2，非口径）；
+     y = bias_s —— 直接读 CSV 的 bias_s 列，不许自己减 */
+  hoverPts = hoverPts.concat(drawChart('cv_ba', 'cap_ba', {
+    x: function (r) { return (parseFloat(r.software_immobility_s) + parseFloat(r.human_immobility_mean_s)) / 2; },
+    y: function (r) { return parseFloat(r.bias_s); },
+    canDraw: function (r) {
+      return !isEmpty(r.bias_s) && !isEmpty(r.software_immobility_s) && !isEmpty(r.human_immobility_mean_s);
+    },
+    whyMissing: function (r) {
+      var m = whyMissing(r);
+      return isEmpty(r.bias_s) && m === '数据不全' ? 'bias_s 为空' : m;
+    },
+    forceXmin: 0, forceXmax: 360, forceYmin: -90, forceYmax: 90,
+    xLabel: '（软件 + 人工）/ 2 (s) — 绘图坐标',
+    yLabel: 'bias_s (s) — 读自 CSV',
+    refLine: function (ctx, X, Y, xr, yr, padL, padT, pw) {
+      var y0 = Y(0);
+      ctx.save(); ctx.setLineDash([6, 5]); ctx.strokeStyle = '#2563a8'; ctx.lineWidth = 1.2;
+      ctx.beginPath(); ctx.moveTo(padL, y0); ctx.lineTo(padL + pw, y0); ctx.stroke();
+      ctx.restore();
+      ctx.fillStyle = '#2563a8'; ctx.font = '11px sans-serif'; ctx.textAlign = 'left';
+      ctx.fillText('y = 0', padL + 6, y0 - 5);
+    }
+  }));
+}
+
+function renderAll() {
+  renderTable();
+  renderCharts();
+}
+</script>
+</body>
+</html>
