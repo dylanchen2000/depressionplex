@@ -1,0 +1,7 @@
+# 假数据，不许当结果读
+trial_id,assay,validity_status,scored,software_immobility_s,software_immobility_raw_s,software_mobility_s,software_mobility_bouts,unknown_frames_window,unknown_fraction_window,n_human_scorers,human_immobility_mean_s,human_immobility_min_s,human_immobility_max_s,human_range_s,human_scorers,human_playback_rates,bias_s,abs_bias_s,g8_pass,note
+合成-ch1,TST,valid,True,100.00,105.0,260.00,20,500,0.0556,2,120.00,110.00,130.00,20.00,甲|乙,0.5,-20.00,20.00,False,
+合成-ch2,TST,valid,True,200.00,202.0,160.00,15,300,0.0333,2,195.00,190.00,200.00,10.00,甲|乙,0.5,5.00,5.00,True,
+合成-ch3,TST,valid,True,150.00,151.0,210.00,18,800,0.0889,0,,,,,,,,,无人工评分 ⇒ 无法比对（不是 0，是没有）
+合成-ch4,TST,unknown,False,,,,,9000,1.0000,2,180.00,170.00,190.00,20.00,甲|乙,0.5,,,,软件没产出数字 ⇒ 无偏差（不是 0，是没有）
+合成-ch5,TST,valid,True,250.00,255.0,110.00,10,1200,0.1333,2,260.00,250.00,270.00,20.00,甲|乙,0.5,-10.00,10.00,True,
