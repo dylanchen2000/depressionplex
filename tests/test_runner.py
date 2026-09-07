@@ -322,3 +322,96 @@ def test_analyze_chamber_computes_trial_bl_once() -> None:
 
     assert len(calls) == 1, "试次体长被算了 %d 次，注入没生效" % len(calls)
     assert rep.trial_id == "合成-ch1"
+
+
+# ------------------------------------------------------- DP-073-R 归一化分母口径
+
+
+def test_bl_denominator_per_trial_keeps_each_chamber_its_own() -> None:
+    """冻结口径：每个隔间用自己的 BL；算不出的给 `None` 而不是 0（DP-032）。"""
+    got = R.bl_denominator({1: 30.0, 2: 40.0, 3: 0.0}, "per_trial")
+    assert got == {1: 30.0, 2: 40.0, 3: None}
+
+
+def test_bl_denominator_recording_median_ignores_unusable_chambers() -> None:
+    """同录像中位：**只由算得出 BL 的隔间决定**。
+
+    一个空隔间或分割全崩的隔间（BL=0）不该把另外三个的分母带偏——它带的不是
+    "这只动物比较短"的信息，它压根没有信息。
+    """
+    got = R.bl_denominator({1: 26.0, 2: 30.0, 3: 49.0, 4: 0.0}, "recording_median")
+    assert set(got.values()) == {30.0}, got
+    assert sorted(got) == [1, 2, 3, 4], "算不出 BL 的隔间也要拿到分母（它的掩膜还在）"
+    # 偶数个可用 ⇒ 取中间两个的平均，别静默偏向某一侧
+    assert R.bl_denominator({1: 20.0, 2: 30.0}, "recording_median")[1] == 25.0
+
+
+def test_bl_denominator_all_unusable_gives_none_not_a_substitute() -> None:
+    """一个录像里没有任何隔间算出 BL ⇒ 全给 `None`。
+
+    "没有分母"是事实，不许拿 0、拿 `corridor.bl_est`、或拿别的录像的数顶上
+    （DP-032 + DP-058）。
+    """
+    assert R.bl_denominator({1: 0.0, 2: -1.0}, "recording_median") == {1: None, 2: None}
+
+
+def test_bl_denominator_rejects_undeclared_mode() -> None:
+    """口径必须是白名单里的一个，默认值也必须在白名单里。"""
+    assert R.DEFAULT_BL_NORM_MODE in R.BL_NORM_MODES
+    try:
+        R.bl_denominator({1: 30.0}, "cohort_median_but_not_implemented")
+    except ValueError as exc:
+        assert "bl_norm_mode" in str(exc)
+    else:
+        raise AssertionError("没声明过的口径没有被挡下")
+
+
+def test_recording_median_mode_gives_every_chamber_the_same_denominator() -> None:
+    """接线检查：口径确实一路传到了 `analyze_chamber` 的分母参数上。
+
+    这条测的是"传到了"，不是"传得对"——分母取得对不对由 `bl_denominator` 的
+    几条纯函数测试负责。分成两层是因为端到端跑一遍看不出分母是哪来的。
+    """
+    frames = _frames(KINDS4, 6)
+    plan = R.build_plan(frames)
+    seqs = R.segment_series(frames, plan)
+    real = R.analyze_chamber
+    seen: dict[str, dict[int, float | None]] = {}
+
+    def spy(masks, ch, cv, **kw):             # noqa: ANN001, ANN003, ANN202
+        seen[tag][ch.index] = kw.get("bl_norm")
+        return real(masks, ch, cv, **kw)
+
+    R.analyze_chamber = spy                   # type: ignore[assignment]
+    try:
+        for tag, mode in (("median", "recording_median"), ("per", "per_trial")):
+            seen[tag] = {}
+            R._reports(plan, seqs, fps=FPS, assay="TST", prefix="合成",
+                       bl_norm_mode=mode)
+    finally:
+        R.analyze_chamber = real              # type: ignore[assignment]
+
+    assert len(seen["median"]) >= 2, seen
+    assert len(set(seen["median"].values())) == 1, (
+        "recording_median 下各隔间分母不同：%r" % seen["median"])
+    assert all(v is not None for v in seen["per"].values()), seen["per"]
+
+
+def test_external_bl_norm_actually_reaches_the_residual() -> None:
+    """调用方直接给的分母必须真的改变残差尺度，不能被静默忽略。
+
+    残差 = 变化像素 / 分母² ⇒ 把分母放大 30 倍，残差缩小约 900 倍 ⇒ 全部落到
+    θ_mob（FROZEN 0.0175）以下 ⇒ 连持续形变的隔间也会被判成不动。
+    **这条不是在主张该这么用**，它是在证明这个参数不是装饰。
+    """
+    frames = _frames(KINDS4, N_FRAMES)
+    base = R.analyze_frames(frames[:8], frames, fps=FPS, assay="TST",
+                            trial_prefix="合成")[1]
+    huge = R.analyze_frames(frames[:8], frames, fps=FPS, assay="TST",
+                            trial_prefix="合成", bl_norm=1000.0)[1]
+    for k in (1, 3):                          # MOVE 隔间
+        a = base[k].immobility_mirror_pipeline_s
+        b = huge[k].immobility_mirror_pipeline_s
+        assert a is not None and b is not None, (k, a, b)
+        assert b > a, "隔间 %d：分母放大后 immobility 没升（%r → %r）" % (k, a, b)
+
