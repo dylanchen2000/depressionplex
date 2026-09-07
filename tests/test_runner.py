@@ -14,7 +14,7 @@ from __future__ import annotations
 import numpy as np
 
 from depressionplex import runner as R
-from depressionplex.assay_core import validity
+from depressionplex.assay_core import rad, validity
 from depressionplex.maskseq import PackedMasks
 
 H = 268
@@ -290,3 +290,35 @@ def test_analyze_chamber_refuses_without_suspension() -> None:
         assert "悬挂点" in str(e) and "拒绝产出数字" in str(e)
     else:
         raise AssertionError("悬挂点缺失时不许产出数字")
+
+
+def test_analyze_chamber_computes_trial_bl_once() -> None:
+    """试次体长**只许算一次**，且算出来的那一个就是喂给残差归一化的那一个。
+
+    修之前 `analyze_chamber` 辛苦算出的 `trial_body_length` 只喂了爬尾巴，
+    真正做归一化的分母在 `decompose_series` 里**又算了一遍**（每帧一次
+    `sil.metrics`，9000 帧的录像就是白跑一遍）。调用计数是这件事唯一
+    不靠肉眼的证据：>1 就说明分母又退回自己算了，注入被绕过。
+    """
+    frames = _frames(KINDS4, 6)
+    plan = R.build_plan(frames)
+    seqs = R.segment_series(frames, plan)
+    ch = plan.chambers[0]
+    assert ch.suspension is not None
+
+    real = rad.trial_body_length
+    calls = []
+
+    def counting(masks):                      # noqa: ANN001, ANN202
+        calls.append(1)
+        return real(masks)
+
+    rad.trial_body_length = counting          # type: ignore[assignment]
+    try:
+        rep = R.analyze_chamber(seqs[ch.index], ch, None, fps=FPS,
+                               assay="TST", trial_id="合成-ch1")
+    finally:
+        rad.trial_body_length = real           # type: ignore[assignment]
+
+    assert len(calls) == 1, "试次体长被算了 %d 次，注入没生效" % len(calls)
+    assert rep.trial_id == "合成-ch1"

@@ -179,11 +179,21 @@ def analyze_chamber(masks: PackedMasks, ch: ChamberPlan,
         raise ValueError(
             f"{trial_id}：悬挂点不可估（{ch.source}）⇒ 拒绝产出数字。"
             "补救顺序：① 修走廊标定（DP-052）；② 给人工确认的 GeometryEnvelope")
-    bl = rad.trial_body_length(masks)
-    if bl <= 0:
-        bl = float(ch.corridor.bl_est) if (ch.corridor and ch.corridor.bl_est) else 0.0
-    feats = rules.build_tst_features(masks, suspension=ch.suspension, fps=fps)
-    labels = rules.label_tst_events(feats, bl=(bl if bl > 0 else None))
+    # 下面是**两个不同的量**，不许合并（DP-058）：
+    #  · `bl_trial`（全帧主轴长中位数）= RAD 残差的归一化分母。传给
+    #    `build_tst_features` 只为省掉重复计算——不传的话 `decompose_series`
+    #    会把同一个数再算一遍（9000 帧各跑一次 `sil.metrics`）。结果逐位相同。
+    #  · `bl_climb`（估不出时退回标定期 `corridor.bl_est`）= 只给 TailClimbing
+    #    的上升量归一化。**这条退路不能用在归一化分母上**：`corridor.bl_est` 是
+    #    标定 24 帧的估计，与 `trial_body_length` 不是一个量（实测 27 试次跨
+    #    2.27 倍），拿它顶上会静默改判据。所以分母那边宁可传 None 走缺省。
+    bl_trial = rad.trial_body_length(masks)
+    bl_climb = bl_trial
+    if bl_climb <= 0:
+        bl_climb = float(ch.corridor.bl_est) if (ch.corridor and ch.corridor.bl_est) else 0.0
+    feats = rules.build_tst_features(masks, suspension=ch.suspension, fps=fps,
+                                     bl=(bl_trial if bl_trial > 0 else None))
+    labels = rules.label_tst_events(feats, bl=(bl_climb if bl_climb > 0 else None))
     return trial_report.build_trial_report(
         labels, fps=fps, assay=assay, trial_id=trial_id, chamber_validity=cv)
 

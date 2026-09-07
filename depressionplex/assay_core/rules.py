@@ -137,9 +137,19 @@ def build_tst_features(
     *,
     suspension: tuple[float, float],
     fps: float,
+    bl: float | None = None,
 ) -> TstFeatures:
-    """从剪影序列构建逐帧特征。悬挂点用几何语义图（geometry.suspension_point）。"""
-    rows = rad.decompose_series(masks)
+    """从剪影序列构建逐帧特征。悬挂点用几何语义图（geometry.suspension_point）。
+
+    `bl` = 试次级体长，RAD 残差的归一化分母（残差除以 BL²，见 `rad.decompose`）。
+    **不传等价于传 `rad.trial_body_length(masks)`**——`decompose_series` 缺省时
+    自己算同一个数。传它只为两件事：① 省掉重复计算（缺省路径要把 9000 帧的
+    `sil.metrics` 再跑一遍）；② 让分母**可注入**，从而可以做敏感性实验。
+
+    别和 `label_tst_events(bl=...)` 混：那个 bl 只喂 `climb_rise_frac`（爬尾巴），
+    与本参数不是同一条路径。DP-058 的第一版探针就是错扰了那一个，测出 0.0 s。
+    """
+    rows = rad.decompose_series(masks, bl=bl)
     n = len(masks)
     residual = np.full(n, np.nan)
     omega = np.full(n, np.nan)
