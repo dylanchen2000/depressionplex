@@ -37,6 +37,10 @@ AUC 只看排序，与门槛无关 ⇒ AUC 高说明特征good、问题在门槛
 用法：
     python3 scripts/dp065_residual_separability.py <切片目录> <人工时间线.csv> [输出.md]
 
+加 `--all=<冻结对比.csv>` 走**全量模式**：试次表不用下面写死的 6 个，改成从冻结对比
+CSV 里取全部「切片在 + 人工≥2 位」的试次，角色标签按偏差符号自动贴。**不加就是
+原来的 6 个探针试次，行为一字不变**，DP-065 的结果照旧可复现。全量约 185 s/试次。
+
 人工时间线由 `python3 -m depressionplex.cli.export_human_timeline` 出（DP-061）。
 """
 from __future__ import annotations
@@ -64,6 +68,48 @@ TRIALS = [
     ("10mg_2周-ch2", +2.8, "对照 偏差小"),
     ("20mg_1周_1-3+20_2周1-ch2", +0.1, "对照 偏差小"),
 ]
+
+#: `--all` 模式贴角色标签用的门槛（秒），取 G8 的 17.7 s。
+#: **只用来给试次贴一个描述性标签，不参与任何计算**——不是在用 G8 判定什么。
+_ROLE_G8_S = 17.7
+
+
+def role_of(bias: float) -> str:
+    """按偏差符号给试次贴角色标签。纯描述量，不参与计算。"""
+    if abs(bias) <= _ROLE_G8_S:
+        return "对照 偏差小"
+    return "模式A 软件过判不动" if bias > 0 else "模式B 软件过判活动"
+
+
+def trials_from_frozen(csv_path: Path, root: Path,
+                       human: dict) -> list[tuple[str, float, str]]:
+    """`--all`：从冻结对比 CSV 建全量试次表，只留「切片在 + 人工≥2 位」的。
+
+    **被跳过的试次逐条打印原因**——不许静默少行。静默少行正是 DP-032 那条事故链
+    的起点（`None` 被当成 0），这里宁可啰嗦。
+    """
+    out: list[tuple[str, float, str]] = []
+    skipped: list[str] = []
+    with csv_path.open(encoding="utf-8") as fh:
+        for r in csv.DictReader(fh):
+            tid = r["trial_id"]
+            if r.get("bias_s", "") == "":
+                skipped.append("%s：冻结表里 bias_s 为空（该试次没有人工分）" % tid)
+                continue
+            if not (root / (tid + ".mp4")).exists():
+                skipped.append("%s：切片不在 %s" % (tid, root))
+                continue
+            n = len(human.get(tid, {}))
+            if n < 2:
+                skipped.append("%s：人工只有 %d 位评分员，一致帧无从谈起" % (tid, n))
+                continue
+            b = float(r["bias_s"])
+            out.append((tid, b, role_of(b)))
+    for s in skipped:
+        print("跳过 " + s, flush=True)
+    print("全量模式：纳入 %d 个试次，跳过 %d 个" % (len(out), len(skipped)), flush=True)
+    return out
+
 
 #: 掐掉人工转换点附近这么多秒（人的反应延迟量级）。见 docstring 坑二。
 EDGE_S = 0.5
@@ -227,11 +273,20 @@ def probe_one(clip: Path, human: dict[str, list[tuple[float, float]]]) -> dict |
 
 
 def main() -> int:
-    if len(sys.argv) < 3:
+    argv = [a for a in sys.argv[1:] if not a.startswith("--all=")]
+    allspec = next((a[len("--all="):] for a in sys.argv[1:]
+                    if a.startswith("--all=")), None)
+    if len(argv) < 2:
         print(__doc__)
         return 2
-    root = Path(sys.argv[1])
-    human_all = load_human(Path(sys.argv[2]))
+    root = Path(argv[0])
+    human_all = load_human(Path(argv[1]))
+    out_path = argv[2] if len(argv) > 2 else None
+    trials = (trials_from_frozen(Path(allspec), root, human_all)
+              if allspec else TRIALS)
+    if not trials:
+        print("试次表为空 ⇒ 不出结论")
+        return 1
     lines: list[str] = []
 
     def emit(s: str = "") -> None:
@@ -253,7 +308,7 @@ def main() -> int:
 
     good: list[tuple[str, float]] = []
     detail: list[str] = []
-    for stem, bias, role in TRIALS:
+    for stem, bias, role in trials:
         clip = root / (stem + ".mp4")
         print("== %s ==" % stem, flush=True)
         if not clip.exists():
@@ -333,9 +388,9 @@ def main() -> int:
         for d in detail:
             print(d, flush=True)
 
-    if len(sys.argv) > 3:
-        Path(sys.argv[3]).write_text("\n".join(lines) + "\n", encoding="utf-8")
-        print("\n已写出 " + sys.argv[3])
+    if out_path:
+        Path(out_path).write_text("\n".join(lines) + "\n", encoding="utf-8")
+        print("\n已写出 " + out_path)
     return 0
 
 
