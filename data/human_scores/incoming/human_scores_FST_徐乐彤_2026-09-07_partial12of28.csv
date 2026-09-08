@@ -1,0 +1,13 @@
+﻿scorer_id,trial_id,assay,mobile_seconds,window_s,tail_climbing,wall_support_still,unscoreable,note,scored_at,presentation_order
+徐乐彤,FST-20mg1周-ch2,FST,380.7,380.68,,false,false,,2026-09-07,1
+徐乐彤,FST-20mg 2周-ch3,FST,355.5,382.36,,false,false,,2026-09-07,2
+徐乐彤,FST-20mg 2周-ch1,FST,223.5,382.36,,true,false,,2026-09-07,3
+徐乐彤,FST-20mg 2周-ch4,FST,363.2,382.36,,true,false,,2026-09-07,5
+徐乐彤,FST-10mg 2周-ch3,FST,378.2,382.48,,false,false,,2026-09-07,12
+徐乐彤,FST-10mg 2周-ch1,FST,317.4,382.48,,true,false,,2026-09-07,17
+徐乐彤,FST-10mg 2周-ch2,FST,293.4,382.48,,true,false,,2026-09-07,21
+徐乐彤,FST-20mg1周-ch3,FST,376.0,380.68,,false,false,,2026-09-07,22
+徐乐彤,FST-20mg 2周-ch2,FST,379.9,382.36,,false,false,,2026-09-07,24
+徐乐彤,FST-20mg1周-ch4,FST,324.5,380.68,,true,false,,2026-09-07,25
+徐乐彤,FST-20mg1周-ch1,FST,348.6,380.68,,true,false,,2026-09-07,27
+徐乐彤,FST-10mg 2周-ch4,FST,291.8,382.48,,true,false,,2026-09-07,28

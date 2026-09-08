@@ -1,0 +1,17 @@
+﻿scorer_id,trial_id,assay,mobile_seconds,window_s,tail_climbing,wall_support_still,unscoreable,note,scored_at,presentation_order
+陈璇,FST-抑郁8-10-ch3,FST,318.0,467.56,,false,false,,2026-09-07,2
+陈璇,FST-抑郁4-7-ch3,FST,323.8,362.20,,true,false,,2026-09-07,3
+陈璇,FST-正常1-4-ch1,FST,391.9,394.72,,true,false,,2026-09-07,5
+陈璇,FST-正常1-4-ch2,FST,341.6,394.72,,true,false,,2026-09-07,6
+陈璇,FST-抑郁8-10-ch1,FST,225.6,467.56,,true,false,,2026-09-07,7
+陈璇,FST-抑郁8-10-ch2,FST,336.7,467.56,,true,false,,2026-09-07,8
+陈璇,FST-抑郁4-7-ch1,FST,359.9,362.20,,false,false,,2026-09-07,10
+陈璇,FST-正常5+抑郁1-3-ch1,FST,309.4,365.56,,true,false,,2026-09-07,11
+陈璇,FST-抑郁4-7-ch4,FST,284.5,362.20,,true,false,,2026-09-07,13
+陈璇,FST-正常1-4-ch3,FST,235.7,394.72,,true,false,,2026-09-07,14
+陈璇,FST-正常5+抑郁1-3-ch4,FST,362.3,365.56,,false,false,,2026-09-07,17
+陈璇,FST-抑郁4-7-ch2,FST,361.9,362.20,,false,false,,2026-09-07,20
+陈璇,FST-正常5+抑郁1-3-ch2,FST,344.2,365.56,,true,false,,2026-09-07,21
+陈璇,FST-正常5+抑郁1-3-ch3,FST,358.0,365.56,,false,false,,2026-09-07,22
+陈璇,FST-正常1-4-ch4,FST,377.6,394.72,,true,false,,2026-09-07,25
+陈璇,FST-抑郁8-10-ch4,FST,,,,,true,全程无鼠（清单声明）,2026-09-07,28

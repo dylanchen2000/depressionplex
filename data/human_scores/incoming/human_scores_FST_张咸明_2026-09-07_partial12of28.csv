@@ -1,0 +1,13 @@
+﻿scorer_id,trial_id,assay,mobile_seconds,window_s,tail_climbing,wall_support_still,unscoreable,note,scored_at,presentation_order
+张咸明,FST-20mg1周-ch2,FST,379.7,380.68,,false,false,,2026-09-07,1
+张咸明,FST-20mg 2周-ch3,FST,332.3,382.36,,false,false,,2026-09-07,2
+张咸明,FST-20mg 2周-ch1,FST,220.5,382.36,,true,false,,2026-09-07,3
+张咸明,FST-20mg 2周-ch4,FST,360.5,382.36,,true,false,,2026-09-07,5
+张咸明,FST-10mg 2周-ch3,FST,381.5,382.48,,false,false,,2026-09-07,12
+张咸明,FST-10mg 2周-ch1,FST,324.6,382.48,,true,false,,2026-09-07,17
+张咸明,FST-10mg 2周-ch2,FST,254.0,382.48,,true,false,,2026-09-07,21
+张咸明,FST-20mg1周-ch3,FST,375.9,380.68,,true,false,,2026-09-07,22
+张咸明,FST-20mg 2周-ch2,FST,380.3,382.36,,false,false,,2026-09-07,24
+张咸明,FST-20mg1周-ch4,FST,321.5,380.68,,true,false,,2026-09-07,25
+张咸明,FST-20mg1周-ch1,FST,344.3,380.68,,true,false,,2026-09-07,27
+张咸明,FST-10mg 2周-ch4,FST,280.7,382.48,,true,false,,2026-09-07,28

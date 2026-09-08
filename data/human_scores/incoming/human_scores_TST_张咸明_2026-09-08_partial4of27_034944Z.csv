@@ -1,0 +1,5 @@
+﻿scorer_id,trial_id,assay,mobile_seconds,window_s,tail_climbing,wall_support_still,unscoreable,note,scored_at,presentation_order
+张咸明,20mg_2周-ch4,TST,129.1,360.00,false,,false,慢放0.5x,2026-09-08,9
+张咸明,20mg_2周-ch2,TST,101.3,360.00,false,,false,慢放0.5x,2026-09-08,15
+张咸明,20mg_2周-ch1,TST,122.7,360.00,false,,false,慢放0.5x,2026-09-08,25
+张咸明,20mg_2周-ch3,TST,190.9,360.00,false,,false,慢放0.5x,2026-09-08,27
