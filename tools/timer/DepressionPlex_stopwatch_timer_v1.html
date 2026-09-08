@@ -65,7 +65,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>人工计时 v1（TST / FST）</title>
+<title>人工计时 v1.6（TST / FST）</title>
 <style>
   :root { color-scheme: light dark; }
   body { font-family: -apple-system, "PingFang SC", sans-serif; margin: 0 auto;
@@ -88,6 +88,7 @@
 </head>
 <body>
 <h1 id="pageTitle">人工计时（秒表法）· 只评"在动"，看不见任何软件结果</h1>
+<p class="hint">工具版本 <b>v1.6</b>——请确认打开的是这个版本，旧版会悄悄丢进度。</p>
 
 <!-- ============ 设置 ============ -->
 <section id="setup">
@@ -255,7 +256,7 @@ function parseFlag(raw) {
 }
 function applyAssay() {
   const a = ASSAYS[state.assay];
-  $("pageTitle").textContent = state.assay + ' 人工计时（秒表法）· 只评"在动"，看不见任何软件结果';
+  $("pageTitle").textContent = state.assay + ' 人工计时（秒表法）v1.6 · 只评"在动"，看不见任何软件结果';
   $("q1Label").textContent = a.q1;
 }
 
