@@ -563,8 +563,13 @@ class TableResult:
     window_violations: list[str] = field(default_factory=list)
     order_mismatches: list[str] = field(default_factory=list)
     crosscheck_mismatches: list[str] = field(default_factory=list)
-    seeds: dict[str, int | None] = field(default_factory=dict)
+    # DP-081：按（评分员, 范式）记种子。一个人的悬尾和 FST 是两把独立的随机顺序，
+    # 用同一个 key 会静默互相覆盖，导致共享种子漏报（已真实发生 3 次）。
+    seeds: dict[tuple[str, str], int | None] = field(default_factory=dict)
     seed_groups: dict[int, list[str]] = field(default_factory=dict)
+    # DP-081：同一（评分员, 范式）在不同批次导出里出现了不同 seed。
+    # 这是**正常的**（重评批次本来就该换种子），只记账不报错。
+    seed_rebatches: list[str] = field(default_factory=list)
 
     def by_scorer(self) -> dict[str, dict[str, Any]]:
         out: dict[str, dict[str, Any]] = {}
@@ -594,6 +599,16 @@ class TableResult:
                 for s, b in self.by_scorer().items() if len(b["rates"]) > 1}
 
 
+def _record_seed(result: "TableResult", scorer: str, assay: str,
+                 seed: int, fname: str) -> None:
+    """把一份导出的 seed 记进台账。同 key 换了 seed ⇒ 记 rebatch，**保留最新的**。"""
+    key = (scorer, assay)
+    old = result.seeds.get(key)
+    if old is not None and old != seed:
+        result.seed_rebatches.append(f"{scorer}/{assay}: {old} → {seed} ({fname})")
+    result.seeds[key] = seed
+
+
 def build_table(data_dir: Path | str) -> TableResult:
     data_dir = Path(data_dir)
     result = TableResult(rows=[])
@@ -605,14 +620,19 @@ def build_table(data_dir: Path | str) -> TableResult:
     for p in audit_jsons:
         header, rows = load_audit_json(p, on_reject="mark")
         result.rows.extend(rows)
-        if header["seed"] is not None:
-            result.seeds[header["scorer_id"]] = int(header["seed"])
+        assays = {r.assay for r in rows if r.assay}
+        if len(assays) > 1:
+            # 一份导出只可能是一个范式（工具按范式分别导出）。混了就是数据问题，
+            # 报出来但不猜——不许挑一个当代表。
+            result.seed_rebatches.append(f"{header['scorer_id']}: 同一份导出混了范式 {sorted(assays)} ({p.name})")
+        if header["seed"] is not None and len(assays) == 1:
+            _record_seed(result, header["scorer_id"], assays.pop(), int(header["seed"]), p.name)
     for p in salvaged:
         rows = load_salvaged_csv(p, on_reject="mark")
         result.rows.extend(rows)
         for r in rows:
             if r.seed is not None:
-                result.seeds[r.scorer_id] = int(r.seed)
+                _record_seed(result, r.scorer_id, r.assay, int(r.seed), p.name)
 
     result.rows.sort(key=lambda r: (r.scorer_id, r.presentation_order or 0, r.trial_id))
 
@@ -635,8 +655,8 @@ def build_table(data_dir: Path | str) -> TableResult:
         if "presentation_order_mismatch" in r.warnings:
             result.order_mismatches.append(f"{r.scorer_id}/{r.trial_id}")
 
-    for seed, scorers in _invert(result.seeds).items():
-        result.seed_groups[seed] = sorted(scorers)
+    for seed, keys in _invert(result.seeds).items():
+        result.seed_groups[seed] = sorted(f"{s}/{a}" for s, a in keys)
 
     # 配套 CSV 交叉核对（有 JSON 的评分员才核）
     json_scorers = {r.scorer_id for r in result.rows if r.source == "audit_json"}
@@ -652,8 +672,8 @@ def build_table(data_dir: Path | str) -> TableResult:
     return result
 
 
-def _invert(d: dict[str, int]) -> dict[int, list[str]]:
-    out: dict[int, list[str]] = {}
+def _invert(d: dict[Any, int]) -> dict[int, list[Any]]:
+    out: dict[int, list[Any]] = {}
     for k, v in d.items():
         out.setdefault(v, []).append(k)
     return out
@@ -689,6 +709,7 @@ def format_report(res: TableResult) -> str:
         f"presentation_order 与 delivered_order 不符: {res.order_mismatches or '无'}",
         f"配套 CSV 交叉核对: {res.crosscheck_mismatches or '全部一致'}",
         f"seed 分组: { {s: g for s, g in res.seed_groups.items()} }",
+        f"seed 换批次记账: {res.seed_rebatches or '无'}",
     ]
     if res.per_key_estimates:
         import statistics

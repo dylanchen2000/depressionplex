@@ -359,8 +359,9 @@ def test_real_data_matches_audit_baseline() -> None:
             assert abs(r.immobility_s - (TST_WINDOW_S - r.mobile_union_s)) < 1e-9
 
     # seed 分组（PROVENANCE 铁律 3 的数据前提）：同 seed 组共享播放顺序
-    assert res.seed_groups == {973678866: ["王娟", "陈璇"],
-                               210593506: ["张", "张咸明", "徐乐彤"]}
+    # DP-081：元素带「/范式」后缀（raw 目录现全是悬尾 ⇒ /TST），分组关系不变
+    assert res.seed_groups == {973678866: ["王娟/TST", "陈璇/TST"],
+                               210593506: ["张/TST", "张咸明/TST", "徐乐彤/TST"]}
     w = {r.trial_id: r.presentation_order for r in res.rows if r.scorer_id == "王娟"}
     c = {r.trial_id: r.presentation_order for r in res.rows if r.scorer_id == "陈璇"}
     assert set(w) == set(c) and all(w[t] == c[t] for t in w), \
@@ -484,3 +485,66 @@ def test_build_table_handles_multiple_partial_exports_per_scorer() -> None:
         res = build_table(tmp)
         assert res.n_trials == 2
         assert res.crosscheck_mismatches == [], res.crosscheck_mismatches
+
+
+# ---------------------------------------------------------------- DP-081：种子台账按（评分员, 范式）
+
+
+def test_same_scorer_two_assays_do_not_overwrite_each_other() -> None:
+    """DP-081 回归锁：同一评分员的 TST 与 FST 是两把独立随机顺序，
+    按 scorer_id 做 key 时后读到的会静默覆盖前一份——正是漏报事故的形态。"""
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        rec_t = _mk_record(trial_id="20mg_2周-ch1")
+        rec_t["assay"] = "TST"
+        rec_f = _mk_record(trial_id="FST-抑郁8-10-ch1")
+        rec_f["assay"] = "FST"
+        _write_doc(tmp, [rec_t], "timer_audit_测试员_tst.json",
+                   seed=111000111, assay="TST")
+        _write_doc(tmp, [rec_f], "timer_audit_测试员_fst.json",
+                   seed=222000222, assay="FST")
+        res = build_table(tmp)
+        assert len(res.seeds) == 2
+        assert res.seeds[("测试员", "TST")] == 111000111
+        assert res.seeds[("测试员", "FST")] == 222000222
+        assert res.seed_rebatches == []   # 跨范式不是换批次，不许记账
+
+
+def test_shared_seed_across_scorers_is_detected_per_assay() -> None:
+    """两人、同范式、同 seed ⇒ 必须检出为一组，元素是「评分员/范式」（排序后）。"""
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        rec_a = _mk_record(trial_id="FST-抑郁8-10-ch1")
+        rec_a["assay"] = "FST"
+        rec_b = _mk_record(trial_id="FST-抑郁8-10-ch2")
+        rec_b["assay"] = "FST"
+        _write_doc(tmp, [rec_a], "timer_audit_甲_fst.json",
+                   scorer_id="甲", seed=987654321, assay="FST")
+        _write_doc(tmp, [rec_b], "timer_audit_乙_fst.json",
+                   scorer_id="乙", seed=987654321, assay="FST")
+        res = build_table(tmp)
+        assert res.seed_groups[987654321] == sorted(["甲/FST", "乙/FST"])
+        assert len(res.seed_groups[987654321]) == 2
+
+
+def test_same_scorer_same_assay_new_seed_is_logged_as_rebatch() -> None:
+    """同人同范式两份导出、seed 不同 ⇒ 台账保留后读到的，旧值记进 rebatches。
+    重评批次换种子是正常的，只记账不报错。"""
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        rec1 = _mk_record(trial_id="FST-抑郁8-10-ch1")
+        rec1["assay"] = "FST"
+        rec2 = _mk_record(trial_id="FST-抑郁8-10-ch2")
+        rec2["assay"] = "FST"
+        _write_doc(tmp, [rec1], "timer_audit_测试员_fst_b1.json",
+                   seed=111222333, assay="FST")
+        _write_doc(tmp, [rec2], "timer_audit_测试员_fst_b2.json",
+                   seed=444555666, assay="FST")
+        res = build_table(tmp)
+        assert list(res.seeds) == [("测试员", "FST")]
+        assert res.seeds[("测试员", "FST")] == 444555666  # 文件名按字典序扫，b2 后读到
+        assert len(res.seed_rebatches) == 1
+        msg = res.seed_rebatches[0]
+        assert "111222333" in msg and "444555666" in msg
+        assert msg == ("测试员/FST: 111222333 → 444555666 "
+                       "(timer_audit_测试员_fst_b2.json)")
