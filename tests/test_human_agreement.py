@@ -20,6 +20,7 @@ from depressionplex.human_agreement import (
     STATUS_REJECTED,
     TST_WINDOW_S,
     TrialRejected,
+    CSV_COLUMNS,
     build_table,
     crosscheck_summary_csv,
     load_audit_json,
@@ -115,18 +116,21 @@ def _mk_record(trial_id="v-ch1", mobile=10.0, holds=None, unscoreable=False):
     }
 
 
-def _mk_doc(records):
-    return {
+def _mk_doc(records, **extra):
+    doc = {
         "format": "depressionplex.stopwatch-audit.v1", "partial": False,
         "done_count": len(records), "total_trials": len(records),
         "scorer_id": "测试员", "seed": 1, "delivered_order": [r["trial_id"] for r in records],
         "tool_version": "test", "exported_at": "", "records": records,
     }
+    doc.update(extra)
+    return doc
 
 
-def _write_doc(tmp: Path, records, name="timer_audit_测试员_x.json") -> Path:
+def _write_doc(tmp: Path, records, name="timer_audit_测试员_x.json", **extra) -> Path:
     p = tmp / name
-    p.write_text(json.dumps(_mk_doc(records), ensure_ascii=False), encoding="utf-8")
+    p.write_text(json.dumps(_mk_doc(records, **extra), ensure_ascii=False),
+                 encoding="utf-8")
     return p
 
 
@@ -224,6 +228,69 @@ def test_tst_legacy_files_unchanged_by_window_bound_change() -> None:
         _, rows = load_audit_json(p)
         assert rows[0].immobility_s == TST_WINDOW_S - 100.0
         assert not [w for w in rows[0].warnings if "window_s_missing" in w]
+
+
+def test_fst_passthrough_columns_are_transcribed_verbatim() -> None:
+    """DP-080：工具落的四个字段必须**原样进表**，一个都不许在入库时丢。
+
+    `wall_support_still` 是「靠着杯壁不动」的**唯一人工标签来源**——FST 边界口径
+    能不能定，全靠这一列，丢了就没有第二处可查。
+    """
+    with tempfile.TemporaryDirectory() as td:
+        rec = _mk_record(trial_id="FST-抑郁8-10-ch3", mobile=300.0, holds=[[0.0, 300.0]])
+        rec.update(assay="FST", window_s=467.56, wall_support_still=True,
+                   declared_empty=False)
+        p = _write_doc(Path(td), [rec], "timer_audit_FST_测试员_p.json",
+                       assay="FST")
+        _, rows = load_audit_json(p)
+        r = rows[0]
+        assert (r.assay, r.assay_source) == ("FST", "record")
+        assert (r.window_s, r.window_source) == (467.56, "record")
+        assert r.wall_support_still is True
+        assert r.declared_empty is False
+        assert r.tool_version == "test"
+        text = table_csv_text(rows)
+        assert "wall_support_still" in text.splitlines()[0]
+        assert "window_s" in text.splitlines()[0]
+
+
+def test_legacy_tst_assay_is_inferred_and_labelled_as_inferred() -> None:
+    """v1.x 旧件两处都没有 assay ⇒ 判 TST，但来源必须标成 trial_id_prefix。
+
+    推断值和声明值混在一列里而不留痕，等于把猜测冒充成数据。
+    """
+    with tempfile.TemporaryDirectory() as td:
+        p = _write_doc(Path(td), [_mk_record(trial_id="20mg_2周-ch1")])
+        _, rows = load_audit_json(p)
+        r = rows[0]
+        assert (r.assay, r.assay_source) == ("TST", "trial_id_prefix")
+        assert r.window_s is None and r.window_source == "tst_default"
+        assert r.wall_support_still is None   # 悬尾不问这一问，不许填 False 冒充答过
+        assert r.declared_empty is None
+
+
+def test_document_level_assay_used_when_record_lacks_it() -> None:
+    """只有文件头有 assay（一份导出只可能一个范式）⇒ 用它，来源标 document。"""
+    with tempfile.TemporaryDirectory() as td:
+        p = _write_doc(Path(td), [_mk_record(trial_id="FST-正常1-4-ch1")],
+                       "timer_audit_FST_测试员_d.json", assay="FST")
+        _, rows = load_audit_json(p)
+        assert (rows[0].assay, rows[0].assay_source) == ("FST", "document")
+
+
+def test_dp080_is_additive_only_no_existing_column_renamed() -> None:
+    """加宽只许**加列**。既有 23 列的名字与相对次序都不许动——重算表是所有已发表
+    一致性数字的出处，改名等于让历史引用失效。"""
+    old = ["scorer_id", "trial_id", "source", "video", "chamber", "seed",
+           "presentation_order", "playback_rate", "tail_climbing", "unscoreable",
+           "status", "n_hold_segments", "holds_unsorted", "zero_length_segments",
+           "mobile_union_s", "immobility_s", "mobile_seconds_DISCARDED",
+           "naive_inflation_s", "per_key_excess_wallclock_s",
+           "reject_reason", "note", "scored_at", "warnings"]
+    assert set(old) <= set(CSV_COLUMNS), "既有列被改名或删除"
+    kept = [c for c in CSV_COLUMNS if c in old]
+    assert kept == old, "既有列的相对次序变了"
+    assert len(CSV_COLUMNS) == len(old) + 7
 
 
 def test_unknown_format_rejected() -> None:
