@@ -21,7 +21,7 @@
     partial 后由本人下一台机器重开（重开=新会话，会重评旧场次，不建议）。
   - v1.5：支持 FST。范式来自清单可选列 assay（缺列/留空 = TST，旧清单照旧能用），
     一份清单只能一个范式。三处按范式变：① 收尾第一问（TST「爬自己的尾巴」/
-    FST「靠着杯壁或杯里的支架不动过」）**并且各写各的列**——不共用 tail_climbing，
+    FST「靠着杯壁不动过」）**并且各写各的列**——不共用 tail_climbing，
     因为 primitives 里 TailClimbing 是试次级排除区，而 FST 的靠壁不动对应
     WallSupportedFloat（正常类别），共用会把 FST 的答案当排除信号；
     ② 秒数上界改成**本段录像时长**（原来写死 360，FST 录像 362–468 s，
@@ -238,7 +238,7 @@ const TRIAL_ID_RE = /^(.+)-ch([1-9][0-9]*)$/;
  * WallSupportedFloat，是一个正常类别。共用一列会让 FST 的答案被当成排除信号。 */
 const ASSAYS = {
   TST: { q1: "出现过爬自己的尾巴", q1_col: "tail_climbing", requirePrefix: false },
-  FST: { q1: "靠着杯壁或杯里的支架不动过", q1_col: "wall_support_still", requirePrefix: true },
+  FST: { q1: "靠着杯壁不动过", q1_col: "wall_support_still", requirePrefix: true },
 };
 /* 两列都写，没问到的那一列留空（不是 false）：DP-032——空 = 没问过，false = 问了答没有。
  * asked=false（清单声明的空位）时两列都留空：对着一个没有鼠的杯子答"没爬尾巴"是假数据。 */
