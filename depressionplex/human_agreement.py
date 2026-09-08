@@ -61,6 +61,26 @@ def _is_fst(rec: dict[str, Any], trial_id: str) -> bool:
             or trial_id.startswith("FST-"))
 
 
+def resolve_assay(rec: dict[str, Any], trial_id: str,
+                  doc_assay: Any = None) -> tuple[str, str]:
+    """本试次的范式 → (范式, 来源)。来源三档，**如实标注，不许伪装成声明值**。
+
+    - `record`：记录自带 `assay`（工具 v1.5 起逐条落）
+    - `document`：只有文件头有 `assay`（同一份导出只可能是一个范式）
+    - `trial_id_prefix`：v1.x 旧件两处都没有 ⇒ 按 `FST-` 前缀判，无前缀判 TST。
+      这是**推断**不是声明：工具对 FST 设 requirePrefix=true，前缀是规范；
+      而 v1.x 只有悬尾一个范式，所以无前缀等价于 TST。下游要区分"声明的"和
+      "推断的"，看 `assay_source` 列。
+    """
+    a = str(rec.get("assay", "") or "").strip().upper()
+    if a:
+        return a, "record"
+    a = str(doc_assay or "").strip().upper()
+    if a:
+        return a, "document"
+    return ("FST" if trial_id.startswith("FST-") else "TST"), "trial_id_prefix"
+
+
 def window_bound_s(rec: dict[str, Any]) -> tuple[float, bool]:
     """本试次的时基上界，返回 (上界秒, 是否取自记录本身)。
 
@@ -209,6 +229,14 @@ class TrialRow:
     note: str = ""
     scored_at: str = ""
     warnings: list[str] = field(default_factory=list)
+    # —— DP-080：以下五列是**如实转载**评分工具落的字段，不参与任何重算 ——
+    assay: str = ""                 # 'FST' / 'TST'
+    assay_source: str = ""          # record | document | trial_id_prefix
+    window_s: float | None = None   # 该场录像实长；v1.x 旧件没有这一列 ⇒ None
+    window_source: str = ""         # record | tst_default（见 window_bound_s）
+    wall_support_still: bool | None = None  # FST 收尾第一问；TST 不问 ⇒ None
+    declared_empty: bool | None = None      # 清单声明的空杯（G10 对照用）
+    tool_version: str = ""          # 导出工具版本（文件头），用于分层
 
     def csv_fields(self) -> dict[str, str]:
         def fmt(v: Any) -> str:
@@ -223,12 +251,14 @@ class TrialRow:
 
 
 CSV_COLUMNS = (
-    "scorer_id", "trial_id", "source", "video", "chamber", "seed",
-    "presentation_order", "playback_rate", "tail_climbing", "unscoreable",
+    "scorer_id", "trial_id", "assay", "assay_source", "source", "video",
+    "chamber", "seed", "presentation_order", "playback_rate",
+    "tail_climbing", "wall_support_still", "declared_empty", "unscoreable",
     "status", "n_hold_segments", "holds_unsorted", "zero_length_segments",
-    "mobile_union_s", "immobility_s", "mobile_seconds_DISCARDED",
+    "mobile_union_s", "window_s", "window_source", "immobility_s",
+    "mobile_seconds_DISCARDED",
     "naive_inflation_s", "per_key_excess_wallclock_s",
-    "reject_reason", "note", "scored_at", "warnings",
+    "reject_reason", "note", "scored_at", "tool_version", "warnings",
 )
 
 
@@ -271,9 +301,12 @@ def load_audit_json(path: Path | str, *, on_reject: str = "mark") -> tuple[dict,
     scorer = str(doc.get("scorer_id", ""))
     seed = doc.get("seed")
     delivered: list[str] = list(doc.get("delivered_order", []))
+    doc_assay = doc.get("assay")
+    tool_version = str(doc.get("tool_version", "") or "")
     rows: list[TrialRow] = []
     for rec in doc.get("records", []):
-        row = _row_from_record(rec, scorer=scorer, seed=seed, delivered=delivered)
+        row = _row_from_record(rec, scorer=scorer, seed=seed, delivered=delivered,
+                               doc_assay=doc_assay, tool_version=tool_version)
         if row.status == STATUS_REJECTED and on_reject == "raise":
             raise TrialRejected(scorer, row.trial_id, row.reject_reason)
         rows.append(row)
@@ -287,9 +320,20 @@ def load_audit_json(path: Path | str, *, on_reject: str = "mark") -> tuple[dict,
 
 
 def _row_from_record(rec: dict, *, scorer: str, seed: Any,
-                     delivered: Sequence[str]) -> TrialRow:
+                     delivered: Sequence[str], doc_assay: Any = None,
+                     tool_version: str = "") -> TrialRow:
     trial_id = str(rec.get("trial_id", ""))
     video, chamber = split_trial_id(trial_id)
+    assay, assay_src = resolve_assay(rec, trial_id, doc_assay)
+    passthrough = dict(
+        assay=assay, assay_source=assay_src,
+        window_s=_f(rec.get("window_s")),
+        wall_support_still=parse_bool(rec.get("wall_support_still"))
+        if rec.get("wall_support_still") is not None else None,
+        declared_empty=parse_bool(rec.get("declared_empty"))
+        if rec.get("declared_empty") is not None else None,
+        tool_version=tool_version,
+    )
     warns: list[str] = []
     holds = rec.get("holds") or []
     discarded = _f(rec.get("mobile_seconds"))
@@ -312,7 +356,7 @@ def _row_from_record(rec: dict, *, scorer: str, seed: Any,
             naive_inflation_s=None, per_key_excess_wallclock_s=None,
             reject_reason=REJECT_UNSCORED_TRIPLE,
             note=str(rec.get("note", "")), scored_at=str(rec.get("scored_at", "")),
-            warnings=warns,
+            warnings=warns, window_source="", **passthrough,
         )
 
     # rule 1+2+4
@@ -358,6 +402,7 @@ def _row_from_record(rec: dict, *, scorer: str, seed: Any,
         per_key_excess_wallclock_s=_excess_wallclock(discarded, union, u.n_segments, rate),
         note=str(rec.get("note", "")), scored_at=str(rec.get("scored_at", "")),
         warnings=warns,
+        window_source=("record" if w_from_rec else "tst_default"), **passthrough,
     )
 
 
@@ -391,6 +436,8 @@ def load_salvaged_csv(path: Path | str, *, on_reject: str = "mark") -> list[Tria
             trial_id = rec.get("trial_id", "")
             video, chamber = split_trial_id(trial_id)
             warns: list[str] = ["union_precomputed_by_salvage_tool"]
+            # 抢救件来自 v1.x 悬尾导出：没有 assay/window_s/杯壁问，如实留空
+            assay, assay_src = resolve_assay(rec, trial_id, None)
             n_seg = int(_f(rec.get("n_hold_segments")) or 0)
             discarded = _f(rec.get("mobile_seconds_DISCARDED"))
             union = _f(rec.get("mobile_union_s"))
@@ -415,6 +462,11 @@ def load_salvaged_csv(path: Path | str, *, on_reject: str = "mark") -> list[Tria
                 per_key_excess_wallclock_s=_excess_wallclock(discarded, union, n_seg, rate),
                 note=str(rec.get("note", "")), scored_at=str(rec.get("scored_at", "")),
                 warnings=warns,
+                assay=assay, assay_source=assay_src,
+                window_s=_f(rec.get("window_s")),
+                window_source=("record" if _f(rec.get("window_s")) else "tst_default"),
+                wall_support_still=None, declared_empty=None,
+                tool_version=str(rec.get("tool_version", "") or ""),
             )
             if _rule3_violation(discarded, n_seg, unscoreable):
                 row.status = STATUS_REJECTED
