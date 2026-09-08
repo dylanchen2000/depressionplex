@@ -42,7 +42,7 @@ global.alert = (m) => { throw new Error("alert: " + m); };
 
 const mod = { exports: {} };
 new Function("module", js + "\nmodule.exports = { parseManifest, csvFromDone, state, q1Fields,"
-  + " ASSAYS, applyAssay, markDeclaredEmpty, nextTrial, mobileAccumulator };")(mod);
+  + " ASSAYS, applyAssay, markDeclaredEmpty, nextTrial, mobileAccumulator, exportSnapshot, readPriorDone, doneTidSet, nDone, remainingTrials, rebuildQueue, onStart };")(mod);
 const T = mod.exports;
 
 let fails = 0;
@@ -53,6 +53,10 @@ function ok(name, fn) {
 function eq(a, b, msg) {
   const sa = JSON.stringify(a), sb = JSON.stringify(b);
   if (sa !== sb) throw new Error((msg || "") + " 期望 " + sb + " 实得 " + sa);
+}
+async function okA(name, fn) {
+  try { await fn(); console.log("  pass  " + name); }
+  catch (e) { fails++; console.log("  FAIL  " + name + " → " + (e.message || e)); }
 }
 function throws(fn, frag) {
   let got = null;
@@ -193,5 +197,175 @@ ok("data/human_scores/manifests/FST全程_视频清单_给评分员.csv 能被�
   byVid.forEach((chs, v) => eq(chs.sort(), [1, 2, 3, 4], v + " 的杯位："));
 });
 
-console.log(fails ? "\n" + fails + " 条不通过" : "\n全部通过");
-process.exit(fails ? 1 : 0);
+/* ================= DP-077：三处会静默丢数据的缺陷 ================= */
+/* 捕获 download() 落的文件名 */
+const dl = [];
+document.createElement = () => ({
+  href: "", style: {},
+  set download(v) { dl.push(v); }, get download() { return ""; },
+  click() {}, remove() {}, appendChild() {},
+});
+const RealDate = Date;
+function clockAt(iso) {
+  global.Date = class extends RealDate {
+    constructor(...a) { return a.length ? new RealDate(...a) : new RealDate(iso); }
+    static now() { return new RealDate(iso).getTime(); }
+  };
+}
+function realClock() { global.Date = RealDate; }
+function mkDone(tid, pos) {
+  return { trial_id: tid, assay: T.state.assay, mobile_seconds: 1.0, window_s: 360,
+           unscoreable: false, note: "", tail_climbing: false,
+           presentation_order: pos, scored_at: "2026-09-07" };
+}
+function threeTrials() {
+  T.state.scorer = "R1"; T.state.assay = "TST"; T.applyAssay();
+  T.state.fullOrder = [{ trial_id: "a-ch1", pos: 1, file: {} },
+                       { trial_id: "b-ch1", pos: 2, file: {} },
+                       { trial_id: "c-ch1", pos: 3, file: {} }];
+  T.state.priorDone = []; T.state.done = []; T.state.qidx = 0;
+}
+/* 把审计 JSON 包成 onStart 认得的「文件」桩 */
+function auditFile(name, doc) {
+  return { name, text: async () => JSON.stringify(doc) };
+}
+function auditDoc(over) {
+  return Object.assign({
+    format: "depressionplex.stopwatch-audit.v1", assay: "TST", scorer_id: "R1",
+    partial: true, done_count: 1, total_trials: 3, records: [{ trial_id: "a-ch1" }],
+  }, over || {});
+}
+
+console.log("DP-077 缺陷①（导出文件名重名会静默覆盖）：");
+ok("partial 文件名带秒级导出时刻，且与 exported_at 一致", () => {
+  threeTrials(); T.state.done = [mkDone("a-ch1", 1)];
+  clockAt("2026-09-07T05:32:01.004Z");
+  dl.length = 0;
+  let audit = null;
+  const realBlob = global.Blob;
+  global.Blob = class { constructor(parts) { audit = parts[0]; } };
+  T.exportSnapshot(false);
+  global.Blob = realBlob; realClock();
+  eq(dl.length, 2, "一次导出应落两个文件：");
+  const re = /^human_scores_TST_R1_2026-09-07_partial1of3_053201Z\.csv$/;
+  if (!re.test(dl[0])) throw new Error("CSV 名不合式：" + dl[0]);
+  if (dl[1] !== "timer_audit_TST_R1_2026-09-07_partial1of3_053201Z.json") {
+    throw new Error("审计名不合式：" + dl[1]);
+  }
+  eq(JSON.parse(audit).exported_at, "2026-09-07T05:32:01.004Z", "exported_at：");
+});
+ok("同一天两次导出落成不同文件名（原来两次都叫 partial4of27）", () => {
+  threeTrials(); T.state.done = [mkDone("a-ch1", 1)];
+  dl.length = 0;
+  clockAt("2026-09-07T05:32:01.000Z"); T.exportSnapshot(false);
+  clockAt("2026-09-07T06:48:01.000Z"); T.exportSnapshot(false);
+  realClock();
+  eq(dl.length, 4);
+  if (dl[0] === dl[2] || dl[1] === dl[3]) throw new Error("仍然重名：" + dl[0]);
+});
+ok("最终导出带 _final 与时刻，不带 partial", () => {
+  threeTrials();
+  T.state.done = [mkDone("a-ch1", 1), mkDone("b-ch1", 2), mkDone("c-ch1", 3)];
+  dl.length = 0; clockAt("2026-09-07T09:00:00.000Z"); T.exportSnapshot(true); realClock();
+  if (!/_final_090000Z\.csv$/.test(dl[0]) || dl[0].includes("partial")) {
+    throw new Error("final 名不合式：" + dl[0]);
+  }
+});
+ok("审计 JSON：done_count 仍是本会话条数，累计另立字段", () => {
+  threeTrials();
+  T.state.priorDone = ["a-ch1", "b-ch1"];
+  T.state.done = [mkDone("c-ch1", 3)];
+  let audit = null;
+  const realBlob = global.Blob;
+  global.Blob = class { constructor(parts) { audit = parts[0]; } };
+  dl.length = 0; T.exportSnapshot(false);
+  global.Blob = realBlob;
+  const d = JSON.parse(audit);
+  eq([d.done_count, d.cumulative_done_count, d.total_trials], [1, 3, 3]);
+  eq(d.prior_done, ["a-ch1", "b-ch1"]);
+  eq(d.tool_version, "v1.6");
+});
+
+console.log("DP-077 缺陷③（进度只存 localStorage，换机/误点就丢）：");
+ok("已评 = 本会话 ∪ 之前导出，剩余按此算", () => {
+  threeTrials();
+  T.state.priorDone = ["a-ch1"]; T.state.done = [mkDone("b-ch1", 2)];
+  eq(T.nDone(), 2); eq(T.remainingTrials(), ["c-ch1"]);
+});
+ok("rebuildQueue 跳过之前评过的，不会重发", () => {
+  threeTrials();
+  T.state.priorDone = ["a-ch1", "c-ch1"];
+  T.rebuildQueue();
+  eq(T.state.queue.map(m => m.trial_id), ["b-ch1"]);
+});
+
+const TIDS = new Set(["a-ch1", "b-ch1", "c-ch1"]);
+async function main() {
+  await okA("导入进度：评分员对不上 ⇒ 拒收并报出（不能把别人的进度并进来）", async () => {
+    const r = await T.readPriorDone([auditFile("x.json", auditDoc({ scorer_id: "R2" }))],
+                                    "R1", "TST", TIDS);
+    eq(r.done.size, 0);
+    if (!r.errs.join("").includes("R2")) throw new Error("没报出评分员不符：" + r.errs);
+  });
+  await okA("导入进度：范式对不上 ⇒ 拒收", async () => {
+    const r = await T.readPriorDone([auditFile("x.json", auditDoc({ assay: "FST" }))],
+                                    "R1", "TST", TIDS);
+    eq(r.done.size, 0);
+    if (!r.errs.join("").includes("FST")) throw new Error("没报出范式不符：" + r.errs);
+  });
+  await okA("导入进度：记录里的试次不在本清单 ⇒ 拒收", async () => {
+    const r = await T.readPriorDone(
+      [auditFile("x.json", auditDoc({ records: [{ trial_id: "z-ch9" }] }))], "R1", "TST", TIDS);
+    eq(r.done.size, 0);
+    if (!r.errs.join("").includes("z-ch9")) throw new Error("没报出越界试次：" + r.errs);
+  });
+  await okA("导入进度：不是本工具的文件 / 不是 JSON ⇒ 拒收", async () => {
+    const bad = { name: "y.json", text: async () => "{不是json" };
+    const r = await T.readPriorDone([bad, auditFile("z.json", auditDoc({ format: "别的" }))],
+                                    "R1", "TST", TIDS);
+    eq(r.done.size, 0); eq(r.errs.length, 2);
+  });
+  await okA("导入进度：多份取并集，并顺着 prior_done 链条接上", async () => {
+    const r = await T.readPriorDone([
+      auditFile("1.json", auditDoc({ records: [{ trial_id: "a-ch1" }] })),
+      auditFile("2.json", auditDoc({ records: [{ trial_id: "b-ch1" }],
+                                     prior_done: ["a-ch1"] })),
+    ], "R1", "TST", TIDS);
+    eq(r.errs, []);
+    eq(Array.from(r.done).sort(), ["a-ch1", "b-ch1"]);
+  });
+
+  console.log("DP-077 缺陷②（「开始评分」静默抹掉存档进度）：");
+  await okA("有存档时第一次点「开始评分」只警告、不抹；再点一次才抹", async () => {
+    const MAN = "trial_id,video_filename\r\na-ch1,a.mp4\r\nb-ch1,b.mp4\r\nc-ch1,c.mp4\r\n";
+    el("scorerId").value = "R1"; el("seed").value = "7";
+    el("manifestFile").files = [{ name: "m.csv", text: async () => MAN }];
+    el("videoFiles").files = [{ name: "a.mp4" }, { name: "b.mp4" }, { name: "c.mp4" }];
+    /* 三场都已在之前导出里 ⇒ 不走"没安排"确认，直接撞上抹进度那道关 */
+    el("priorFiles").files = [auditFile("p.json", auditDoc({
+      records: [{ trial_id: "a-ch1" }, { trial_id: "b-ch1" }, { trial_id: "c-ch1" }] }))];
+    localStorage.setItem("dpst:v2:R1", JSON.stringify({
+      seed: 7, order: ["a-ch1", "b-ch1", "c-ch1"], assay: "TST",
+      done: [mkDone("a-ch1", 1), mkDone("b-ch1", 2)], ts: 1 }));
+    T.state.confirmWipe = null; T.state.confirmBatch = null;
+    el("setupErr").textContent = "";
+
+    T.onStart();
+    await new Promise(r => setTimeout(r, 0));
+    if (localStorage.getItem("dpst:v2:R1") === null) {
+      throw new Error("第一次点就把存档抹了——这正是 2026-09-07 丢进度的原因");
+    }
+    if (!el("setupErr").textContent.includes("已评 2 场")) {
+      throw new Error("没告诉评分员存着几场：" + el("setupErr").textContent);
+    }
+    if (el("resumeBox").hidden) throw new Error("没把「继续上次未完成的评分」露出来");
+
+    T.onStart();                       // 明确确认后才允许重开
+    await new Promise(r => setTimeout(r, 0));
+    eq(localStorage.getItem("dpst:v2:R1"), null, "确认后仍没重开：");
+  });
+
+  console.log(fails ? "\n" + fails + " 条不通过" : "\n全部通过");
+  process.exit(fails ? 1 : 0);
+}
+main();

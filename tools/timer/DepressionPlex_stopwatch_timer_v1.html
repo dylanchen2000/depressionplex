@@ -21,7 +21,7 @@
     partial 后由本人下一台机器重开（重开=新会话，会重评旧场次，不建议）。
   - v1.5：支持 FST。范式来自清单可选列 assay（缺列/留空 = TST，旧清单照旧能用），
     一份清单只能一个范式。三处按范式变：① 收尾第一问（TST「爬自己的尾巴」/
-    FST「靠着杯壁或杯里的支架不动过」）**并且各写各的列**——不共用 tail_climbing，
+    FST「靠着杯壁不动过」）**并且各写各的列**——不共用 tail_climbing，
     因为 primitives 里 TailClimbing 是试次级排除区，而 FST 的靠壁不动对应
     WallSupportedFloat（正常类别），共用会把 FST 的答案当排除信号；
     ② 秒数上界改成**本段录像时长**（原来写死 360，FST 录像 362–468 s，
@@ -33,6 +33,20 @@
     只有水）。SOP 说这种不要评，但问卷本来只在播完后出现 ⇒ 评分员得干看 7.8 分钟。
     声明过的试次多一个「直接记为无法评分」按钮；**只有清单声明过的才有**，
     评分员不能自行跳过任何试次。跳过的试次 window_s 与两个问句列全留空。
+  - v1.6：修三处会**静默丢数据**的缺陷（DP-077，实测于 2026-09-07 的 TST 标注）。
+    ① 导出文件名只带日期 ⇒ 同一天两次导出同名，浏览器改名成 `xxx (1)`，
+    转发/拖拽一覆盖就静默少掉一批试次，而文件名不会告诉你。现在文件名带
+    导出时刻（精确到秒），人手点不出重名；最终导出也带 `_final`。
+    ② 「开始评分」原来静默清掉该评分员的存档进度（`state.done = []` +
+    `removeItem`），而分批提示还写着"进度自动保存" ⇒ 第二天点了这个主按钮就丢进度，
+    工具把评过的试次重新发一遍（实测两人各被重发 4 场）。现在必须明确再点一次确认，
+    并提示存着几场、指向「继续上次未完成的评分」。
+    ③ 进度只存在 localStorage 里 ⇒ 换机、隐私模式、误点重开都会丢。新增
+    **「已评进度」文件选择框**：把之前导出的 `timer_audit_*.json` 全选上，工具据此
+    跳过评过的试次。只取 trial_id 集合，**不**把旧记录并进本次导出——同一试次评过
+    两遍算哪一遍是真值口径问题，不由工具替人决定。审计 JSON 加 `prior_done` /
+    `cumulative_done_count` 两个纯追加字段。
+    另：分批完成页现在**逐个列出还差哪几场**，不再只报一个会因缺陷②而失真的计数。
   - v1.3：可见「暂停/继续」按钮（P 键等效；区间模型下暂停不加秒）；
     「导出当前进度」随时可导出已完成试次的 CSV+审计（文件名带
     _partial<k>of<n> 标记，只作中途保存，最终分析以全部完成后的导出为准）；
@@ -51,7 +65,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>人工计时 v1（TST / FST）</title>
+<title>人工计时 v1.6（TST / FST）</title>
 <style>
   :root { color-scheme: light dark; }
   body { font-family: -apple-system, "PingFang SC", sans-serif; margin: 0 auto;
@@ -74,6 +88,7 @@
 </head>
 <body>
 <h1 id="pageTitle">人工计时（秒表法）· 只评"在动"，看不见任何软件结果</h1>
+<p class="hint">工具版本 <b>v1.6</b>——请确认打开的是这个版本，旧版会悄悄丢进度。</p>
 
 <!-- ============ 设置 ============ -->
 <section id="setup">
@@ -84,12 +99,17 @@
      <b>FST</b>（依据 SOP_强迫游泳人工评分_v1）：<b>评全程</b>——入水时刻不在画面内、各段录像长度不同，
      所以不许自己划 4 分钟窗口（DP-057）；一次只评一个杯子，其余杯子请按 SOP 用纸物理遮住。</p>
   <p class="hint"><b>可以分批评！</b>每次只选部分视频文件（清单 CSV 始终选全量那份），
-     评完本批自动导出 partial 进度；下次回来用「继续上次未完成的评分」接上。
+     评完本批自动导出 partial 进度。<b>下次回来务必把之前导出的全部
+     <code>timer_audit_*.json</code> 都选进下面的「已评进度」</b>——工具靠它认出哪些评过了，
+     不会把评过的重新发一遍，也会明说还差哪几场（localStorage 换机不共享、会丢，别只靠它）。
      顺序、呈现号按种子全局固定，与分几批无关。分批只能分"天"，不能分"人"。</p>
   <p>评分员编号 <input type="text" id="scorerId" placeholder="如 张三 或 R1"></p>
   <p>试次清单 CSV（列头 <code>trial_id,video_filename</code>，可选 <code>assay</code>、<code>declared_empty</code>）
      <input type="file" id="manifestFile" accept=".csv,text/csv"></p>
   <p>视频文件（全部一起选） <input type="file" id="videoFiles" accept="video/*" multiple></p>
+  <p>已评进度（分批续评时必选，可多选）
+     <input type="file" id="priorFiles" accept=".json,application/json" multiple>
+     <span class="hint">之前导出的 <code>timer_audit_*.json</code>，一份都别漏；漏了会重评</span></p>
   <p>随机种子 <input type="number" id="seed" style="width:120px">
      <button id="copySeed" type="button">复制种子</button>
      <span class="hint">顺序按此种子随机生成并记入审计文件</span></p>
@@ -209,6 +229,7 @@ const $ = (id) => document.getElementById(id);
 const state = { scorer: "", seed: 0, fullOrder: [], queue: [], qidx: 0, done: [],
                 files: null, acc: null, rate: 1, redoTrialId: null,
                 started: false, lastTime: undefined, maxT: 0, confirmBatch: null,
+                confirmWipe: null, priorDone: [],
                 assay: "TST", windowS: null, declaredEmpty: false };
 const TRIAL_ID_RE = /^(.+)-ch([1-9][0-9]*)$/;
 
@@ -218,7 +239,7 @@ const TRIAL_ID_RE = /^(.+)-ch([1-9][0-9]*)$/;
  * WallSupportedFloat，是一个正常类别。共用一列会让 FST 的答案被当成排除信号。 */
 const ASSAYS = {
   TST: { q1: "出现过爬自己的尾巴", q1_col: "tail_climbing", requirePrefix: false },
-  FST: { q1: "靠着杯壁或杯里的支架不动过", q1_col: "wall_support_still", requirePrefix: true },
+  FST: { q1: "靠着杯壁不动过", q1_col: "wall_support_still", requirePrefix: true },
 };
 /* 两列都写，没问到的那一列留空（不是 false）：DP-032——空 = 没问过，false = 问了答没有。
  * asked=false（清单声明的空位）时两列都留空：对着一个没有鼠的杯子答"没爬尾巴"是假数据。 */
@@ -235,7 +256,7 @@ function parseFlag(raw) {
 }
 function applyAssay() {
   const a = ASSAYS[state.assay];
-  $("pageTitle").textContent = state.assay + ' 人工计时（秒表法）· 只评"在动"，看不见任何软件结果';
+  $("pageTitle").textContent = state.assay + ' 人工计时（秒表法）v1.6 · 只评"在动"，看不见任何软件结果';
   $("q1Label").textContent = a.q1;
 }
 
@@ -247,7 +268,8 @@ function saveProgress() {
   try {
     localStorage.setItem(LS(), JSON.stringify({
       seed: state.seed, order: state.fullOrder.map(t => t.trial_id),
-      assay: state.assay, done: state.done, ts: Date.now(),
+      assay: state.assay, done: state.done, priorDone: state.priorDone,
+      ts: Date.now(),
     }));
   } catch (e) { /* 隐私模式等：无存档继续，导出不受影响 */ }
 }
@@ -333,34 +355,72 @@ function onStart() {
   if (!vids.length) err.push("请选择视频文件");
   if (!/^\d+$/.test($("seed").value)) err.push("种子必须是非负整数");
   if (err.length) { $("setupErr").textContent = err.join("\n"); return; }
-  mf.text().then((text) => {
+  mf.text().then(async (text) => {
     let manifest;
     try { manifest = parseManifest(text); } catch (e) { $("setupErr").textContent = String(e); return; }
     state.assay = manifest[0].assay; applyAssay();
     const byName = new Map(vids.map(v => [v.name, v]));
     const extra = vids.filter(v => !manifest.some(m => m.filename === v.name)).map(v => v.name);
-    if (extra.length) { $("setupErr").textContent = "多余视频（不在清单）：\n" + extra.join("\n"); state.confirmBatch = null; return; }
+    if (extra.length) {
+      $("setupErr").textContent = "多余视频（不在清单）：\n" + extra.join("\n");
+      state.confirmBatch = null; return;
+    }
     const seed = Number($("seed").value);
     const full = shuffled(manifest, mulberry32(seed)).map(m => ({
       trial_id: m.trial_id, filename: m.filename, file: byName.get(m.filename) || null,
       declared_empty: m.declared_empty, pos: 0 }));
     full.forEach((m, i) => { m.pos = i + 1; });
-    const missing = full.filter(m => !m.file);
+
+    /* 先认出之前评过的，后面每一句「还差几场」才是真话（DP-077）。
+     * 有任何一份对不上就停下报错，不带着可疑的进度往下走。 */
+    const prior = await readPriorDone(Array.from($("priorFiles").files || []),
+                                      state.scorer, state.assay,
+                                      new Set(full.map(m => m.trial_id)));
+    if (prior.errs.length) {
+      $("setupErr").textContent = "「已评进度」文件有问题，先解决再开始：\n" + prior.errs.join("\n");
+      state.confirmBatch = null; return;
+    }
+    const priorDone = Array.from(prior.done).sort();
+
+    /* 没安排到的 = 既没评过、也没选视频的。评过的不必再选视频。 */
+    const missing = full.filter(m => !prior.done.has(m.trial_id) && !m.file);
     if (missing.length) {
-      const fp = full.map(m => m.trial_id).join("|");
+      const nHave = full.filter(m => !prior.done.has(m.trial_id) && m.file).length;
+      const fp = full.map(m => m.trial_id).join("|") + "#" + priorDone.join("|");
       if (!state.confirmBatch || state.confirmBatch.fp !== fp) {
-        state.confirmBatch = { fp, nHave: full.length - missing.length, nMiss: missing.length };
+        state.confirmBatch = { fp, nHave, nMiss: missing.length };
         $("setupErr").textContent =
-          "选了 " + full.length + " 场的清单，但只选到 " + (full.length - missing.length) + " 个视频。\n"
-          + "再点一次「开始评分」= 本批只评已有的 " + (full.length - missing.length) + " 场"
-          + "（剩余 " + missing.length + " 场下次分批续评，进度自动保存）。\n"
-          + "未选中的试次：" + missing.slice(0, 8).map(m => m.trial_id).join("、")
+          "清单共 " + full.length + " 场：之前已评 " + priorDone.length + " 场，本次选到 "
+          + nHave + " 场视频，还有 " + missing.length + " 场没安排。\n"
+          + "再点一次「开始评分」= 本批只评这 " + nHave + " 场（剩下 " + missing.length
+          + " 场下次接着评，届时记得把本次导出的审计文件也选进「已评进度」）。\n"
+          + "既没评过也没选视频的试次：" + missing.slice(0, 8).map(m => m.trial_id).join("、")
           + (missing.length > 8 ? " 等" : "");
         return;
       }
       state.confirmBatch = null;   // 二次点击确认
     }
-    state.seed = seed; state.fullOrder = full;
+
+    /* 「开始评分」= 重开会话，会清掉该评分员的存档进度。原来是**静默**清的，而上面
+     * 那句提示还写着进度会保存 ⇒ 第二天点了这个主按钮就丢进度，工具还把评过的试次
+     * 重新发一遍（DP-077 缺陷②，实测两位评分员各被重发 4 场）。现在必须明确再点一次。 */
+    let saved = null;
+    try { saved = JSON.parse(localStorage.getItem("dpst:v2:" + state.scorer) || "null"); }
+    catch (e) { /* 隐私模式等：读不到就当没有 */ }
+    const nSaved = (saved && saved.done) ? saved.done.length : 0;
+    if (nSaved && state.confirmWipe !== state.scorer) {
+      state.confirmWipe = state.scorer;
+      $("resumeBox").hidden = false;
+      $("setupErr").textContent =
+        "本机存着「" + state.scorer + "」已评 " + nSaved + " 场的进度。\n"
+        + "要接着评，请点下面的「继续上次未完成的评分」。\n"
+        + "再点一次「开始评分」= 放弃这 " + nSaved + " 场存档、从头重开（已经导出的文件不受"
+        + "影响；把它们选进「已评进度」一样能接上）。";
+      return;
+    }
+    state.confirmWipe = null;
+
+    state.seed = seed; state.fullOrder = full; state.priorDone = priorDone;
     state.done = []; state.files = vids;
     rebuildQueue();
     try { localStorage.removeItem("dpst:v2:" + state.scorer);
@@ -369,8 +429,55 @@ function onStart() {
   });
 }
 
+/* 「已经评过」= 本次会话评的 ∪ 从之前导出的审计文件里认出来的。后者只留 trial_id，
+ * 不把旧记录并进 state.done：同一试次评过两遍算哪一遍是**真值口径**，不由工具替人
+ * 决定（DP-077）。这样每份导出仍只含它那一次会话的记录，谁也不会被悄悄覆盖或丢掉。 */
+function doneTidSet() {
+  const s = new Set(state.priorDone);
+  state.done.forEach(d => s.add(d.trial_id));
+  return s;
+}
+function nDone() {
+  const s = doneTidSet();
+  return state.fullOrder.filter(m => s.has(m.trial_id)).length;
+}
+function remainingTrials() {
+  const s = doneTidSet();
+  return state.fullOrder.filter(m => !s.has(m.trial_id)).map(m => m.trial_id);
+}
+
+/* 从之前导出的审计 JSON 认出已评过的试次。任何一份对不上（评分员不符、范式不符、
+ * 试次不在本清单）就报出来并**拒绝开始**——把别人的进度悄悄并进来会污染真值。
+ * 也认 prior_done 字段，所以只选最近那一份也能顺着链条接上。 */
+async function readPriorDone(files, scorer, assay, tidSet) {
+  const done = new Set(), errs = [];
+  for (const f of files) {
+    let d = null;
+    try { d = JSON.parse(await f.text()); }
+    catch (e) { errs.push(f.name + "：不是合法 JSON"); continue; }
+    if (!d || d.format !== "depressionplex.stopwatch-audit.v1") {
+      errs.push(f.name + "：不是本工具导出的审计文件"); continue;
+    }
+    if (String(d.scorer_id || "") !== scorer) {
+      errs.push(f.name + "：是「" + d.scorer_id + "」的进度，本次评分员是「" + scorer + "」");
+      continue;
+    }
+    if (String(d.assay || "TST") !== assay) {
+      errs.push(f.name + "：是 " + (d.assay || "TST") + " 的进度，本次清单是 " + assay); continue;
+    }
+    for (const r of (d.records || [])) {
+      if (!tidSet.has(r.trial_id)) {
+        errs.push(f.name + "：记录里的 " + r.trial_id + " 不在本清单里"); continue;
+      }
+      done.add(r.trial_id);
+    }
+    for (const t of (d.prior_done || [])) { if (tidSet.has(t)) done.add(t); }
+  }
+  return { done, errs };
+}
+
 function rebuildQueue() {
-  const doneTids = new Set(state.done.map(d => d.trial_id));
+  const doneTids = doneTidSet();
   state.queue = state.fullOrder.filter(m => m.file && !doneTids.has(m.trial_id));
   state.qidx = 0;
 }
@@ -399,7 +506,8 @@ function onResume() {
     state.fullOrder = saved.order.map((t, i) => ({ trial_id: t, filename: tid2m.get(t).filename,
       file: byName.get(tid2m.get(t).filename) || null,
       declared_empty: tid2m.get(t).declared_empty, pos: i + 1 }));
-    state.done = saved.done || []; state.files = vids;
+    state.done = saved.done || []; state.priorDone = saved.priorDone || [];
+    state.files = vids;
     rebuildQueue();
     beginSession();
   });
@@ -408,7 +516,7 @@ function onResume() {
 /* ---------------- 计分 ---------------- */
 function beginSession() {
   if (!state.queue.length) {
-    if (state.fullOrder.length && state.done.length >= state.fullOrder.length) {
+    if (state.fullOrder.length && nDone() >= state.fullOrder.length) {
       $("setup").hidden = true; finishSession(); return;   // 全部已评完：直接补出最终文件
     }
     $("setupErr").textContent = "本次所选视频都已评过或不在剩余清单里——请换一批未评的视频"; return;
@@ -473,7 +581,7 @@ function loadTrial(t) {
   t = t || state.queue[state.qidx];
   const redoing = state.redoTrialId !== null;
   $("trialTag").textContent = "试次 " + t.trial_id + (redoing ? "（重做中）" : "");
-  $("trialCount").textContent = "总 " + state.done.length + "/" + state.fullOrder.length
+  $("trialCount").textContent = "总 " + nDone() + "/" + state.fullOrder.length
     + " · 本批剩 " + Math.max(0, state.queue.length - state.qidx);
   state.acc = mobileAccumulator();
   state.started = false;
@@ -620,7 +728,7 @@ function nextTrial() {
   state.qidx += 1;
   saveProgress();
   if (state.qidx >= state.queue.length) {
-    if (state.done.length >= state.fullOrder.length) { finishSession(); return; }
+    if (nDone() >= state.fullOrder.length) { finishSession(); return; }
     batchDone(); return;                // 本批评完但还有未评场次：自动导出 partial
   }
   loadTrial();
@@ -629,10 +737,15 @@ function nextTrial() {
 function batchDone() {
   $("scoring").hidden = true; $("finish").hidden = false;
   exportSnapshot(false);
-  $("finishMsg").textContent = "本批完成：共 " + state.done.length + "/" + state.fullOrder.length
-    + " 场已评，进度已自动导出（文件名带 partial）。下次：打开本文件 → 填同一评分员编号 →"
-    + " 选同一清单 CSV → 只选接下来要评的那几场视频 → 「继续上次未完成的评分」。"
-    + "注意：分批只能分“天”，不能分“人”——每场都必须由两位评分员各自盲评。";
+  const left = remainingTrials();
+  $("finishMsg").textContent = "本批完成。累计已评 " + nDone() + "/" + state.fullOrder.length
+    + " 场；本批这 " + state.done.length + " 场已自动导出（文件名带 partial 与导出时刻）。\n"
+    + "还差 " + left.length + " 场：" + left.join("、") + "\n"
+    + "下次接着评：打开本文件 → 填同一评分员编号 → 选同一份清单 CSV → 把**之前导出的"
+    + "每一份** timer_audit_*.json 都选进「已评进度」（含刚下载这份，漏一份就会重评）"
+    + " → 只选上面列出的那几场视频 → 「开始评分」。\n"
+    + "每份导出只含它那一次会话的记录，所以**每一份都要留着、都要交回**，丢一份就少一批试次。\n"
+    + "注意：分批只能分天，不能分人——每场都必须由两位评分员各自盲评。";
 }
 
 /* ---------------- 完成与导出 ---------------- */
@@ -666,19 +779,28 @@ function download(name, text, mime) {
 }
 
 function exportSnapshot(final) {
-  const date = new Date().toISOString().slice(0, 10);
+  const iso = new Date().toISOString();
+  const date = iso.slice(0, 10);
+  /* 同一天多次导出必须落成不同文件名。只带日期会重名 ⇒ 浏览器改名成 `xxx (1)`，
+   * 转发、拖拽、上传时一覆盖就静默少掉一批试次，而文件名不会告诉你（DP-077 缺陷①：
+   * 2026-09-07 两位评分员各两次导出，四份全叫 partial4of27）。精确到秒 ⇒ 点不出重名。 */
+  const stamp = iso.slice(11, 19).replace(/:/g, "") + "Z";
   const n = state.done.length, m = state.fullOrder.length;
-  const suffix = final ? "" : "_partial" + n + "of" + m;
+  const suffix = (final ? "_final" : "_partial" + n + "of" + m) + "_" + stamp;
   download("human_scores_" + state.assay + "_" + state.scorer + "_" + date + suffix + ".csv",
            csvFromDone(), "text/csv");
   download("timer_audit_" + state.assay + "_" + state.scorer + "_" + date + suffix + ".json",
            JSON.stringify({
     format: "depressionplex.stopwatch-audit.v1",
     assay: state.assay,
+    /* done_count 是**本次会话**的条数，每次重开都从 0 起，别拿它读总进度——正因如此，
+     * 两份都写 done=4 total=27 的文件其实是互不相交的快照（DP-077）。累计看下面两项。 */
     partial: !final, done_count: n, total_trials: m,
+    prior_done: state.priorDone.slice(),
+    cumulative_done_count: nDone(),
     scorer_id: state.scorer, seed: state.seed,
     delivered_order: state.fullOrder.map(o => o.trial_id),   // 恒为该种子序全量，含未评场次
-    tool_version: "v1.5", exported_at: new Date().toISOString(), records: state.done,
+    tool_version: "v1.6", exported_at: iso, records: state.done,
   }, null, 2), "application/json");
 }
 
@@ -686,8 +808,13 @@ function finishSession() {
   $("scoring").hidden = true; $("finish").hidden = false;
   exportSnapshot(true);
   try { localStorage.removeItem(LS()); } catch (e) {}
-  $("finishMsg").textContent = "全部 " + state.done.length + " 个试次已评分，CSV 与审计文件已自动下载。"
-    + "请原样交回两份文件，不要手工改动 CSV（改动会被 §2.1 校验拒收）。";
+  $("finishMsg").textContent = "全部 " + nDone() + "/" + state.fullOrder.length
+    + " 个试次已评分，CSV 与审计文件已自动下载。"
+    + (state.priorDone.length
+       ? "注意：这次导出只含本会话的 " + state.done.length + " 条记录，之前几批各在自己的"
+         + "导出文件里——请把**每一份**都交回，缺一份就少一批试次。"
+       : "")
+    + "请原样交回，不要手工改动 CSV（改动会被 §2.1 校验拒收）。";
 }
 </script>
 </body>
