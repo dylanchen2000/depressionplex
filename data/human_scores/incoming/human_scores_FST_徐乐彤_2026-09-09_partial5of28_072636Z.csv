@@ -1,0 +1,6 @@
+﻿scorer_id,trial_id,assay,mobile_seconds,window_s,tail_climbing,wall_support_still,unscoreable,note,scored_at,presentation_order
+徐乐彤,FST-抑郁4-7-ch3,FST,254.5,362.20,,true,false,,2026-09-09,1
+徐乐彤,FST-正常1-4-ch2,FST,297.8,394.72,,true,false,,2026-09-09,3
+徐乐彤,FST-20mg1周-ch1,FST,313.5,380.68,,false,false,,2026-09-09,5
+徐乐彤,FST-20mg1周-ch2,FST,380.4,380.68,,false,false,,2026-09-09,6
+徐乐彤,FST-20mg1周-ch3,FST,363.1,380.68,,true,false,,2026-09-09,8
