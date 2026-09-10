@@ -1,0 +1,6 @@
+﻿scorer_id,trial_id,assay,mobile_seconds,window_s,tail_climbing,wall_support_still,unscoreable,note,scored_at,presentation_order
+徐乐彤,FST-10mg 2周-ch3,FST,376.8,382.48,,false,false,,2026-09-09,1
+徐乐彤,FST-20mg1周-ch4,FST,318.3,380.68,,true,false,,2026-09-09,3
+徐乐彤,FST-10mg 2周-ch2,FST,240.1,382.48,,true,false,,2026-09-09,4
+徐乐彤,FST-正常1-4-ch4,FST,375.1,394.72,,true,false,,2026-09-09,6
+徐乐彤,FST-10mg 2周-ch1,FST,277.4,382.48,,true,false,,2026-09-09,8
