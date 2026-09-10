@@ -23,6 +23,7 @@ TEST_MODULES = ("test_bouts", "test_rad", "test_geometry", "test_segment",
                 "test_lovo_cv", "test_trial_report",
                 "test_maskseq", "test_video", "test_runner",
                 "test_analyze_cli", "test_timeline", "test_timer_tool",
+                "test_csi_fst_import",
                 # 元守卫：新增 tests/test_*.py 必须同时进这张表，否则此测试变红
                 "test_run_tests_registry")
 
