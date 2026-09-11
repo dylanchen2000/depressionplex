@@ -12,7 +12,7 @@
     本模块只把它们当"体检列"原样存进 statistics，任何聚合都不许用。
 
 如实转载（R3）：`.SET` / `.CLB` 里未经面板/手册确认的偏移一律叫
-`unknown_off_<十进制偏移>`，不许起名。
+`unknown_rel_<相对 base 的十进制偏移>`，不许起名。
 """
 from __future__ import annotations
 
@@ -68,6 +68,45 @@ CSI_TANK_TO_CHAMBER = {1: 1, 2: 2, 3: 3, 4: 4}
 RECORDING_ALIASES = {"20mg 1周": "20mg1周"}
 
 SET_MAGIC = b"FSS3"
+
+#: `.SET` 表头是变长的：偏移 4 是孔位数，紧跟 n_tanks 个 12 字节三元组，
+#: 之后所有字段都相对 `base = 8 + 12 * n_tanks` 定位。见 parse_set 的 docstring。
+SET_MAX_TANKS = 4
+SET_MOTION_REL = 51        # 13 个 Motion 数相对 base 的偏移
+SET_SENTINEL_REL = 123     # 第 1 个哨兵对相对 base 的偏移
+SET_SENTINEL_STRIDE = 276  # 哨兵对之间的间距
+SET_N_SENTINELS = 4        # 哨兵块恒为 4 个，**与 n_tanks 无关**
+
+#: 13 个 Motion 数在文件里的位置 → 面板字段，**已定到的程度**（2026-09-11）。
+#:
+#: 定法：拿两份只改 Motion 的 `.SET` 做受控差分。用户把
+#: Merge Bouts Limit 20→25、Min Length Thresh 15→18、Noise Thresh 10→15、
+#: Bin Size 5→8（挣扎侧和放弃侧都改），其余 5 个字段不动。
+#: 于是"哪个位置是哪个**字段类型**"被新值一一点亮，5 个没变的位置就是
+#: 挣扎侧独有的那 5 个字段。
+#:
+#: **仍未定的两件事**（都需要一份"13 个值互不相同"的 `.SET`）：
+#:   1. 同类型的两份里，哪个是 Struggle 哪个是 Float（4 对，各 2 种可能）
+#:   2. idx 0 和 idx 2 哪个是 WaterSurProxThresh、哪个是 ClimbMagnThresh
+#:      （两者都是 15 且都没变，这次差分点不亮）
+#: 所以还剩 2**5 = 32 种可能的完整排列，比原来的天文数字已经小了极多。
+#:
+#: **这个常量只作记录，不许拿它给 parse_set 的返回键起名**（R3）。
+MOTION_FIELD_HINTS = (
+    "WaterSurProxThresh 或 ClimbMagnThresh（与 idx2 互换，未定）",
+    "ClimbHeightThresh",
+    "WaterSurProxThresh 或 ClimbMagnThresh（与 idx0 互换，未定）",
+    "MaxMoveThresh（唯一的 float32）",
+    "EarlyMergeLimit",
+    "MinLengthThresh（与 idx6 成对，Struggle/Float 未定）",
+    "MinLengthThresh（与 idx5 成对，Struggle/Float 未定）",
+    "NoiseThreshFrames（与 idx10 成对，Struggle/Float 未定）",
+    "MergeBoutsLimit（与 idx11 成对，Struggle/Float 未定）",
+    "BinSizeSeconds（与 idx12 成对，Struggle/Float 未定）",
+    "NoiseThreshFrames（与 idx7 成对，Struggle/Float 未定）",
+    "MergeBoutsLimit（与 idx8 成对，Struggle/Float 未定）",
+    "BinSizeSeconds（与 idx9 成对，Struggle/Float 未定）",
+)
 
 #: 孔位文件名主干正则。**（N）后面可能还有人写的后缀**（实测存在 `抑郁8-10（4）空鼠`），
 #: 所以 suffix 用 `.*` 兜住，**不许把 `$` 顶在 `）` 后面**——那样会静默漏掉空鼠那一份。
@@ -413,20 +452,35 @@ def match_bin_to_tanks(bin_rows: Sequence[dict], tanks: Sequence[CsiTank]) -> di
 
 
 def parse_set(path) -> dict:
-    """解析 CSI 的 FST 参数文件（.SET）。布局已按 Settings 面板 7 页逐项核对。
+    """解析 CSI 的 FST 参数文件（.SET）。
 
-    键名见规格 §4.3 / §7.2。**99 起不是 4 字节对齐**（84–98 是 1 字节打包区），
-    按字节偏移读。未确认的偏移一律 `unknown_off_<十进制偏移>`（R3）。
-    magic 不对、长度不够都抛 CsiParseError。
+    **表头是变长的。** 偏移 4 是孔位数 `n_tanks`，紧跟着 `n_tanks` 个 12 字节三元组，
+    所以**后面每一个字段的位置都取决于 n_tanks**：
 
-    注：规格说 187–1610 全零，**实测有非零簇**（443/457-462/719/733-738/
-    995/1009-1014/1271-1274/1535/1555，276 字节间距，疑似每孔位结构）。
-    本函数**不解析、不校验、不起名**这段保留区（R3）——见 PR discrepancy B。
+        base = 8 + 12 * n_tanks
+
+    两份实测文件证实：`10mg 2周.SET` n_tanks=4 → base=56（文件 1611 字节）；
+    `正常1-4对照更改.SET` n_tanks=1 → base=20（文件 1527 字节）。
+    两份文件里**所有字段相对 base 的偏移完全一致**（差值恒为 36 = 3 个三元组）。
+
+    **不许写死绝对偏移。** 这正是 2026-09-11 修掉的 bug：旧版按 n_tanks=4 的绝对偏移读，
+    喂一份 n_tanks=1 的文件会**静默返回垃圾数字而不抛任何异常**
+    （frame_padding 读成 -1711276032、high_cutoff 读成 6.16e-33）。
+    最危险的一类失败：数字看着是数字，全是错的。
+
+    结构校验：4 个哨兵对 (−1.0f, −1i) 必须落在 `base + 123 + 276*k`（k=0..3）。
+    两份文件都成立。对不上就抛 CsiParseError —— **宁可大声失败，也不许猜着往下解析。**
+    注意这 4 个哨兵块**恒为 4 个，与 n_tanks 无关**（n_tanks=1 时仍是 4 个），
+    所以它们**不是**"每孔位一块"，具体是什么未知（R3，不起名）。
+
+    键名见规格 §4.3 / §7.2。未确认的偏移一律 `unknown_rel_<相对 base 的偏移>`（R3）。
+    **2026-09-11 起从 `unknown_off_*`（绝对）改名为 `unknown_rel_*`（相对）**——
+    绝对偏移随 n_tanks 变化，拿它当键名本身就是错的。
     """
     path = Path(path)
     data = path.read_bytes()
-    if len(data) < 187:
-        raise CsiParseError(f"{path.name}: .SET 只有 {len(data)} 字节，不够 187")
+    if len(data) < 8:
+        raise CsiParseError(f"{path.name}: .SET 只有 {len(data)} 字节，连表头都不够")
     if data[:4] != SET_MAGIC:
         raise CsiParseError(f"{path.name}: magic {data[:4]!r} != {SET_MAGIC!r}")
 
@@ -437,38 +491,63 @@ def parse_set(path) -> dict:
         return struct.unpack_from("<f", data, off)[0]
 
     n_tanks = i32(4)
+    if not 1 <= n_tanks <= SET_MAX_TANKS:
+        raise CsiParseError(
+            f"{path.name}: 孔位数 {n_tanks} 不在 1..{SET_MAX_TANKS}，拒绝按它算 base"
+        )
+    base = 8 + 12 * n_tanks
+
+    need = base + SET_SENTINEL_REL + SET_SENTINEL_STRIDE * (SET_N_SENTINELS - 1) + 8
+    if len(data) < need:
+        raise CsiParseError(
+            f"{path.name}: n_tanks={n_tanks} 需要至少 {need} 字节，实际只有 {len(data)}"
+        )
+
+    # 结构校验：4 个哨兵对必须都在预期位置。这是唯一跨两份文件都验证过的强不变量，
+    # 比"文件总长等于某个公式"可靠（后者只有 2 个数据点，拟合出来的直线未经证实）。
+    for k in range(SET_N_SENTINELS):
+        off = base + SET_SENTINEL_REL + SET_SENTINEL_STRIDE * k
+        if not (abs(f32(off) + 1.0) < 1e-6 and i32(off + 4) == -1):
+            raise CsiParseError(
+                f"{path.name}: 第 {k + 1} 个哨兵对应在偏移 {off}"
+                f"（base={base}+{SET_SENTINEL_REL}+{SET_SENTINEL_STRIDE}*{k}），"
+                f"实读 {f32(off)!r}/{i32(off + 4)!r} —— .SET 布局假设被打破，"
+                f"不许猜着解析。拿这份文件去核对 docs 里的字节表。"
+            )
+
     tank_triples = [tuple(i32(8 + 12 * k + d) for d in (0, 4, 8)) for k in range(n_tanks)]
 
-    # 107–158：13 个数 = 12 个 int32 + 1 个 float32。
-    # 唯一那个 float32 是第 4 项（偏移 119，MaxMoveThresh=2.0，0x40000000）；
-    # 其余 12 项（含末项偏移 155）都是 int32。逐项对应未定（R3），只存有序 list。
+    # base+51 起：13 个数 = 12 个 int32 + 1 个 float32。
+    # 唯一那个 float32 是第 4 项（idx 3 = MaxMoveThresh = 2.0，0x40000000）。
+    # 逐项对应见 MOTION_FIELD_HINTS —— 已定到"字段类型"，Struggle/Float 归属未定（R3）。
     motion_ints: list[object] = []
     for k in range(13):
-        off = 107 + 4 * k
-        motion_ints.append(f32(off) if off == 119 else i32(off))
+        off = base + SET_MOTION_REL + 4 * k
+        motion_ints.append(f32(off) if k == 3 else i32(off))
 
     return {
         "n_tanks": n_tanks,
+        "base": base,
         "tank_triples": tank_triples,
-        "unknown_off_56": i32(56),
-        "frame_padding": i32(60),
-        "bkgd_gen_thresh": i32(64),
-        "only_change_bg_above_water": i32(68),
-        "high_cutoff": f32(72),
-        "low_cutoff": f32(76),
-        "learning_memory": f32(80),
-        "bool_block": data[84:99],
-        "struggle_esc_thresh": f32(99),
-        "float_immobile_thresh": f32(103),
+        "unknown_rel_0": i32(base + 0),
+        "frame_padding": i32(base + 4),
+        "bkgd_gen_thresh": i32(base + 8),
+        "only_change_bg_above_water": i32(base + 12),
+        "high_cutoff": f32(base + 16),
+        "low_cutoff": f32(base + 20),
+        "learning_memory": f32(base + 24),
+        "bool_block": data[base + 28 : base + 43],
+        "struggle_esc_thresh": f32(base + 43),
+        "float_immobile_thresh": f32(base + 47),
         "motion_ints": motion_ints,
-        "unknown_off_159": i32(159),
-        "unknown_off_163": i32(163),
-        "unknown_off_167": i32(167),
-        "unknown_off_171": i32(171),
-        "unknown_off_175": i32(175),
-        # 规格表把 179/183 标成"哨兵"（实测 −1.0 / −1），但没给确认名 → 按 R3 用偏移名
-        "unknown_off_179": f32(179),
-        "unknown_off_183": i32(183),
+        "unknown_rel_103": i32(base + 103),
+        "unknown_rel_107": i32(base + 107),
+        "unknown_rel_111": i32(base + 111),
+        "unknown_rel_115": i32(base + 115),
+        "unknown_rel_119": i32(base + 119),
+        # base+123 / base+127 是第 1 个哨兵对（已在上面校验过），按 R3 仍用偏移名
+        "unknown_rel_123": f32(base + 123),
+        "unknown_rel_127": i32(base + 127),
     }
 
 

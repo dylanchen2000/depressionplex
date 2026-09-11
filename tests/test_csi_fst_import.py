@@ -8,7 +8,7 @@
 
 三处与规格对不上的地方（A/B/C）在对应测试里用注释标了，详见 PR 正文 discrepancy 段：
   A. Statistics 块实测在 D 列、有 6 个事件列（规格散文说第 0 列、3 列）——解析器按通用定位。
-  B. .SET 保留区 187–1610 实测有非零簇（规格说全零）——不解析/不校验/不起名。
+  B. .SET 表头变长（base = 8 + 12*n_tanks），保留区非全零——见 parse_set docstring。
   C. 实测 28/28 孔位都有 Statistics 块（规格说 8 个缺块）——块缺失分支用合成文件测。
 """
 from __future__ import annotations
@@ -33,6 +33,7 @@ from depressionplex.csi.fst_import import (
     match_bin_to_tanks,
     parse_bin_xlsx,
     parse_clb,
+    MOTION_FIELD_HINTS,
     parse_set,
     parse_tank_filename,
     parse_tank_xlsx,
@@ -295,8 +296,9 @@ def test_unknown_event_name_raises() -> None:
 def test_set_golden_7_2() -> None:
     s = parse_set(FIX / "10mg 2周.SET")
     assert s["n_tanks"] == 4
+    assert s["base"] == 56  # 8 + 12*4
     assert s["tank_triples"] == [(200, 80, 70), (200, 70, 60), (200, 80, 80), (200, 60, 60)]
-    assert s["unknown_off_56"] == 18
+    assert s["unknown_rel_0"] == 18
     assert s["frame_padding"] == 10
     assert s["bkgd_gen_thresh"] == 5000
     assert s["only_change_bg_above_water"] == 1
@@ -307,11 +309,11 @@ def test_set_golden_7_2() -> None:
     assert abs(s["float_immobile_thresh"] - 0.09) < 1e-6
     assert s["motion_ints"] == [15, 10, 15, 2.0, 5, 15, 15, 10, 20, 5, 10, 20, 5]
     assert s["bool_block"] == bytes([0, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0])
-    assert s["unknown_off_159"] == 1
-    assert s["unknown_off_163"] == 1
-    assert s["unknown_off_167"] == 1
-    assert s["unknown_off_171"] == 0
-    assert s["unknown_off_175"] == 0
+    assert s["unknown_rel_103"] == 1
+    assert s["unknown_rel_107"] == 1
+    assert s["unknown_rel_111"] == 1
+    assert s["unknown_rel_115"] == 0
+    assert s["unknown_rel_119"] == 0
 
 
 def test_set_motion_multiset_matches_panel() -> None:
@@ -334,6 +336,103 @@ def test_set_too_short_raises() -> None:
         p = Path(d) / "short.SET"
         p.write_bytes(SET_MAGIC + b"\x00" * 10)
         _expect_raise(parse_set, p)
+
+
+def test_set_variable_header_1_tank() -> None:
+    """`正常1-4对照更改.SET`：n_tanks=1 → base=20。**这是回归测试的重点。**
+
+    2026-09-11 之前的实现按 n_tanks=4 的绝对偏移读，喂这份文件会**静默返回垃圾**
+    （frame_padding 读成 -1711276032、high_cutoff 读成 6.16e-33），一个异常都不抛。
+    """
+    s = parse_set(FIX / "正常1-4对照更改.SET")
+    assert s["n_tanks"] == 1
+    assert s["base"] == 20                      # 8 + 12*1
+    assert s["tank_triples"] == [(200, 70, 60)]
+    # 除 Motion 区和阈值外，其余字段必须和 4 孔位那份完全一样 —— 证明 base 算对了
+    assert s["unknown_rel_0"] == 18
+    assert s["frame_padding"] == 10
+    assert s["bkgd_gen_thresh"] == 5000
+    assert s["only_change_bg_above_water"] == 1
+    assert abs(s["high_cutoff"] - 0.2) < 1e-6
+    assert abs(s["low_cutoff"] - 0.01) < 1e-6
+    assert abs(s["learning_memory"] - 0.95) < 1e-6
+    assert s["bool_block"] == bytes([0, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0])
+    assert s["unknown_rel_103"] == 1
+    assert s["unknown_rel_107"] == 1
+    assert s["unknown_rel_111"] == 1
+    assert s["unknown_rel_115"] == 0
+    assert s["unknown_rel_119"] == 0
+    # 用户改过的：Merge 20→25、MinLen 15→18、Noise 10→15、Bin 5→8（挣扎侧+放弃侧）
+    assert s["motion_ints"] == [15, 10, 15, 2.0, 5, 18, 18, 15, 25, 8, 15, 25, 8]
+    # 阈值沿用对照批的 0.15 / 0.12，本次没动
+    assert abs(s["struggle_esc_thresh"] - 0.15) < 1e-6
+    assert abs(s["float_immobile_thresh"] - 0.12) < 1e-6
+
+
+def test_set_motion_differential_pins_field_types() -> None:
+    """受控差分：把 MOTION_FIELD_HINTS 的推导过程钉成测试。
+
+    用户只改了 4 个字段（挣扎侧和放弃侧各一份，共 8 个数）：
+    Merge 20→25、MinLen 15→18、Noise 10→15、Bin 5→8。
+    所以**恰好 8 个位置变、5 个位置不变**，且变的那 8 个位置的新值
+    唯一决定了它是哪个字段类型。这条测试保证以后有人动 parse_set 时，
+    这个推导的前提还站得住。
+    """
+    a = parse_set(FIX / "10mg 2周.SET")["motion_ints"]
+    b = parse_set(FIX / "正常1-4对照更改.SET")["motion_ints"]
+    assert len(a) == len(b) == 13
+
+    changed = [i for i in range(13) if a[i] != b[i]]
+    assert changed == [5, 6, 7, 8, 9, 10, 11, 12], changed
+
+    # 没变的 5 个 = 挣扎侧独有的 5 个字段
+    assert [a[i] for i in (0, 1, 2, 3, 4)] == [15, 10, 15, 2.0, 5]
+
+    # 变的 8 个，旧值→新值必须落在用户声明的 4 种改动上
+    declared = {(20, 25), (15, 18), (10, 15), (5, 8)}
+    for i in changed:
+        assert (a[i], b[i]) in declared, (i, a[i], b[i])
+
+    # 成对关系：同类型的两个位置，旧值和新值都相同
+    for i, j in ((5, 6), (7, 10), (8, 11), (9, 12)):
+        assert (a[i], b[i]) == (a[j], b[j])
+
+
+def test_motion_field_hints_shape() -> None:
+    """MOTION_FIELD_HINTS 只是记录，但它的形状要和差分结论一致。"""
+    assert len(MOTION_FIELD_HINTS) == 13
+    assert MOTION_FIELD_HINTS[1] == "ClimbHeightThresh"
+    assert MOTION_FIELD_HINTS[3].startswith("MaxMoveThresh")
+    assert MOTION_FIELD_HINTS[4] == "EarlyMergeLimit"
+    # 4 对同类型字段，每对两个位置的提示文本必须指向同一个字段类型
+    for i, j in ((5, 6), (7, 10), (8, 11), (9, 12)):
+        assert MOTION_FIELD_HINTS[i].split("（")[0] == MOTION_FIELD_HINTS[j].split("（")[0]
+    # idx0 / idx2 那对还没定死，提示里必须写着"未定"
+    assert "未定" in MOTION_FIELD_HINTS[0] and "未定" in MOTION_FIELD_HINTS[2]
+
+
+def test_set_broken_sentinel_raises() -> None:
+    """哨兵校验必须真的会拦人：破坏第 3 个哨兵，要抛 CsiParseError 而不是返回垃圾。"""
+    data = bytearray((FIX / "10mg 2周.SET").read_bytes())
+    off = 56 + 123 + 276 * 2          # base=56，第 3 个哨兵
+    assert data[off:off + 4] == struct.pack("<f", -1.0)
+    data[off:off + 4] = struct.pack("<f", 3.14)
+    with tempfile.TemporaryDirectory() as d:
+        p = Path(d) / "broken.SET"
+        p.write_bytes(bytes(data))
+        _expect_raise(parse_set, p)
+
+
+def test_set_bad_tank_count_raises() -> None:
+    """孔位数越界要拦住：0 和 99 都不许拿来算 base。"""
+    good = (FIX / "10mg 2周.SET").read_bytes()
+    for bad in (0, -1, 99):
+        data = bytearray(good)
+        data[4:8] = struct.pack("<i", bad)
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / f"nt{bad}.SET"
+            p.write_bytes(bytes(data))
+            _expect_raise(parse_set, p)
 
 
 # ---------------------------------------------------------------------------
