@@ -52,7 +52,11 @@ class CsiParseError(Exception):
 
 #: 28 个孔位里实际出现过的全部事件名。`Climb` 在 2 个孔位触发（7.76 / 12.68 s），
 #: 不许省掉；出现未列入的名字要抛 CsiParseError，不许静默丢弃。
-CSI_EVENTS = ("Immobile", "Swim", "Escape", "Climb", "PassDive")
+#: CSI 认识的全部事件类。前 5 类在 32 个孔位的时间线里实际出现过；
+#: `Dive` 至今未在任何时间线里出现，但它**是 CSI 的正式类别**——
+#: 每份导出的 Statistics 块表头都列着它（Escape|Immobile|Climb|Dive|PassDive|Swim）。
+#: 所以它属于合法数据而不是脏数据，必须收进来，否则将来遇到就会误报解析失败。
+CSI_EVENTS = ("Immobile", "Swim", "Escape", "Climb", "Dive", "PassDive")
 
 #: CSI 孔位号 → 我们的 chamber 号。证据：正常1-4 的 4 个孔位 Ranges-Immobile
 #: 依次为 21.76 / 104.36 / 208.72 / 23.24，人工（陈璇 09-10）依次为

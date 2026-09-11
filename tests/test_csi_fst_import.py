@@ -536,6 +536,10 @@ def test_match_bin_real_28() -> None:
 # 常量自检
 # ---------------------------------------------------------------------------
 def test_constants() -> None:
-    assert CSI_EVENTS == ("Immobile", "Swim", "Escape", "Climb", "PassDive")
+    assert CSI_EVENTS == ("Immobile", "Swim", "Escape", "Climb", "Dive", "PassDive")
+    # Statistics 块表头列出的 6 个类必须全在 CSI_EVENTS 里：块表头是 CSI 自己的
+    # 类别清单，少一个就会把合法导出误判成脏数据。`Dive` 就是这么补进来的。
+    for cls in ("Escape", "Immobile", "Climb", "Dive", "PassDive", "Swim"):
+        assert cls in CSI_EVENTS
     assert CSI_TANK_TO_CHAMBER == {1: 1, 2: 2, 3: 3, 4: 4}
     assert SET_MAGIC == b"FSS3"
