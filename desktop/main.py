@@ -1,125 +1,100 @@
-"""Entry point for DEPRESSION-PLEX desktop application."""
+"""DEPRESSION-PLEX 桌面外壳入口。
 
+启动方式**只有一种**（架构 §3.4）：仓根为 cwd，`python -m desktop.main`；
+`--self-test` 是无显示自检，CI 的唯一判据。
+
+退出码：0 = 正常 / 自检通过；2 = 自检不通过（与引擎 CLI 的 2 同义：判据不满足）。
+"""
+
+import os
 import sys
 import time
-import os
-from pathlib import Path
-
-# Ensure UTF-8 encoding for stdout/stderr on Windows (handles Chinese characters)
-if sys.platform == 'win32':
-    import io
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
-    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
 
 import PySide6
 from PySide6.QtWidgets import QApplication
 
-from desktop.app.main_window import MainWindow
+from desktop.app.main_window import MainWindow, PAGE_ORDER
+from desktop.app.pages import placeholders
 from desktop.app.utils.paths import resource_path, user_data_dir
 
+# Windows 控制台默认不是 UTF-8，中文页名会抛 UnicodeEncodeError 而不是打印乱码
+# ——那会让自检以「崩溃」而不是「不通过」的形式失败，归因时容易找错方向。
+if sys.platform == "win32":
+    import io
 
-def load_stylesheet(app: QApplication) -> str:
-    """Load the dark theme stylesheet.
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 
-    Args:
-        app: QApplication instance
+STYLESHEET = "app/styles/dark.qss"
 
-    Returns:
-        Status message (empty if loaded successfully)
-    """
-    stylesheet_path = resource_path("app/styles/dark.qss")
-    if stylesheet_path.exists():
-        with open(stylesheet_path, 'r', encoding='utf-8') as f:
-            app.setStyleSheet(f.read())
-        return ""
-    else:
-        return "样式表缺失"
+
+def load_stylesheet(app: QApplication) -> bool:
+    """套上暗色皮肤。返回是否加载成功。"""
+    path = resource_path(STYLESHEET)
+    if not path.exists():
+        return False
+    app.setStyleSheet(path.read_text(encoding="utf-8"))
+    return True
 
 
 def self_test() -> int:
-    """Run self-test: construct all pages, print diagnostics, exit cleanly.
+    """无显示自检：逐个构造页面、核对页面清单、打印耗时，**不起窗不进事件循环**。
 
-    This mode verifies that the application can be instantiated without
-    requiring a display (offscreen mode) and that all pages can be constructed.
-
-    Returns:
-        Exit code (0 for success)
+    任何一条不满足都返回 2。**尤其是皮肤缺失也算不通过**——`dark.qss` 是打包时
+    靠 spec 的 `datas` 带进去的，漏了它产品能启动但一身默认灰皮，
+    而「能启动」正是最容易被当成通过的那种失败（B10 改 spec 时最容易踩）。
     """
-    start_time = time.time()
-
-    # Create application
+    t0 = time.perf_counter()
     app = QApplication(sys.argv)
+    problems: list[str] = []
 
-    # Print environment info
-    print(f"PySide6 version: {PySide6.__version__}")
-    print(f"QT_QPA_PLATFORM: {os.environ.get('QT_QPA_PLATFORM', 'not set')}")
-    print(f"user_data_dir: {user_data_dir()}")
-    print()
+    print(f"PySide6 {PySide6.__version__}")
+    print(f"QT_QPA_PLATFORM={os.environ.get('QT_QPA_PLATFORM', '(未设置)')}")
+    # 只算路径不建目录：自检是诊断，不该在客户机上留下任何东西
+    print(f"user_data_dir={user_data_dir(create=False)}")
 
-    # Load stylesheet
-    stylesheet_status = load_stylesheet(app)
-    if stylesheet_status:
-        print(f"WARNING: {stylesheet_status}")
+    if load_stylesheet(app):
+        print(f"皮肤已加载 {STYLESHEET}")
     else:
-        print("Stylesheet loaded: app/styles/dark.qss")
-    print()
+        problems.append(f"皮肤缺失：{resource_path(STYLESHEET)}")
 
-    # Construct main window (this constructs all pages)
-    print("Constructing pages...")
-    page_times = {}
+    # 逐个单独构造，时间才是真的量出来的；顺带证明每个页面**不依赖父窗口**也能构造
+    print("逐页构造：")
+    for name, cls_name in PAGE_ORDER:
+        cls = getattr(placeholders, cls_name)
+        t = time.perf_counter()
+        cls()
+        print(f"  {name} ({cls_name}) {(time.perf_counter() - t) * 1000:.2f} ms")
 
     window = MainWindow()
+    got = tuple(window.pages)
+    want = tuple(name for name, _ in PAGE_ORDER)
+    if got != want:
+        problems.append(f"页面清单不符：期望 {want}，实际 {got}")
 
-    # Measure construction time for each page
-    # Pages are already constructed in MainWindow.__init__
-    for page_name, page_widget in window.pages.items():
-        page_start = time.time()
-        # Page is already constructed, just record the class
-        page_class = page_widget.__class__.__name__
-        page_elapsed = (time.time() - page_start) * 1000  # milliseconds
-        page_times[page_name] = (page_class, page_elapsed)
-        print(f"  {page_name} ({page_class}): {page_elapsed:.2f} ms")
+    total_ms = (time.perf_counter() - t0) * 1000
+    if problems:
+        for p in problems:
+            print(f"自检不通过：{p}", file=sys.stderr)
+        print(f"SELF-TEST FAILED pages={len(got)} total_ms={total_ms:.2f}")
+        return 2
 
-    print()
-
-    # Calculate total time
-    total_ms = (time.time() - start_time) * 1000
-
-    # Print summary
-    print(f"Total pages constructed: {len(page_times)}")
-    print(f"Total startup time: {total_ms:.2f} ms")
-    print()
-
-    # Final OK line (machine-readable)
-    print(f"SELF-TEST OK pages={len(page_times)} total_ms={total_ms:.2f}")
-
-    # Clean exit without show() or exec()
+    print(f"SELF-TEST OK pages={len(got)} total_ms={total_ms:.2f}")
     return 0
 
 
 def main() -> int:
-    """Main entry point for the application.
-
-    Returns:
-        Exit code
-    """
-    # Check for self-test mode
-    if len(sys.argv) > 1 and sys.argv[1] == '--self-test':
+    if "--self-test" in sys.argv[1:]:
         return self_test()
 
-    # Normal GUI mode
     app = QApplication(sys.argv)
-
-    # Load stylesheet
-    load_stylesheet(app)
-
-    # Create and show main window
+    if not load_stylesheet(app):
+        # 正常启动时皮肤缺失不拦人（能用比好看重要），但必须说出来
+        print(f"警告：皮肤缺失 {resource_path(STYLESHEET)}", file=sys.stderr)
     window = MainWindow()
     window.show()
-
-    # Enter event loop
     return app.exec()
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     sys.exit(main())

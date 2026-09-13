@@ -17,28 +17,35 @@ from typing import Set
 
 ROOT = Path(__file__).resolve().parent.parent
 
-# Python 标准库白名单（3.11 标准库，不完全列举但覆盖常用模块）
-STDLIB_MODULES = {
-    # 核心内置
-    "abc", "argparse", "asyncio", "base64", "collections", "contextlib",
-    "copy", "dataclasses", "datetime", "decimal", "difflib", "enum",
-    "functools", "hashlib", "heapq", "io", "itertools", "json",
-    "logging", "math", "os", "pathlib", "pickle", "platform",
-    "pprint", "queue", "random", "re", "shutil", "socket",
-    "sqlite3", "string", "struct", "subprocess", "sys", "tempfile",
-    "textwrap", "threading", "time", "traceback", "typing", "urllib",
-    "uuid", "warnings", "weakref", "zipfile",
-    # 特定于平台或 typing 扩展
-    "typing_extensions", "__future__",
-}
+# 标准库判定**用解释器自己的清单**（3.10+ 的 `sys.stdlib_module_names`），不手抄白名单。
+# 手抄的表迟早漏一个（`csv` / `shlex` / `signal` / `webbrowser` …），漏了就变成假违规，
+# 而假违规的下一步永远是有人把守卫改松——那才是真损失。
+STDLIB_MODULES = frozenset(sys.stdlib_module_names) | {"__future__"}
 
 
 def collect_desktop_python_files() -> list[Path]:
-    """收集 desktop/ 下所有 .py 文件。"""
-    desktop_dir = ROOT / "desktop"
-    if not desktop_dir.exists():
-        return []
-    return sorted(desktop_dir.rglob("*.py"))
+    """收集 desktop/ 下所有 .py 文件。
+
+    **B1 已交付，所以「一个文件都没收到」本身就是故障**（目录被删、或 rglob 写错），
+    不许当成通过：调用方一律先 `assert files`。本仓吃过三次同型教训
+    （DP-069 / DP-071 / DP-076，以及 DP-098 里我自己改掉的两条）——
+    **能被跳过的守卫等于装饰。**
+    """
+    return sorted((ROOT / "desktop").rglob("*.py"))
+
+
+def _parse(file_path: Path) -> ast.Module:
+    """解析一个文件。**语法错误直接让守卫红**，不许静默跳过。
+
+    原写法 `except SyntaxError: return set(), set()` 的后果是：一个语法坏掉的文件
+    在三条 import 守卫里全部「通过」。它只有被 main 导入时才会在自检里暴露；
+    一个还没被导入的模块可以带着违规安静躺在仓里。
+    """
+    src = file_path.read_text(encoding="utf-8")
+    try:
+        return ast.parse(src)
+    except SyntaxError as e:
+        raise AssertionError(f"{file_path.relative_to(ROOT)} 语法错误：{e}") from e
 
 
 def extract_imports_from_ast(file_path: Path) -> tuple[Set[str], Set[str]]:
@@ -46,12 +53,13 @@ def extract_imports_from_ast(file_path: Path) -> tuple[Set[str], Set[str]]:
 
     Returns:
         (顶层模块集合, 所有 from...import 的模块集合)
+
+    相对导入（`from .paths import ...`）记成 `.模块名`：外壳内部约定用**绝对导入**
+    （`from desktop.app.… import`，见架构 §3.4 的入口裁决），
+    所以相对导入由 `test_absolute_imports_only` 单独判违规，
+    而不是在这里被误当成第三方包 `paths`。
     """
-    try:
-        tree = ast.parse(file_path.read_text(encoding="utf-8"))
-    except SyntaxError:
-        # 语法错误会在其他地方被发现，这里跳过
-        return set(), set()
+    tree = _parse(file_path)
 
     top_level_imports = set()
     from_imports = set()
@@ -64,6 +72,9 @@ def extract_imports_from_ast(file_path: Path) -> tuple[Set[str], Set[str]]:
                 top_level_imports.add(top_module)
 
         elif isinstance(node, ast.ImportFrom):
+            if node.level:                      # from . / from .foo
+                from_imports.add("." * node.level + (node.module or ""))
+                continue
             if node.module:
                 # from foo.bar import baz -> 记录 "foo.bar"
                 from_imports.add(node.module)
@@ -80,10 +91,7 @@ def check_sys_path_manipulation(file_path: Path) -> list[str]:
     Returns:
         违规行号列表（字符串形式）
     """
-    try:
-        tree = ast.parse(file_path.read_text(encoding="utf-8"))
-    except SyntaxError:
-        return []
+    tree = _parse(file_path)
 
     violations = []
 
@@ -116,9 +124,7 @@ def test_no_engine_imports():
     外壳与引擎之间是进程边界，GUI 只起子进程 + 读文件。
     """
     files = collect_desktop_python_files()
-    if not files:
-        # desktop/ 尚不存在，本测试通过（B1 未交付时）
-        return
+    assert files, "desktop/ 下一个 .py 都没扫到——目录被删或 glob 写错，这不是通过"
 
     violations = []
     forbidden_prefixes = ["depressionplex", "assay_core"]
@@ -150,8 +156,7 @@ def test_third_party_whitelist():
     标准库随意用，但第三方库只许 PySide6（不许引入 onnxruntime / opencv / torch 等）。
     """
     files = collect_desktop_python_files()
-    if not files:
-        return
+    assert files, "desktop/ 下一个 .py 都没扫到——目录被删或 glob 写错，这不是通过"
 
     violations = []
 
@@ -163,15 +168,16 @@ def test_third_party_whitelist():
             if module in STDLIB_MODULES:
                 continue
 
-            # 跳过本项目包
+            # 跳过本项目包（`depressionplex` / `assay_core` 由规则 1 单独报，
+            # 免得同一处违规在两条守卫里各报一遍、掩掉真正的措辞）
             if module in ("desktop", "depressionplex", "assay_core"):
                 continue
 
             # 只允许 PySide6
             if module != "PySide6":
                 violations.append(
-                    f"{file_path.relative_to(ROOT)} line ?: import {module} "
-                    f"(第三方库只许 PySide6)"
+                    f"{file_path.relative_to(ROOT)}: import {module}"
+                    f"（第三方库只许 PySide6）"
                 )
 
     assert not violations, (
@@ -186,8 +192,7 @@ def test_no_sys_path_magic():
     sys.path 魔法会导致导入不可预测，且 PyInstaller 打包后无效。
     """
     files = collect_desktop_python_files()
-    if not files:
-        return
+    assert files, "desktop/ 下一个 .py 都没扫到——目录被删或 glob 写错，这不是通过"
 
     violations = []
 
@@ -222,12 +227,111 @@ def test_entry_point_aligns_with_ci():
         "desktop/main.py 缺少 '--self-test' 参数（自检入口）"
     )
 
-    # workflow 必须存在且包含 '-m desktop.main --self-test'
+    # workflow 必须存在且**整条命令**与架构 §3.4 定的形式一致。
+    # 只分别检查 "desktop.main" 与 "--self-test" 是不够的：`python desktop/main.py`
+    # 这种写法也能同时命中两个子串，而它和 `-m` 的导入语义不同（前者不把仓根当包根，
+    # `from desktop.app.…` 会直接 ImportError）。
     assert workflow.exists(), "desktop-selftest.yml 不存在（CI 未就绪）"
     workflow_content = workflow.read_text()
-    assert "desktop.main" in workflow_content, (
-        "desktop-selftest.yml 缺少 'desktop.main'（入口模块）"
+    assert "-m desktop.main --self-test" in workflow_content, (
+        "desktop-selftest.yml 里的自检命令不是 `python -m desktop.main --self-test`"
     )
-    assert "--self-test" in workflow_content, (
-        "desktop-selftest.yml 缺少 '--self-test' 参数"
+
+
+def test_absolute_imports_only():
+    """规则 5：外壳内部一律绝对导入（`from desktop.app.… import`），不许相对导入。
+
+    这是架构 §3.4 入口裁决的另一半：入口写死 `python -m desktop.main`，
+    包名固定为 `desktop`，绝对导入在冻结（PyInstaller）与源码运行下行为一致；
+    混用相对导入会让「同一个模块被导入两次」这类问题只在打包后出现。
+    """
+    files = collect_desktop_python_files()
+    assert files, "desktop/ 下一个 .py 都没扫到——目录被删或 glob 写错，这不是通过"
+
+    violations = []
+    for file_path in files:
+        _, from_modules = extract_imports_from_ast(file_path)
+        for module in from_modules:
+            if module.startswith("."):
+                violations.append(f"{file_path.relative_to(ROOT)}: from {module} import ...")
+
+    assert not violations, (
+        "外壳内部只许绝对导入 `from desktop.app.… import`（见架构 §3.4）：\n" +
+        "\n".join(violations)
     )
+
+
+def test_self_test_never_enters_event_loop():
+    """规则 6：`--self-test` 路径上不许出现 `show()` / `exec()`。
+
+    自检必须构造完页面就返回。一旦误调 `exec()` 就进 Qt 事件循环、任务挂死，
+    CI 的 `timeout-minutes` 会替我们兜住，但那是烧掉 10 分钟 runner 才发现
+    （windows 还按 2× 计费）。这条在**语法层**直接把它拦掉。
+    """
+    main_py = ROOT / "desktop" / "main.py"
+    assert main_py.exists(), "desktop/main.py 不存在"
+    tree = _parse(main_py)
+
+    fn = next((n for n in ast.walk(tree)
+               if isinstance(n, ast.FunctionDef) and n.name == "self_test"), None)
+    assert fn is not None, "desktop/main.py 里找不到 self_test()"
+
+    bad = [f"line {n.lineno}: .{n.func.attr}()"
+           for n in ast.walk(fn)
+           if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+           and n.func.attr in ("show", "exec", "exec_")]
+    assert not bad, "self_test() 里出现了会起窗/进事件循环的调用：\n" + "\n".join(bad)
+
+
+def test_seven_pages_declared_once():
+    """规则 7：页面清单只有 `PAGE_ORDER` 一份，七个，且每个类真的存在。
+
+    自检打印的 `pages=7` 只有在清单本身被锁住时才有意义——否则删掉一页，
+    自检照样打印 `pages=6` 并退 0，CI 全绿。
+    """
+    mw = ROOT / "desktop/app/main_window.py"
+    ph = ROOT / "desktop/app/pages/placeholders.py"
+    assert mw.exists() and ph.exists(), "main_window.py / placeholders.py 不存在"
+
+    order = next((n for n in ast.walk(_parse(mw))
+                  if isinstance(n, ast.Assign)
+                  and any(isinstance(t, ast.Name) and t.id == "PAGE_ORDER"
+                          for t in n.targets)), None)
+    assert order is not None, "main_window.py 里找不到 PAGE_ORDER"
+    assert isinstance(order.value, ast.Tuple), "PAGE_ORDER 必须是元组字面量（好静态核）"
+
+    entries = []
+    for item in order.value.elts:
+        assert isinstance(item, ast.Tuple) and len(item.elts) == 2, \
+            "PAGE_ORDER 每项必须是 (显示名, 类名) 两元组"
+        name, cls = item.elts
+        assert isinstance(name, ast.Constant) and isinstance(cls, ast.Constant), \
+            "PAGE_ORDER 里必须是字符串字面量"
+        entries.append((name.value, cls.value))
+
+    assert len(entries) == 7, f"页面应为 7 个，实为 {len(entries)}：{entries}"
+    assert len({n for n, _ in entries}) == 7, f"显示名有重复：{entries}"
+
+    defined = {n.name for n in ast.walk(_parse(ph)) if isinstance(n, ast.ClassDef)}
+    missing = [c for _, c in entries if c not in defined]
+    assert not missing, f"PAGE_ORDER 指到不存在的类：{missing}"
+
+
+def test_path_getters_have_no_side_effects():
+    """规则 8：`paths.py` 里只许 `_ensure` 一处调 `mkdir`。
+
+    取路径的函数一旦顺手建目录，「打印诊断」就变成「往客户机 home 里写东西」，
+    而自检是诊断。真要建目录的调用点显式传 `create=True`。
+    """
+    paths_py = ROOT / "desktop/app/utils/paths.py"
+    assert paths_py.exists(), "desktop/app/utils/paths.py 不存在"
+
+    offenders = []
+    for fn in ast.walk(_parse(paths_py)):
+        if not isinstance(fn, ast.FunctionDef) or fn.name == "_ensure":
+            continue
+        for node in ast.walk(fn):
+            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "mkdir"):
+                offenders.append(f"{fn.name}() line {node.lineno}")
+    assert not offenders, "取路径的函数里出现了 mkdir：\n" + "\n".join(offenders)
