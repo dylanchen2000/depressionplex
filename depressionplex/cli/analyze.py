@@ -17,11 +17,16 @@ from __future__ import annotations
 
 import argparse
 import csv
+import dataclasses
+import importlib.metadata
+import json
 import sys
+import time
+from collections.abc import Collection
 from pathlib import Path
 
 from .. import runner, video
-from ..assay_core import timeline, trial_report
+from ..assay_core import rules, timeline, trial_report
 
 
 def _plan_text(info: video.VideoInfo, plan: runner.TrialPlan) -> str:
@@ -80,6 +85,145 @@ def _row(r: trial_report.TrialReport) -> dict[str, object]:
     }
 
 
+def _version_from_pyproject(text: str) -> str | None:
+    """从 pyproject.toml 文本里取 **`[project]` 表的** `version`，取不到返回 None。
+
+    刻意认表头：原写法 `line.startswith("version")` 命中任意表里的 version
+    ——`[tool.某某]` 下面随手加一行 `version = "9"`，run.json 里记的版本号就变了。
+    这里不用 tomllib（3.10 没有），只需要认一个键，逐行扫足够且不引依赖。
+    """
+    table: str | None = None
+    for raw in text.splitlines():
+        line = raw.strip()
+        if line.startswith("[") and line.endswith("]"):
+            table = line[1:-1].strip()
+            continue
+        if table != "project":
+            continue
+        key, sep, val = line.partition("=")
+        if sep and key.strip() == "version":
+            return val.split("#")[0].strip().strip('"').strip("'") or None
+    return None
+
+
+def _get_tool_version() -> str:
+    """算出这批数字的**这份代码**的版本号；取不到返回 "unknown" 并且说出来。
+
+    先读源码树里的 pyproject.toml：从源码跑时它才是权威——editable 安装下
+    `importlib.metadata` 拿到的是安装那一刻的版本，可能和工作树里的代码不是同一份。
+    冻结后没有 pyproject.toml，才退回 `importlib.metadata`。
+
+    这里刻意不写 `except Exception: pass`：`tool_version` 是「这批数字是哪份代码算的」
+    的唯一凭据，静默变成 "unknown" 比报错危险（DP-052）。所以每一次退化都往 stderr
+    写一行原因（stdout 要逐位稳定，不许碰）。
+    """
+    pyproject = Path(__file__).resolve().parent.parent.parent / "pyproject.toml"
+    if pyproject.exists():
+        try:
+            text = pyproject.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as e:
+            print(f"[警告] 读不到 {pyproject}：{e}", file=sys.stderr)
+        else:
+            v = _version_from_pyproject(text)
+            if v is not None:
+                return v
+            print(f"[警告] {pyproject} 的 [project] 表里没有 version", file=sys.stderr)
+    try:
+        return importlib.metadata.version("depressionplex")
+    except importlib.metadata.PackageNotFoundError:
+        print("[警告] 版本号取不到（源码树没有 pyproject.toml，包也没安装）"
+              "⇒ run.json 的 tool_version 记 unknown", file=sys.stderr)
+        return "unknown"
+
+
+def _build_run_json(info: video.VideoInfo, plan: runner.TrialPlan,
+                    assay: str, skipped: dict[int, str],
+                    scored: Collection[int]) -> dict:
+    """构造 run.json 数据结构（**CSV 故意不含的上下文**）。
+
+    `scored` 是产出了 CSV 行的隔间号集合，必传：`chamber_validity` 只写不在 CSV 里的
+    隔间。理由是架构 §3.5 那句「一个数字只许有一个序列化器」——CSV 已有
+    `validity_status` / `occupied_fraction`，而 run.json 这边取的是
+    `plan.trial_validity`，CSV 那边取的是 `TrialReport`，是**两个对象**。
+    同时写就等于同一个数字有两条来路，哪天其中一条变了没人会发现（DP-054）。
+    未产出数字的隔间没有 CSV 行，它的有效性只能在这里说，所以留在这里。
+    """
+    # numpy 类型需要转成 Python int/float
+    def to_native(val):
+        if hasattr(val, "item"):  # numpy scalar
+            return val.item()
+        return val
+
+    scoring_window_s = list(trial_report.ASSAY_WINDOWS[assay])
+
+    chambers_list = []
+    for ch in plan.chambers:
+        ch_obj = {
+            "index": ch.index,
+            "col_range": list(ch.col_range),
+            "width": ch.width,
+            "source": ch.source,
+        }
+        if ch.corridor is not None:
+            ch_obj["corridor"] = {
+                "col_range": list(ch.corridor.col_range),
+                "band_range": list(ch.corridor.band_range),
+                # `if bl_est else None` 会把 0.0 写成 null，把「量出来是 0」和
+                # 「量不出来」抹成同一件事。这一层只许问 is None。
+                "bl_est": to_native(ch.corridor.bl_est),
+                "sealed": ch.corridor.sealed,
+            }
+        else:
+            ch_obj["corridor"] = None
+        ch_obj["suspension"] = (None if ch.suspension is None
+                                else [to_native(v) for v in ch.suspension])
+        chambers_list.append(ch_obj)
+
+    chamber_validity_list = []
+    for cv in plan.trial_validity.chambers:
+        if cv.chamber in scored:
+            continue                      # 有 CSV 行 ⇒ 有效性由 CSV 说，见 docstring
+        chamber_validity_list.append({
+            "chamber": cv.chamber,
+            "status": cv.status,
+            "occupied_fraction": to_native(cv.occupied_fraction),
+            "unsegmentable_fraction": to_native(cv.unsegmentable_fraction),
+            # 不写 `cv.note or ""`：note 是 None（没话说）和 ""（有话说但是空串）
+            # 是两件事，抹平了下游就分不出「没测」和「测了没备注」。
+            "note": cv.note,
+        })
+
+    not_scored_list = []
+    for chamber, reason in skipped.items():
+        not_scored_list.append({"chamber": chamber, "reason": reason})
+
+    return {
+        "schema_version": "1",
+        "tool_version": _get_tool_version(),
+        "assay": assay,
+        "scoring_window_s": scoring_window_s,
+        # 实际生效的 FROZEN 判定参数（§3.5 点名要 θ_mob；这里整份都给）。
+        # **从 dataclass 现读，不许在这里抄一份字面量**——抄了就是第二个真值，
+        # 而这些数字是「这批秒数凭什么这么算」的全部依据（B6 的报告要印 θ_mob）。
+        "rules": dataclasses.asdict(rules.TstRulesParams()),
+        "video": {
+            "path": str(info.path.resolve()),
+            "name": info.path.name,
+            "fps": info.fps,
+            "n_frames": info.n_frames,
+            "frame_count_source": info.frame_count_source,
+            "width": info.width,
+            "height": info.height,
+            "duration_s": info.duration_s,
+        },
+        "calib_indices": [int(i) for i in plan.calib_indices],
+        "chambers": chambers_list,
+        "plan_warnings": list(plan.warnings),
+        "chamber_validity": chamber_validity_list,
+        "not_scored": not_scored_list,
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="录像 → trial 级 immobility 数字")
     ap.add_argument("video", type=Path)
@@ -96,13 +240,32 @@ def main(argv: list[str] | None = None) -> int:
                     help="逐段时间线（Mobility 段，**录像起点**时基）。"
                          "给了才写；与人工侧 export_human_timeline 同一种行形状，"
                          "两张表可直接拼起来比。总量比不出分歧长在哪一段，段比得出")
+    ap.add_argument("--progress-json", action="store_true",
+                    help="写进度 NDJSON 到 stderr（节流到约 1 行/秒）")
+    ap.add_argument("--run-json", type=Path, default=None,
+                    help="写上下文 JSON（素材信息、隔间几何、未产出数字的隔间等 CSV 故意不含的东西）")
     args = ap.parse_args(argv)
+
+    # 进度回调（--progress-json 开启时写 NDJSON 到 stderr，节流到约 1 行/秒）
+    progress_cb = None
+    if args.progress_json:
+        last_emit = [0.0]  # 可变容器，用于闭包捕获
+
+        def progress_cb(frame: int, n: int | None) -> None:
+            now = time.monotonic()
+            # 第一帧和最后一帧必须各出一行；中间帧节流到约 1 行/秒。
+            # `frame == n` 在 n 为 None（总帧数未知）时自然为假，不用另写分支；
+            # n 也照原样写进 JSON（未知就是 null，不许写 0 冒充数字）。
+            if frame == 1 or frame == n or (now - last_emit[0] >= 1.0):
+                obj = {"ev": "progress", "frame": frame, "n": n}
+                print(json.dumps(obj, ensure_ascii=False), file=sys.stderr, flush=True)
+                last_emit[0] = now
 
     try:
         info, plan, reports, skipped = runner.analyze_video(
             args.video, assay=args.assay, n_chambers=args.chambers,
             trial_prefix=args.trial_prefix, n_calib=args.calib_frames,
-            body_area_prior=args.body_area_prior)
+            body_area_prior=args.body_area_prior, progress=progress_cb)
     except video.VideoError as e:
         print(f"[解码失败] {e}", file=sys.stderr)
         return 1
@@ -136,6 +299,13 @@ def main(argv: list[str] | None = None) -> int:
             # 与上面的 CSV 同一处理：未产出的隔间不进表，原因在上面的报告里。
             print(f"  未产出数字的 {len(skipped)} 个隔间不进时间线，"
                   "原因见上面各 ch 的说明——不是悄悄少行")
+
+    if args.run_json:
+        # `reports` 的键就是「进了 CSV 的隔间」，传进去让 chamber_validity 避开它们
+        run_data = _build_run_json(info, plan, args.assay, skipped, set(reports))
+        with args.run_json.open("w", encoding="utf-8") as fh:
+            json.dump(run_data, fh, indent=2, ensure_ascii=False)
+        print(f"\n上下文已写：{args.run_json}")
 
     if not reports:
         print("\n[结果] 没有任何隔间产出数字——退出码 2", file=sys.stderr)
