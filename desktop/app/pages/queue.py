@@ -40,6 +40,7 @@ class QueuePage(QWidget):
         self._current_process: QProcess | None = None  # 当前运行的子进程
         self._current_index: int = -1  # 当前运行的项目在 _items 中的索引
         self._stderr_pump: prog.StderrPump | None = None  # stderr 行缓冲
+        self._stdout_chunks: list[bytes] = []  # 引擎 stdout（给人读的报告），只攒不解析
         self._cancel_requested: bool = False  # 是否请求了取消
         self._kill_timer_id: int | None = None  # terminate 后的 kill 超时定时器
 
@@ -94,7 +95,12 @@ class QueuePage(QWidget):
 
         try:
             with open(exp_path, encoding="utf-8") as f:
-                self._experiment = json.load(f)
+                loaded = json.load(f)
+
+            # 契约在**进门时**就校验：等到 `build_argv` 里才发现键名不对，
+            # 用户已经按过「开始」，看到的是某一条 item 失败，而不是「这份实验文件读不懂」。
+            engine.require_contract(loaded)
+            self._experiment = loaded
 
             # 构造队列项
             self._items = []
@@ -189,6 +195,11 @@ class QueuePage(QWidget):
         proc = QProcess(self)
         self._current_process = proc
 
+        # stdout 是**给人读的报告**（派工单 §73），整条攒起来、结束时落盘。
+        # 不读它有两个后果：报告丢了（实验室真正会看的东西），
+        # 以及 QProcess 的内部缓冲一直涨。外壳只搬运，不解析——不许从这里取任何数字。
+        self._stdout_chunks: list[bytes] = []
+        proc.readyReadStandardOutput.connect(self._on_stdout_ready)
         proc.readyReadStandardError.connect(self._on_stderr_ready)
         proc.finished.connect(self._on_process_finished)
 
@@ -200,6 +211,34 @@ class QueuePage(QWidget):
         proc.start(argv[0], argv[1:])
 
         self._update_ui_state()
+
+    def _on_stdout_ready(self):
+        """QProcess 的 stdout 有数据可读：只攒着，不解析。"""
+        if self._current_process is None:
+            return
+        self._stdout_chunks.append(bytes(self._current_process.readAllStandardOutput().data()))
+
+    def _write_report(self, video_index: int) -> str:
+        """把攒下来的 stdout 写成 `<视频名>_report.txt`（派工单 §73）。
+
+        返回空串表示写好了，否则返回给人看的说明。
+
+        写不成**不许**把 item 判失败：报告是副产物，数字在 CSV 里，
+        把「完成」改成「失败」会让人以为这一段得重跑。但也不许静默——
+        说明会挂到该 item 的备注上，而不是弹窗（弹窗会把整个队列堵在这儿）。
+        """
+        if self._experiment is None:
+            return ""
+        data = b"".join(self._stdout_chunks)
+        if not data:
+            return "引擎没有任何 stdout，报告是空的"
+        try:
+            target = engine.output_paths(self._experiment, video_index)["report_txt"]
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(data)
+        except (OSError, ValueError) as e:
+            return f"报告写入失败（CSV 里的数字不受影响）：{e}"
+        return ""
 
     def _on_stderr_ready(self):
         """QProcess 的 stderr 有数据可读。"""
@@ -231,9 +270,11 @@ class QueuePage(QWidget):
 
         if self._cancel_requested:
             # 取消：删除半成品输出
-            self._cleanup_outputs(item.video_index)
             new_status = ItemStatus.CANCELLED
             msg = "用户取消"
+            cleanup_problem = self._cleanup_outputs(item.video_index)
+            if cleanup_problem:
+                msg = f"{msg}；{cleanup_problem}"
         else:
             # 正常结束：根据退出码映射状态
             new_status = status_for_exit(exit_code)
@@ -248,6 +289,14 @@ class QueuePage(QWidget):
                 msg = self._read_not_scored_reasons(item.video_index)
             else:
                 msg = ""
+
+            # 跑到头了（完成或无产出）才落报告：失败那条的 stdout 是半截的，
+            # 写下去只会挡住重试（`build_argv` 见到已存在的 report.txt 就不许覆盖），
+            # 而真正的错误在 stderr 里，已经进 msg 了。
+            if new_status in (ItemStatus.COMPLETED, ItemStatus.NO_OUTPUT):
+                report_problem = self._write_report(item.video_index)
+                if report_problem:
+                    msg = f"{msg}；{report_problem}" if msg else report_problem
 
         # 更新状态
         try:
@@ -291,40 +340,44 @@ class QueuePage(QWidget):
             self.killTimer(self._kill_timer_id)
             self._kill_timer_id = None
 
-    def _cleanup_outputs(self, video_index: int):
-        """删除一条 item 的半成品输出（四个文件）。"""
+    def _cleanup_outputs(self, video_index: int) -> str:
+        """删除一条 item 的半成品输出。返回空串表示都删干净了。
+
+        文件名**只从 `engine.output_paths` 取**：原来这里自己按 `{stem}_...` 拼一遍，
+        与 `build_argv` 的查重名逻辑成了两个派生器。谁改了后缀，另一边就会去删一个
+        不存在的文件——半张 CSV 留在盘上，界面上却写着「已取消」。
+
+        删不掉不阻塞队列，但**不许静默**：留下的半成品会让下次重试撞上
+        「输出文件已存在」，那时报错离原因已经隔了一次操作。
+        """
         if self._experiment is None:
-            return
+            return ""
 
-        video = self._experiment["videos"][video_index]
-        video_path = Path(video["path"])
-        output_dir = Path(self._experiment["output_dir"])
-        video_stem = video_path.stem
+        try:
+            paths = engine.output_paths(self._experiment, video_index)
+        except ValueError as e:
+            return f"半成品没清理（算不出输出路径）：{e}"
 
-        # 四个文件：csv / timeline_csv / run_json / report.txt
-        paths_to_delete = [
-            output_dir / f"{video_stem}.csv",
-            output_dir / f"{video_stem}_timeline.csv",
-            output_dir / f"{video_stem}_run.json",
-            output_dir / f"{video_stem}_report.txt",
-        ]
-
-        for p in paths_to_delete:
-            if p.exists():
-                try:
-                    p.unlink()
-                except Exception:
-                    pass  # 删不掉也不阻塞
+        stuck = []
+        for p in paths.values():
+            try:
+                p.unlink(missing_ok=True)
+            except OSError as e:
+                stuck.append(f"{p.name}（{e.strerror or e}）")
+        if stuck:
+            return "以下半成品删不掉，重试前请手工删除：" + "、".join(stuck)
+        return ""
 
     def _read_not_scored_reasons(self, video_index: int) -> str:
         """读取 run.json 的 not_scored 原因。"""
         if self._experiment is None:
             return ""
 
-        video = self._experiment["videos"][video_index]
-        video_path = Path(video["path"])
-        output_dir = Path(self._experiment["output_dir"])
-        run_json_path = output_dir / f"{video_path.stem}_run.json"
+        # 路径同样只从 `engine.output_paths` 取（第三个派生器就是这么长出来的）
+        try:
+            run_json_path = engine.output_paths(self._experiment, video_index)["run_json"]
+        except ValueError as e:
+            return f"算不出 run.json 路径：{e}"
 
         if not run_json_path.exists():
             return "run.json 不存在"
