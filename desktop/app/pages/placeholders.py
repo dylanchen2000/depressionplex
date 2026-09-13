@@ -25,24 +25,6 @@ class WelcomePage(QWidget):
         layout.addStretch()
 
 
-class NewExperimentPage(QWidget):
-    """New experiment wizard - to be implemented in B2."""
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        layout = QVBoxLayout(self)
-
-        title = QLabel("新建实验")
-        title.setObjectName("pageTitle")
-        layout.addWidget(title)
-
-        description = QLabel("本页由 B2 交付")
-        description.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(description)
-
-        layout.addStretch()
-
-
 class QueuePage(QWidget):
     """Analysis queue page - to be implemented in B3."""
 

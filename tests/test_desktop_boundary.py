@@ -284,15 +284,21 @@ def test_self_test_never_enters_event_loop():
 
 
 def test_seven_pages_declared_once():
-    """规则 7：页面清单只有 `PAGE_ORDER` 一份，七个，且每个类真的存在。
+    """规则 7：页面清单只有 `PAGE_ORDER` 一份，七个，且每个类真的存在且不重名。
 
     自检打印的 `pages=7` 只有在清单本身被锁住时才有意义——否则删掉一页，
     自检照样打印 `pages=6` 并退 0，CI 全绿。
+
+    B2 改动：扫 desktop/app/pages/*.py 全部文件收类名，并断言 PAGE_ORDER 里的
+    每个类名只定义一次（重名即红）。守卫只许变严，不许变松。
     """
     mw = ROOT / "desktop/app/main_window.py"
-    ph = ROOT / "desktop/app/pages/placeholders.py"
-    assert mw.exists() and ph.exists(), "main_window.py / placeholders.py 不存在"
+    assert mw.exists(), "main_window.py 不存在"
 
+    pages_dir = ROOT / "desktop/app/pages"
+    assert pages_dir.exists() and pages_dir.is_dir(), "desktop/app/pages/ 不存在"
+
+    # 收集 PAGE_ORDER
     order = next((n for n in ast.walk(_parse(mw))
                   if isinstance(n, ast.Assign)
                   and any(isinstance(t, ast.Name) and t.id == "PAGE_ORDER"
@@ -309,12 +315,99 @@ def test_seven_pages_declared_once():
             "PAGE_ORDER 里必须是字符串字面量"
         entries.append((name.value, cls.value))
 
+    # 原有的两条断言（不许动）
     assert len(entries) == 7, f"页面应为 7 个，实为 {len(entries)}：{entries}"
     assert len({n for n, _ in entries}) == 7, f"显示名有重复：{entries}"
 
-    defined = {n.name for n in ast.walk(_parse(ph)) if isinstance(n, ast.ClassDef)}
-    missing = [c for _, c in entries if c not in defined]
+    # 扫 desktop/app/pages/*.py 全部文件收类名
+    page_files = sorted(pages_dir.glob("*.py"))
+    assert page_files, "desktop/app/pages/ 下没有 .py 文件"
+
+    class_definitions = {}  # {类名: [文件路径列表]}
+    for file_path in page_files:
+        if file_path.name == "__init__.py":
+            continue
+        for node in ast.walk(_parse(file_path)):
+            if isinstance(node, ast.ClassDef):
+                if node.name not in class_definitions:
+                    class_definitions[node.name] = []
+                class_definitions[node.name].append(file_path)
+
+    # 检查 PAGE_ORDER 里的类是否都存在
+    required_classes = {c for _, c in entries}
+    missing = required_classes - set(class_definitions.keys())
     assert not missing, f"PAGE_ORDER 指到不存在的类：{missing}"
+
+    # 检查 PAGE_ORDER 里的类是否有重名（只定义一次）
+    duplicates = {cls: files for cls, files in class_definitions.items()
+                  if cls in required_classes and len(files) > 1}
+    assert not duplicates, \
+        f"PAGE_ORDER 里的类名有重复定义：{duplicates}"
+
+
+def test_page_classes_resolved_in_one_place():
+    """规则 9：「哪个类是哪一页」只许有一个解析器 —— `main_window.PAGE_CLASSES`。
+
+    这条是补 DP-101 那次 CI 全红的：`main.py` 的自检原来自己
+    `getattr(placeholders, cls_name)`，与主窗口的类表并列成了第二个解析器。
+    B2 把 `NewExperimentPage` 从 `placeholders.py` 搬进自己的模块（每一页最终都要走这条路），
+    主窗口用新类、自检还在老模块里找，于是自检以 `AttributeError` **崩掉退 1**，
+    而不是「不通过退 2」——ubuntu 与 windows 两个平台同时红，归因还容易先怀疑新页面本身。
+
+    三条断言，静态就能判，所以它会在 Tests 工作流里先红，不用等 Desktop Self-Test。
+
+    前两条的写法是被变异测试逼出来的（第一版两条都是装饰）：
+    - 查 import 不能用 `extract_imports_from_ast` 的**顶层**集合——`from desktop.app.pages
+      import placeholders` 在那里只留下 `desktop`，把 bug 原样种回去照样通过；
+    - 查「用了类表」不能用子串 `"PAGE_CLASSES" in src`——import 行和这段注释里本来就有这个词，
+      改成 `globals().get(cls_name)` 也恒真。
+    """
+    main_py = ROOT / "desktop/main.py"
+    mw = ROOT / "desktop/app/main_window.py"
+    assert main_py.exists() and mw.exists()
+
+    main_tree = _parse(main_py)
+
+    # 1. main.py 不许碰任何页面模块（查**完整点分名**，两种 import 形式都要盖住）
+    touched = set()
+    for node in ast.walk(main_tree):
+        if isinstance(node, ast.Import):
+            touched |= {a.name for a in node.names}
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            touched.add(node.module)
+            touched |= {f"{node.module}.{a.name}" for a in node.names}
+    bad = {m for m in touched if m.startswith("desktop.app.pages")}
+    assert not bad, f"main.py 不许 import 页面模块（第二个解析器就是这么长出来的）：{sorted(bad)}"
+
+    # 2. self_test() 必须**直接读** PAGE_CLASSES，且不许用任何别的方式按名字找类
+    fn = next((n for n in ast.walk(main_tree)
+               if isinstance(n, ast.FunctionDef) and n.name == "self_test"), None)
+    assert fn is not None, "desktop/main.py 里找不到 self_test()"
+    assert any(isinstance(n, ast.Name) and n.id == "PAGE_CLASSES" for n in ast.walk(fn)), \
+        "self_test() 必须直接从 main_window.PAGE_CLASSES 取类"
+    sneaky = sorted({n.func.id for n in ast.walk(fn)
+                     if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+                     and n.func.id in ("getattr", "globals", "vars", "eval", "import_module")})
+    assert not sneaky, f"self_test() 里出现了按名字找类的旁路：{sneaky}（类表是唯一解析器）"
+
+    # 3. PAGE_CLASSES 的键集合必须与 PAGE_ORDER 的类名集合逐个相等
+    tree = _parse(mw)
+    def _assign(name):
+        return next((n for n in ast.walk(tree)
+                     if isinstance(n, ast.Assign)
+                     and any(isinstance(t, ast.Name) and t.id == name for t in n.targets)), None)
+
+    order = _assign("PAGE_ORDER")
+    table = _assign("PAGE_CLASSES")
+    assert order is not None and table is not None, "PAGE_ORDER / PAGE_CLASSES 必须都是模块级赋值"
+    assert isinstance(table.value, ast.Dict), "PAGE_CLASSES 必须是字典字面量（好静态核）"
+
+    want = {item.elts[1].value for item in order.value.elts}
+    got = {k.value for k in table.value.keys if isinstance(k, ast.Constant)}
+    assert got == want, (
+        f"PAGE_CLASSES 与 PAGE_ORDER 脱节："
+        f"表里多 {sorted(got - want)}、少 {sorted(want - got)}"
+    )
 
 
 def test_path_getters_have_no_side_effects():
