@@ -1,0 +1,38 @@
+name: Desktop Self-Test
+
+on: [push, pull_request]
+
+jobs:
+  desktop-test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    env:
+      QT_QPA_PLATFORM: offscreen
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install PySide6
+        run: pip install PySide6==6.7.3
+      - name: Test PySide6 offscreen startup
+        run: |
+          python -c "
+          import sys
+          import PySide6
+          from PySide6.QtWidgets import QApplication
+          print(f'PySide6 {PySide6.__version__}')
+          app = QApplication(sys.argv)
+          print('QApplication offscreen OK')
+          app.quit()
+          sys.exit(0)
+          "
+      - name: Run desktop self-test
+        if: hashFiles('desktop/main.py') != ''
+        run: python -m desktop.main --self-test
+      - name: Report desktop status
+        if: hashFiles('desktop/main.py') == ''
+        run: echo "desktop/ 尚不存在，已跳过自检（B1 未交付）"
