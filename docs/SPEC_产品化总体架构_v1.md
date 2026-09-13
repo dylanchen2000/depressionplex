@@ -21,6 +21,11 @@
 >   （数字只走既有 CSV，新增 `--run-json` 只装 CSV 故意不含的上下文与报警，进度走 stderr 的
 >   NDJSON）；连带 §6.1 新增 **B3a**（引擎侧进度回调 + 两个新参数）、B1/B3/B4/B10 判据同步、
 >   M1 含 B3a。**入口写死 `python -m desktop.main --self-test`，不抄姊妹仓的顶层 `app` 包。**
+> - 2026-09-13 **DP-100 §4 落地回填**：标定契约代码定在 `desktop/app/services/calibration.py`
+>   （不是原写的 `services/self_check.py`——后者只调用它并显示结论，理由是资质判定必须
+>   只用标准库、不 import PySide6/引擎，才能在无显示 CI 里被逐条踩）；补全 `calibration.json`
+>   的完整字段表（缺字段一律红，**缺键 ≠ `null`**）；写明期望哈希来自代码常量而非文件自证；
+>   §6.1 的 B8 行改为已交付。四条规则均过变异检验。
 
 ## 0. 结论先行（三句）
 
@@ -216,14 +221,43 @@ DP-054（报告层自己算分母，打出 198.9%）那类事故的成本远高�
 
 详细对账见 `docs/备忘_逆向报告并入_2026-09-13.md`（DP-097）。
 
-实现方式：**一个随包分发的只读 `calibration.json`**（θ_mob、验收批次、数据集哈希、签发时间，
-以及 **G7 / G8 / G11 三个读数 + G11 当时生效的门槛值 + MAE / RMSE / 逐试次误差范围**），
-启动时由 `services/self_check.py` 校验哈希；缺失或哈希不符 ⇒ **降到研究模式，不是报错退出**，
-但徽章变红「标定文件不可信」。**外壳不许有任何路径能把模式手动切到 Validated。**
+实现方式：**一个随包分发的只读 `calibration.json`**，启动时校验哈希；缺失或哈希不符
+⇒ **降到研究模式，不是报错退出**，但徽章变红「标定文件不可信」。
+**外壳不许有任何路径能把模式手动切到 Validated。**
 
-`calibration.json` 里 **`gates.G11.threshold` 为 `null` 时，`mode` 字段一律强制为 `research`**——
-这条判定写在 `services/self_check.py` 里，且必须有一个直接踩它的测试（B8 验收项）。
-没有这条，一份「G7/G8 漂亮、G11 空着」的标定文件就能签出绿徽章，正是 CSI 那个反例的形状。
+判定代码落在 **`desktop/app/services/calibration.py`**（DP-100 已交付），
+`services/self_check.py` 只**调用**它、把结论显示到自检页。分开的理由：自检页还要探
+ffmpeg / 磁盘 / 分辨率这些环境项，而资质判定必须**只用标准库、不 import PySide6、
+不 import 引擎**，才能在没有显示器的 CI 里被逐条踩一遍。混在一个文件里，这个可测性就没了。
+
+`calibration.json` 的字段（**缺任何一个 ⇒ 红徽章，不许填默认值**——默认值会把
+「这一版没量」伪装成「量了且合格」）：
+
+| 字段 | 内容 | 备注 |
+|---|---|---|
+| `schema_version` | `"1"` | 不等于 `"1"` 直接红 |
+| `mode` | `"research"` / `"validated"` | **只会被降级，永不被采信抬高** |
+| `theta_mob` | 冻结值 0.0175 | |
+| `batch` | 验收批次号 | 绿徽章旁要显示它 |
+| `dataset_sha256` | 冻结数据集哈希 | |
+| `signed_at` / `tool_version` | 签发时间 / 签发时的工具版本 | |
+| `gates.G7` / `.G8` / `.G11` | 各含 `value` 与 `threshold` 两个键 | **缺键 ≠ `null`**：缺键是文件坏了（红），`null` 是门槛未定（黄） |
+| `g10a_false_positives`<br>`g10a_prime_false_positives` | 假阳性个数，整数 | 非 0 ⇒ 红（硬安全门） |
+| `mae_s` / `rmse_s` / `per_trial_error_range_s` | 无阈值，但必须印在报告里 | 范围写成 `[最小, 最大]` |
+
+**未知键同样拒收**（多余字段说明它不是本发布链签出来的），所以标定文件里**不能写注释键**。
+照着填的示例见 `docs/标定文件示例_研究版.json`——它被测试原样解析，**示例与代码不许漂移**。
+
+两条容易被绕过、因此各有一个变异检验过的测试的规则：
+
+1. **`gates.G11.threshold` 为 `null` ⇒ `mode` 一律强制 `research`。** 没有这条，一份
+   「G7/G8 漂亮、G11 空着」的标定文件就能签出绿徽章，正是 CSI 那个反例的形状。
+2. **期望哈希来自代码里的常量 `EXPECTED_CALIBRATION_SHA256`（打包时写入），不是文件自己报的。**
+   文件自证哈希等于没有校验。该常量为 `None` ⇒ 这一版不带标定文件；此时安装目录里
+   凭空出现一个 `calibration.json` 反而可疑 ⇒ 红。
+
+四条规则都做过变异检验（挨个改成 `if False:`，确认对应测试真的变红）——
+本仓的教训是**能被跳过的守卫等于装饰**（DP-069 / DP-071 / DP-076）。
 
 理由：这是 DP-054 / DP-052 / DP-071 三次教训的共同结论——**静默兜底比报错危险，但假装有资质比两者都危险**。
 CSI 就是不给分母，我们的差异化只有在自己不越界时才成立。
@@ -316,7 +350,7 @@ QT_QPA_PLATFORM=offscreen python3 desktop/main.py --self-test
 | B5 | 时间线复核视图（逐帧掩膜叠加 + 事件带） | **外派** | 与 `timeline.py` 输出一致；不许在外壳里重算事件 |
 | B6 | 导出：xlsx + pdf 报告 + 审计包 | **外派**（报告文案我写） | 报告必印分母、θ_mob、发布态声明；pdf 可无字体报错生成 |
 | B7 | 自检页：对比度 ≥ 100 灰阶且 ≥ 2×、分割噪声底、面积抖动 p90 | **外派** | 复现 P2 硬门读数（对比度 208.5 / 6.77×；噪声底 0.43 px；p90 = 0.0035） |
-| B8 | `calibration.json` 契约 + 模式徽章 + 哈希校验 | **我自己干**（这是资质边界） | 三条路径各有测试：①篡改标定文件 ⇒ 降级且变红；②`gates.G11.threshold = null` ⇒ 强制 research；③无任何手动切 Validated 的入口 |
+| B8 | `calibration.json` 契约 + 哈希校验 | **我自己干**（这是资质边界）·**契约部分已交付**（DP-100，`services/calibration.py` + 15 个测试，四条规则过变异检验）；徽章控件等 B1 的 `desktop/` 骨架落地后再挂 | 三条路径各有测试：①篡改标定文件 ⇒ 降级且变红；②`gates.G11.threshold = null` ⇒ 强制 research；③无任何手动切 Validated 的入口（按 `inspect.signature` 卡入参个数 + 只许一处构造 validated 结论） |
 | B9 | CSI 兼容层：`.SET` 读+写、`.CLB` 读（范围见 §3.3，**不含 FSR3/TSR1/DT**） | **我自己干**（逆向裁决） | 两份 `.SET` 夹具全部正确解析；生成的 `.SET` **被 CSI 自己读回**；`.CLB` 解出的矩形与 DP-032 隔间定位一致 |
 | B10 | 打包：**双 spec**（GUI `build_windows.spec` + 后端 `build_analyzer_windows.spec`，见 §3.4）+ Inno Setup（**Actions 骨架已在 B0**） | **外派** | Actions 出 `DEPRESSION-PLEX-Setup-x.y.z.exe`，客户机双击可装可跑；GUI 的 spec 必须写 `excludes=["depressionplex"]`（第三重封堵）；GUI 用 `pathex=[仓根]` + `hiddenimports=["desktop.app.…"]` |
 | B11 | ffmpeg 随包分发与路径解析 | **外派** | 断网、无系统 ffmpeg 的干净 Win 机上能解码 |
