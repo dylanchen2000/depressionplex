@@ -12,6 +12,10 @@
 > - 2026-09-13 **DP-098 修订三处**（实测沙箱装不了 PySide6、无显示、本仓无 CI）：新增 §6.0
 >   把 CI 拆成 **B0** 且排到所有外派件之前、§3 加第二条铁律（`desktop/` 必须无显示可跑
 >   `--self-test`）、§7 里程碑拆 M0a（有 CI）/ M0b（骨架）。
+> - 2026-09-13 **DP-098 交付后回填 + 一处更正**：§6.0 的可用性表改为五条已实测结论、
+>   §6.1 的 B0 行改为已交付（PR #87，`通过 289 失败 0`）、§7 的 M0a 判定同步；
+>   **§8 第 8 条（Actions 额度）撤回**——我曾拿 20 次陈旧缓存 GET 当现状，误判 free plan
+>   分钟数耗尽，见 §6.0 的更正框（规程：不许凭同一个 API URL 的重复 GET 判定 run 状态）。
 
 ## 0. 结论先行（三句）
 
@@ -234,25 +238,30 @@ QT_QPA_PLATFORM=offscreen python3 desktop/main.py --self-test
 而是「起窗」这类只能人眼判的判据，在任何 CI 上都不可判；不可判的判据等于没有判据。
 有了 `--self-test`，同一条命令在 ubuntu(offscreen) / windows-latest / 开发者机上都成立。
 
-**Actions 本身的可用性：已实测四条，第四条未收口**
+**Actions 本身的可用性：已实测，可用**（B0 于 2026-09-13 交付并转绿，PR #87）
 
 | 查了什么 | 结果 |
 |---|---|
-| 沙箱的 PAT 能不能推 `.github/workflows/`（缺 `workflow` scope 会被 remote 直接拒） | **能**。推了一个 `probe.yml` 到 `tmp/ci-scope-probe`，push exit 0 |
+| 沙箱的 PAT 能不能推 `.github/workflows/`（缺 `workflow` scope 会被 remote 直接拒） | **能** |
 | 本仓 Actions 有没有被关掉 | **没关**。`actions/permissions` ⇒ `enabled: true, allowed_actions: all` |
-| 这个账号历史上跑成过 Actions 吗 | **跑成过**。姊妹仓 `drugeffectscan` 26 次运行，最近 2026-09-08 的 `windows-latest` 任务 success，且 `run_started_at == created_at`（秒级起跑） |
-| 我这次的 probe 运行起跑了吗 | **没有。排队 > 5 min 未起跑，原因未确认。** 账号是 free plan，私有仓的 Actions 分钟数可能已用完（drugeffectscan 那批 windows 任务按 2× 计费）——但**我没有能查账单的接口**（`users/.../billing/actions` 已 410 迁移），所以这只是**待验证的猜测，不是结论** |
+| 引擎测试能不能在 Actions 上跑 | **能**。`tests.yml` 在 ubuntu 上 `python3 run_tests.py` 全绿（只需装 numpy，**不需要 ffmpeg**） |
+| PySide6 6.7.3 能不能装上并无显示起 `QApplication` | **能，ubuntu + windows 双绿。** ubuntu 上第一次失败于缺 `libEGL.so.1`，补 `libegl1 / libxkbcommon0 / libdbus-1-3` 后转绿——**这个坑在沙箱里永远撞不到，也不会在 Win 机上出现，正是 CI 存在的价值** |
+| 触发器该怎么挂 | **只挂 `push`。** `on: [push, pull_request]` 会让同一个 SHA 跑两遍（实测一次推送出 4 个 run，结论相同），windows 按 2× 计费，free plan 分钟数直接烧一半；检查结果挂在 SHA 上，PR 页面照样看得到。守卫测试 `test_no_duplicate_triggers` 锁住这条 |
 
-⇒ **B0 的第一步就是把这件事查清**，而不是先写 workflow。若 Actions 确实跑不动，**备选执行者只有
-道俊自己的 Win/Mac 机**（本沙箱无 Bridge 工具，我到不了），那就变成 §8 的一条裁决项而不是派工项。
-**在此之前不许有任何人报「外壳已验收」**——没有执行者就没有验收。
+> **⚠️ 更正留档（方法错，不是结论错）**：出单前我曾用 REST API 轮询探针 run
+> **20 次跨 15 分钟，每次都读到 `queued`**，据此在本节写下「排队不起跑，疑似 free plan
+> 分钟数耗尽」，还升成了道俊的裁决项。**这是错的**——该 run 的
+> `run_started_at == created_at == 04:10:36Z`、最终 `conclusion=success`，
+> **它在我第一次轮询之前就起跑了**，我读到的全是陈旧缓存响应。
+> ⇒ **规程：不许凭同一个 API URL 的重复 GET 判定 run 状态**，必须交叉核对
+> `run_started_at`（一旦被填就说明已起跑）。与 DP-023「出单前必须先 fetch」同源：
+> **都是拿陈旧快照当现状。** 详见 `docs/ISSUES.md` DP-098。
 
 ### 6.1 清单
 
 | # | 模块 | 谁干 | 可机器验收的产出 |
 |---|---|---|---|
-| **B0** | CI 骨架：`.github/workflows/tests.yml`（ubuntu，跑 `python3 run_tests.py`）+ `desktop-selftest.yml`（ubuntu offscreen + windows-latest，装 PySide6 跑 `--self-test`） | **外派**（第一件） | 两个 workflow 各有一次绿色运行；引擎那条必须打出 `通过 284  失败 0` |
-|---|---|---|---|
+| **B0** | CI 骨架：`.github/workflows/tests.yml`（ubuntu，跑 `python3 run_tests.py`）+ `desktop-selftest.yml`（ubuntu offscreen + windows-latest，装 PySide6 跑 `--self-test`） | **已交付**（外派，PR #87，DP-098） | ✅ 两个 workflow 均绿（windows + ubuntu 三个 job 全 success）；引擎那条打出 `通过 289  失败 0`（原 284 + 5 条 CI 守卫） |
 | B1 | `desktop/` 骨架：main.py + main_window + 侧边栏 + dark.qss + paths.py + **`--self-test`** | **外派** | **Actions 上 `desktop-selftest.yml` 转绿**（ubuntu offscreen + windows 双绿）；自检打出全部页面名与启动耗时 < 2 s；守卫测试证明 `desktop/` 没 import `assay_core` 内部模块、没引入 numpy 以外的新第三方依赖（除 PySide6） |
 | B2 | 实验向导（范式选择 / 视频导入 / 隔间数 / 悬挂点或水面确认 / 计分窗口） | **外派**（窗口默认值由我给死） | 向导产出一份 `experiment.json`，字段与 `runner.TrialPlan` 一一对上 |
 | B3 | 分析队列 + 进度 + 取消（`workers/analysis_worker.py`，`spawn`） | **外派** | 跑完产出与 `cli/analyze.py --csv` **逐位相同**的 CSV |
@@ -271,7 +280,7 @@ QT_QPA_PLATFORM=offscreen python3 desktop/main.py --self-test
 
 | 里程碑 | 内容 | 判定 |
 |---|---|---|
-| **M0a** 有 CI | **B0** | 两个 workflow 各一次绿；引擎那条打出 `通过 284  失败 0`。**这是第一个里程碑，因为在它之前我们没有任何能验外壳的执行者**（§6.0） |
+| **M0a** 有 CI | **B0** | ✅ **已达成（2026-09-13，PR #87）**：两个 workflow 均绿（ubuntu 引擎 + ubuntu/windows offscreen 自检），引擎那条打出 `通过 289  失败 0`。**这是第一个里程碑，因为在它之前我们没有任何能验外壳的执行者**（§6.0） |
 | **M0b** 骨架 | B1 | `desktop-selftest.yml` 在 ubuntu offscreen + windows-latest 双绿 |
 | **M1** 能跑完一场 | B2 + B3 + B4 | 一段真视频从导入到 trial 表，CSV 与 CLI 逐位相同 |
 | **M2** 能交付研究版 | B6 + B7 + B8 + B10 + B11 | 客户机装上、跑完、导出带声明的报告；徽章为黄 |
@@ -300,16 +309,10 @@ QT_QPA_PLATFORM=offscreen python3 desktop/main.py --self-test
    若确认在用转码版，**换不换、什么时候换是道俊的决定**——CLB / 背景图 / 全部切片映射都是
    转码坐标系下标定的，换片等于重标一遍几何。**注意：这条不能用来翻 DP-071**（宽 6.5% 对
    0.106 px vs 0.5 px 死区，差一个数量级），有价值的是码率。
-8. **GitHub Actions 的分钟数还有没有**（§6.0 第四行，**这条卡住整条产品化轨**）：
-   探针运行排队 9 分钟以上不起跑，无 runner 分配、无任何注解，而 Actions 是启用的、
-   PAT 权限也够、姊妹仓 5 天前还秒级起跑过。账号是 free plan，**私有仓分钟数可能已被
-   `drugeffectscan` 那批 `windows-latest`（2× 计费）用完**——但查账单的 API 已 410 迁移，
-   **我在沙箱里查不到，只能标未确认**。请道俊看一眼
-   `github.com/settings/billing`（Actions 用量）并回一句：**还有额度吗？**
-   - 有额度 ⇒ 排队是暂时的，按 §6.0 走，B0 照发。
-   - 没额度 ⇒ **外壳一件都没法验收**，二选一：① 充值/提额；
-     ② 换执行者为道俊自己的 Win 机（但本沙箱无 Bridge 工具，我到不了那台机器，
-     等于每一件外壳产出都要道俊手动跑一遍验收命令）。**这个选择只有道俊能做。**
+8. ~~GitHub Actions 的分钟数还有没有~~ **已撤回（2026-09-13，是我判错了）**：
+   我曾据「探针排队 15 分钟不起跑」怀疑 free plan 分钟数耗尽——那 20 次轮询读到的全是
+   陈旧缓存响应，该 run 其实秒级起跑并 success。B0 已交付并双绿，**Actions 可用，
+   不需要道俊做任何事**。留在这里只为记住那条规程（见 §6.0 的更正框）。
 
 ## 9. 风险
 
