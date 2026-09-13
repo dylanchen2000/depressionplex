@@ -33,8 +33,10 @@ def test_no_error_masking():
         ROOT / ".github/workflows/desktop-selftest.yml",
     ]
     for workflow in workflows:
-        if not workflow.exists():
-            continue
+        # 不许 `if not exists: continue`——文件没了就该红，而不是安静通过。
+        # 本仓吃过三次这个教训（DP-069 / DP-071 / DP-076）：**只有失败时才执行的分支
+        # 必须被测试直接踩**，能被跳过的守卫等于装饰。
+        assert workflow.exists(), f"{workflow.name} 不存在"
         content = workflow.read_text()
         for pattern in forbidden:
             assert pattern not in content, f"{workflow.name} 包含 {pattern}（绿灯造假）"
@@ -43,8 +45,7 @@ def test_no_error_masking():
 def test_offscreen_qt():
     """desktop-selftest.yml 必须设置 QT_QPA_PLATFORM=offscreen"""
     workflow = ROOT / ".github/workflows/desktop-selftest.yml"
-    if not workflow.exists():
-        return
+    assert workflow.exists(), "desktop-selftest.yml 不存在"   # 同上，不许静默 return
     content = workflow.read_text()
     assert "QT_QPA_PLATFORM" in content, "desktop-selftest.yml 缺少 QT_QPA_PLATFORM"
     assert "offscreen" in content, "desktop-selftest.yml QT_QPA_PLATFORM 值不是 offscreen"
