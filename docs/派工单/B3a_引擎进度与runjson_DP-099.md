@@ -131,3 +131,32 @@ not_scored       **未产出数字的隔间**：每项 {chamber, reason}（reaso
 3. 不带新参数时 stdout 与改动前的 `diff` 结果（**逐位相同就说逐位相同，有差异就贴出来**）。
 4. 你实际选的节流实现方式，以及第一帧/最后一帧那两行是怎么保证的。
 5. **有没有哪一条判据你没做到**（有就直说，写清卡在哪；这一条比前四条重要）。
+
+---
+
+## 附：工作区隔离（**先做这一步，否则会和另一个 agent 抢同一个 checkout**）
+
+B1 与 B3a 同时在跑，**同一个 git 工作树不能被两个分支同时占用**。
+所以你**不许**在主目录里 `git checkout`，而是给自己开一个独立 worktree：
+
+```bash
+R=/home/node/a0/workspace/2315a51b-85c4-46a5-bffe-146b458fd5b6/workspace/depressionplex
+git -C $R fetch origin
+git -C $R worktree add /home/node/a0/workspace/2315a51b-85c4-46a5-bffe-146b458fd5b6/workspace/wt-b3a \
+    -b feat/dp099-engine-progress-runjson origin/integration/product-base
+cd /home/node/a0/workspace/2315a51b-85c4-46a5-bffe-146b458fd5b6/workspace/wt-b3a
+```
+
+- **基线分支是 `origin/integration/product-base`**（= main + B0 的 CI + 架构文件 + 已搬入的皮肤）。
+  不是 `main`：main 上还没有 workflow 和皮肤，你会验不了。
+- 之后所有命令都在你自己的 worktree 里跑，`git push -u origin feat/dp099-engine-progress-runjson`。
+- **不许动主目录 `depressionplex/` 里的任何文件**，不许在那里 checkout/commit。
+- 干完不用删 worktree，我来收。
+
+## 附：跑测试的注意事项（本仓踩过的坑）
+
+- `python3 run_tests.py` 满跑 **3–4 分钟**，而单条命令 120 秒就超时。
+  **要么后台跑再读输出文件，要么单独一条命令跑**；
+  **绝对不要把它和 `git commit` 串在同一条命令里**（串了必超时，然后你会以为提交失败）。
+- 本仓**没有 pytest 可用**（沙箱 site-packages 有 I/O 故障）。只用自带的 `run_tests.py`。
+- 后台跑完要**主动去读输出文件**确认结果，不要停下来等通知。
