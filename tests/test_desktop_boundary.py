@@ -284,15 +284,21 @@ def test_self_test_never_enters_event_loop():
 
 
 def test_seven_pages_declared_once():
-    """规则 7：页面清单只有 `PAGE_ORDER` 一份，七个，且每个类真的存在。
+    """规则 7：页面清单只有 `PAGE_ORDER` 一份，七个，且每个类真的存在且不重名。
 
     自检打印的 `pages=7` 只有在清单本身被锁住时才有意义——否则删掉一页，
     自检照样打印 `pages=6` 并退 0，CI 全绿。
+
+    B2 改动：扫 desktop/app/pages/*.py 全部文件收类名，并断言 PAGE_ORDER 里的
+    每个类名只定义一次（重名即红）。守卫只许变严，不许变松。
     """
     mw = ROOT / "desktop/app/main_window.py"
-    ph = ROOT / "desktop/app/pages/placeholders.py"
-    assert mw.exists() and ph.exists(), "main_window.py / placeholders.py 不存在"
+    assert mw.exists(), "main_window.py 不存在"
 
+    pages_dir = ROOT / "desktop/app/pages"
+    assert pages_dir.exists() and pages_dir.is_dir(), "desktop/app/pages/ 不存在"
+
+    # 收集 PAGE_ORDER
     order = next((n for n in ast.walk(_parse(mw))
                   if isinstance(n, ast.Assign)
                   and any(isinstance(t, ast.Name) and t.id == "PAGE_ORDER"
@@ -309,12 +315,34 @@ def test_seven_pages_declared_once():
             "PAGE_ORDER 里必须是字符串字面量"
         entries.append((name.value, cls.value))
 
+    # 原有的两条断言（不许动）
     assert len(entries) == 7, f"页面应为 7 个，实为 {len(entries)}：{entries}"
     assert len({n for n, _ in entries}) == 7, f"显示名有重复：{entries}"
 
-    defined = {n.name for n in ast.walk(_parse(ph)) if isinstance(n, ast.ClassDef)}
-    missing = [c for _, c in entries if c not in defined]
+    # 扫 desktop/app/pages/*.py 全部文件收类名
+    page_files = sorted(pages_dir.glob("*.py"))
+    assert page_files, "desktop/app/pages/ 下没有 .py 文件"
+
+    class_definitions = {}  # {类名: [文件路径列表]}
+    for file_path in page_files:
+        if file_path.name == "__init__.py":
+            continue
+        for node in ast.walk(_parse(file_path)):
+            if isinstance(node, ast.ClassDef):
+                if node.name not in class_definitions:
+                    class_definitions[node.name] = []
+                class_definitions[node.name].append(file_path)
+
+    # 检查 PAGE_ORDER 里的类是否都存在
+    required_classes = {c for _, c in entries}
+    missing = required_classes - set(class_definitions.keys())
     assert not missing, f"PAGE_ORDER 指到不存在的类：{missing}"
+
+    # 检查 PAGE_ORDER 里的类是否有重名（只定义一次）
+    duplicates = {cls: files for cls, files in class_definitions.items()
+                  if cls in required_classes and len(files) > 1}
+    assert not duplicates, \
+        f"PAGE_ORDER 里的类名有重复定义：{duplicates}"
 
 
 def test_path_getters_have_no_side_effects():

@@ -8,9 +8,10 @@ from PySide6.QtWidgets import (
 )
 
 from desktop.app.pages.placeholders import (
-    WelcomePage, NewExperimentPage, QueuePage, ResultsPage,
+    WelcomePage, QueuePage, ResultsPage,
     ReviewPage, ExportPage, SelfCheckPage,
 )
+from desktop.app.pages.new_experiment import NewExperimentPage
 
 # (侧栏显示名, 页面类名)。类名以字符串出现，是为了让 main.py 的自检能逐个单独构造。
 PAGE_ORDER = (
