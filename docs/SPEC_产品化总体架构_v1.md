@@ -16,6 +16,11 @@
 >   §6.1 的 B0 行改为已交付（PR #87，`通过 289 失败 0`）、§7 的 M0a 判定同步；
 >   **§8 第 8 条（Actions 额度）撤回**——我曾拿 20 次陈旧缓存 GET 当现状，误判 free plan
 >   分钟数耗尽，见 §6.0 的更正框（规程：不许凭同一个 API URL 的重复 GET 判定 run 状态）。
+> - 2026-09-13 **DP-099 新增两节（B1 出单前的前置裁决）**：§3.4 外壳与引擎之间是**进程边界**
+>   （分开 freeze、GUI 不许 import 引擎、三重机械封堵、取消 = 杀进程）、§3.5 数据契约
+>   （数字只走既有 CSV，新增 `--run-json` 只装 CSV 故意不含的上下文与报警，进度走 stderr 的
+>   NDJSON）；连带 §6.1 新增 **B3a**（引擎侧进度回调 + 两个新参数）、B1/B3/B4/B10 判据同步、
+>   M1 含 B3a。**入口写死 `python -m desktop.main --self-test`，不抄姊妹仓的顶层 `app` 包。**
 
 ## 0. 结论先行（三句）
 
@@ -92,8 +97,8 @@
 | 复用 | 来源 | 说明 |
 |---|---|---|
 | 目录骨架 | `desktop/{main.py,app/{main_window,pages,services,styles,widgets,workers,utils}}` | 一比一照搬 |
-| VI 深色皮肤 | `desktop/app/styles/dark.qss`（39 KB）+ `colors.py` | 同公司 VI v2.0，直接用 |
-| **模式徽章** | `styles/mode_badge.qss` | 正是本文 §4 双发布态需要的现成件 |
+| VI 深色皮肤 | `desktop/app/styles/dark.qss`（39 KB）+ `colors.py` | 同公司 VI v2.0，**已于 2026-09-13 搬入本仓** `desktop/app/styles/`（源 commit `52e392d`，带来源说明头）。已核实全文**无 `url(...)` 引用**、字体只按 family 名引用且都带 fallback ⇒ **不打包 .ttf 也能生效**，所以 B1 不含字体资产 |
+| 模式徽章 | `styles/mode_badge.qss` | **只借样式写法，不借语义**：那四态是 DrugEffectScan 的（待机/实时推理中/加载候选包/备份演示），与本文 §4 的 research / validated / 标定不可信**完全不是一回事**。本仓的徽章由 B8 自己写（资质边界不外派），**不许直接搬这个文件** |
 | 跨平台七条约束 | `desktop/README.md` | `resource_path()` / `user_data_dir()` / CPU-only / `spawn` / `QDesktopServices` |
 | 审计与溯源 | `services/{audit_log,audit_log_paths,audit_metadata_registry,provenance,model_card}.py` | GLP 要件，接口照搬 |
 | 自检页 | `pages/self_check_page.py` + `services/self_check.py` | 对应我方 P2 硬门（对比度 / 噪声底 / 面积抖动） |
@@ -134,6 +139,47 @@ fpdf2==2.8.1          # pdf 报告
 **一条铁律**：任何从 CSI 导入的数字，在库、在界面、在导出里都必须带
 `source = "CSI"` 且**不参与** `validity_status` / 分母 / 报警的计算。理由见 §4 的表——
 CSI 的输出里含「空杯位 = 466.88 s 不动」，一旦混进我们的列，分母体系当场失效。
+
+### 3.4 外壳与引擎之间是**进程边界**，不是 import 边界（DP-099 裁决）
+
+§3 的铁律「外壳不许重算指标」原来只靠人看。**改成结构上办不到**：
+
+| 决定 | 内容 |
+|---|---|
+| 分开 freeze | GUI 一个 exe（`desktop/main.py`），分析后端另一个（`depression-analyzer`，入口 = 现有 `depressionplex/cli/analyze.py`），后端整个文件夹装进 `DEPRESSION-PLEX/backend/`。继承 `drugeffectscan` 的 `build_windows.spec` + `build_analyzer_windows.spec` 双 spec 模式 |
+| GUI 不 import 引擎 | `desktop/` 下**任何文件都不许出现** `import depressionplex` / `from depressionplex`（含 `assay_core`）。GUI 只会：起子进程、读它写出的 CSV / `run.json`、读它 stderr 上的进度行 |
+| 三重机械封堵 | ① 守卫测试 AST 扫 `desktop/**/*.py` 的 import 图（**沙箱里就能跑，因为不需要 import PySide6，只 parse**）；② GUI 的 spec 里写 `excludes=["depressionplex"]` ⇒ 谁偷偷 import 了，冻出来的 GUI 一运行就炸；③ `desktop/requirements.txt` 里没有本仓包 |
+| 取消 = 杀进程 | 不在引擎里做协作式取消。**引擎的所有输出文件都在末尾一次写出**，所以被杀的运行不会留下半张 CSV |
+
+**为什么值这个代价**（否则一个 exe 更省事）：`cli/analyze.py` 是**唯一**产出数字的代码路径，
+进程边界让「外壳里出现第二套算法」从「要靠 review 拦」变成「跨进程根本拿不到函数」。
+DP-054（报告层自己算分母，打出 198.9%）那类事故的成本远高于双 spec 的麻烦。
+附带三个好处：取消干净、长解码崩了不带走 GUI、B3 的验收判据（与 CLI 逐位相同）**自动成立**
+——因为它调的就是同一条 CLI。
+
+**入口形式（写死，与 CI 对齐）**：`python -m desktop.main --self-test`，仓根为 cwd，
+`desktop/` 是真包（有 `__init__.py`），内部一律绝对导入 `from desktop.app.… import …`。
+**不抄 `drugeffectscan` 那套 `sys.path.insert(desktop/)` + 顶层 `app` 包**：本仓根下已经有
+可导入的 `depressionplex` 包，再挂一个顶层 `app` 是命名地雷，也让 import 守卫难写。
+代价是从姊妹仓抄过来的文件要把 `from app.` 改成 `from desktop.app.`（机械活），
+以及 B10 的 spec 用 `pathex=[仓根]` + `hiddenimports=["desktop.app.…"]`。
+
+### 3.5 外壳 ↔ 引擎的数据契约（DP-099 裁决，B3a 落地）
+
+**一个数字只许有一个序列化器。** 现在的 CSV（`cli/analyze.py` 的 `CSV_FIELDS` 16 列）就是数字的
+唯一契约，**不动、不复制、不在别处再写一份 JSON 装数字**。缺的只是 CSV 按设计不含的东西：
+
+| 通道 | 内容 | 谁写 |
+|---|---|---|
+| `--csv`（已存在，不改） | trial 级数字 + 分母 + `validity_status`（16 列） | 引擎 |
+| **`--run-json`（新增）** | CSV **故意不含**的上下文：素材探测结果（fps / 帧数 / 来源 / 画幅）、隔间几何提案、`plan.warnings`、逐隔间 `ChamberValidity`、**未产出数字的隔间及其原因**、实际生效的计分窗口（取自 `ASSAY_WINDOWS`）、工具版本、θ_mob。**不许重复 CSV 里的任何数字** | 引擎 |
+| **stderr 上的 NDJSON 进度行（新增）** | `{"ev":"progress","frame":i,"n":N}`，节流到约 1 行/秒 | 引擎 |
+| stdout 人读报告（已存在，不改） | `_plan_text` + `trial_report_text` | 引擎 |
+| 退出码（已存在，不改） | 0 = 至少一个隔间出数字；2 = 一个都没出；1 = 解码失败 | 引擎 |
+
+为什么进度走 **stderr**：stdout 是人读报告，B3 的验收要拿它和 CLI 直跑逐位比对，
+掺进度行就比不了了。`run.json` 同时是 B6 审计包与 B4 报警行的数据源
+——**「排除态隔间只产报警行」这条如果只有 CSV，外壳根本看不见**（CSV 按设计不写这些隔间）。
 
 ## 4. 双发布态（核心架构决策）
 
@@ -262,16 +308,17 @@ QT_QPA_PLATFORM=offscreen python3 desktop/main.py --self-test
 | # | 模块 | 谁干 | 可机器验收的产出 |
 |---|---|---|---|
 | **B0** | CI 骨架：`.github/workflows/tests.yml`（ubuntu，跑 `python3 run_tests.py`）+ `desktop-selftest.yml`（ubuntu offscreen + windows-latest，装 PySide6 跑 `--self-test`） | **已交付**（外派，PR #87，DP-098） | ✅ 两个 workflow 均绿（windows + ubuntu 三个 job 全 success）；引擎那条打出 `通过 289  失败 0`（原 284 + 5 条 CI 守卫） |
-| B1 | `desktop/` 骨架：main.py + main_window + 侧边栏 + dark.qss + paths.py + **`--self-test`** | **外派** | **Actions 上 `desktop-selftest.yml` 转绿**（ubuntu offscreen + windows 双绿）；自检打出全部页面名与启动耗时 < 2 s；守卫测试证明 `desktop/` 没 import `assay_core` 内部模块、没引入 numpy 以外的新第三方依赖（除 PySide6） |
+| B1 | `desktop/` 骨架：`desktop/__init__.py` + `main.py`（含 `--self-test`）+ `app/main_window.py` + 侧边栏 + `dark.qss` + `app/utils/paths.py` | **外派** | **Actions 上 `desktop-selftest.yml` 转绿**（`python -m desktop.main --self-test`，ubuntu offscreen + windows 双绿）；自检打出全部页面名与启动耗时 < 2 s；**import 守卫测试**（AST 扫 `desktop/**/*.py`，§3.4）证明没有 `depressionplex` / `assay_core` 的 import，也没引入 PySide6 以外的新第三方依赖 |
+| **B3a** | 引擎侧两件（**纯增量，不改任何既有输出**）：`segment_series/analyze_frames/analyze_video` 加 `progress=` 关键字（默认 `None`）+ `cli/analyze.py` 加 `--progress-json`（NDJSON 进度写 **stderr**）与 `--run-json`（§3.5 的上下文，**不含 CSV 已有的数字**） | **外派**（契约由 §3.5 给死） | 同一段素材带/不带 `progress=` 跑出的报告**逐位相同**（测试直接比）；不带新参数时 stdout 与 CSV 与改动前逐位相同；`--run-json` 的 schema 有测试；`run.json` 里必须出现「未产出数字的隔间及原因」 |
 | B2 | 实验向导（范式选择 / 视频导入 / 隔间数 / 悬挂点或水面确认 / 计分窗口） | **外派**（窗口默认值由我给死） | 向导产出一份 `experiment.json`，字段与 `runner.TrialPlan` 一一对上 |
-| B3 | 分析队列 + 进度 + 取消（`workers/analysis_worker.py`，`spawn`） | **外派** | 跑完产出与 `cli/analyze.py --csv` **逐位相同**的 CSV |
-| B4 | 结果页：trial 表 + 分母列 + `validity_status` + 报警行 | **外派** | 每个秒数旁必须有分母，缺一列即拒收 |
+| B3 | 分析队列 + 进度 + 取消（**起 `backend/` 子进程**，读 stderr 进度行；取消 = 杀进程，见 §3.4） | **外派** | 跑完产出与 `cli/analyze.py --csv` **逐位相同**的 CSV（进程边界让这条自动成立）；取消后不留半张 CSV |
+| B4 | 结果页：trial 表 + 分母列 + `validity_status` + 报警行（数字读 CSV，报警行与上下文读 `run.json`，见 §3.5） | **外派** | 每个秒数旁必须有分母，缺一列即拒收；**未产出数字的隔间必须显示为报警行，不许从表里消失** |
 | B5 | 时间线复核视图（逐帧掩膜叠加 + 事件带） | **外派** | 与 `timeline.py` 输出一致；不许在外壳里重算事件 |
 | B6 | 导出：xlsx + pdf 报告 + 审计包 | **外派**（报告文案我写） | 报告必印分母、θ_mob、发布态声明；pdf 可无字体报错生成 |
 | B7 | 自检页：对比度 ≥ 100 灰阶且 ≥ 2×、分割噪声底、面积抖动 p90 | **外派** | 复现 P2 硬门读数（对比度 208.5 / 6.77×；噪声底 0.43 px；p90 = 0.0035） |
 | B8 | `calibration.json` 契约 + 模式徽章 + 哈希校验 | **我自己干**（这是资质边界） | 三条路径各有测试：①篡改标定文件 ⇒ 降级且变红；②`gates.G11.threshold = null` ⇒ 强制 research；③无任何手动切 Validated 的入口 |
 | B9 | CSI 兼容层：`.SET` 读+写、`.CLB` 读（范围见 §3.3，**不含 FSR3/TSR1/DT**） | **我自己干**（逆向裁决） | 两份 `.SET` 夹具全部正确解析；生成的 `.SET` **被 CSI 自己读回**；`.CLB` 解出的矩形与 DP-032 隔间定位一致 |
-| B10 | 打包：`build_windows.spec` + Inno Setup（**Actions 骨架已在 B0**） | **外派** | Actions 出 `DEPRESSION-PLEX-Setup-x.y.z.exe`，客户机双击可装可跑 |
+| B10 | 打包：**双 spec**（GUI `build_windows.spec` + 后端 `build_analyzer_windows.spec`，见 §3.4）+ Inno Setup（**Actions 骨架已在 B0**） | **外派** | Actions 出 `DEPRESSION-PLEX-Setup-x.y.z.exe`，客户机双击可装可跑；GUI 的 spec 必须写 `excludes=["depressionplex"]`（第三重封堵）；GUI 用 `pathex=[仓根]` + `hiddenimports=["desktop.app.…"]` |
 | B11 | ffmpeg 随包分发与路径解析 | **外派** | 断网、无系统 ffmpeg 的干净 Win 机上能解码 |
 
 派工单一律按 WORKFLOW §8 七段写，分支名由我给死，输入绝对路径由我先确认存在。
@@ -282,7 +329,7 @@ QT_QPA_PLATFORM=offscreen python3 desktop/main.py --self-test
 |---|---|---|
 | **M0a** 有 CI | **B0** | ✅ **已达成（2026-09-13，PR #87）**：两个 workflow 均绿（ubuntu 引擎 + ubuntu/windows offscreen 自检），引擎那条打出 `通过 289  失败 0`。**这是第一个里程碑，因为在它之前我们没有任何能验外壳的执行者**（§6.0） |
 | **M0b** 骨架 | B1 | `desktop-selftest.yml` 在 ubuntu offscreen + windows-latest 双绿 |
-| **M1** 能跑完一场 | B2 + B3 + B4 | 一段真视频从导入到 trial 表，CSV 与 CLI 逐位相同 |
+| **M1** 能跑完一场 | **B3a** + B2 + B3 + B4 | 一段真视频从导入到 trial 表，CSV 与 CLI 逐位相同；未产出数字的隔间以报警行出现 |
 | **M2** 能交付研究版 | B6 + B7 + B8 + B10 + B11 | 客户机装上、跑完、导出带声明的报告；徽章为黄 |
 | **M3** 可复核 | B5 + B9 | 复核视图与 `timeline` 一致；`.SET` 双向互通；`.CLB` 可读 |
 | **M4** 计量版 | 轨道 A 完成（含 **G11 门槛在 T1 上定出实数**）→ 签发 `calibration.json` | 徽章转绿，报告印验收批次号 + MAE/RMSE/逐试次误差范围 |
