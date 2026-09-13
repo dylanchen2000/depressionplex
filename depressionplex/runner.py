@@ -178,9 +178,46 @@ def segment_series(frames: Iterable[np.ndarray],
     return seqs
 
 
+# 残差归一化分母的取法。**这是"用哪个 BL"，不是"用什么量"**——两个候选都取
+# `rad.trial_body_length`（全帧主轴长中位数），只差在按哪个范围聚合。
+#   "per_trial"        —— 冻结口径：每个隔间用自己的那个数。
+#   "recording_median" —— 同一段录像内所有算得出 BL 的隔间取中位数。同一段录像 =
+#                         同一相机、同一距离、同一场次 ⇒ 真实体长差异远小于
+#                         分割模糊带来的 BL 抖动（DP-073 实测同录像同批组内 BL
+#                         极差比 1.12–1.91、中位 1.34，是 DP-058 那条 ±5.0% 规格的
+#                         7 倍）⇒ 取中位数是把"分割抖动"平掉，而不是把"体长差异"抹掉。
+# **与 DP-058 划清界限**：DP-058 禁止的是把 `corridor.bl_est`（标定 24 帧的估计，
+# 与 `trial_body_length` 跨 2.27 倍，压根不是同一个量）顶到分母上。本条不碰它。
+BL_NORM_MODES: tuple[str, ...] = ("per_trial", "recording_median")
+DEFAULT_BL_NORM_MODE = "per_trial"
+
+
+def bl_denominator(bls: dict[int, float], mode: str | None = None,
+                   ) -> dict[int, float | None]:
+    """→ {隔间: 归一化分母}。算不出 BL 的隔间给 `None`（让下游走自己的缺省）。
+
+    分母**只由算得出 BL 的隔间决定**：一个空隔间或分割全崩的隔间不该把另外
+    三个的分母带偏。若一个录像里没有任何隔间算出 BL，全部返回 `None`——
+    那时"没有分母"是事实，不许拿 0 或者别处的数顶上（DP-032）。
+    """
+    m = DEFAULT_BL_NORM_MODE if mode is None else mode
+    if m not in BL_NORM_MODES:
+        raise ValueError("bl_norm_mode 只能是 %r，得到 %r" % (BL_NORM_MODES, m))
+    if m == "per_trial":
+        return {k: (v if v > 0 else None) for k, v in bls.items()}
+    good = sorted(v for v in bls.values() if v > 0)
+    if not good:
+        return {k: None for k in bls}
+    mid = len(good) // 2
+    med = good[mid] if len(good) % 2 else 0.5 * (good[mid - 1] + good[mid])
+    return {k: med for k in bls}
+
+
 def analyze_chamber(masks: PackedMasks, ch: ChamberPlan,
                     cv: validity.ChamberValidity | None, *,
                     fps: float, assay: str, trial_id: str,
+                    bl_norm: float | None = None,
+                    bl_trial: float | None = None,
                     ) -> trial_report.TrialReport:
     """单隔间：掩膜序列 → 特征 → 事件 → trial 报告。
 
@@ -200,12 +237,18 @@ def analyze_chamber(masks: PackedMasks, ch: ChamberPlan,
     #    的上升量归一化。**这条退路不能用在归一化分母上**：`corridor.bl_est` 是
     #    标定 24 帧的估计，与 `trial_body_length` 不是一个量（实测 27 试次跨
     #    2.27 倍），拿它顶上会静默改判据。所以分母那边宁可传 None 走缺省。
-    bl_trial = rad.trial_body_length(masks)
+    #  · `bl_norm`（可选）= 由调用方决定的归一化分母，用来实现
+    #    `BL_NORM_MODES` 里的非 per_trial 口径。不传 ⇒ 就是冻结口径。
+    #  · `bl_trial`（可选）= **同一个** `rad.trial_body_length(masks)` 的值，
+    #    调用方已经算过就传进来，纯为省一遍全帧扫描；结果逐位相同。
+    if bl_trial is None:
+        bl_trial = rad.trial_body_length(masks)
     bl_climb = bl_trial
     if bl_climb <= 0:
         bl_climb = float(ch.corridor.bl_est) if (ch.corridor and ch.corridor.bl_est) else 0.0
+    bl_res = bl_norm if (bl_norm is not None and bl_norm > 0) else bl_trial
     feats = rules.build_tst_features(masks, suspension=ch.suspension, fps=fps,
-                                     bl=(bl_trial if bl_trial > 0 else None))
+                                     bl=(bl_res if bl_res > 0 else None))
     labels = rules.label_tst_events(feats, bl=(bl_climb if bl_climb > 0 else None))
     return trial_report.build_trial_report(
         labels, fps=fps, assay=assay, trial_id=trial_id, chamber_validity=cv)
@@ -213,10 +256,21 @@ def analyze_chamber(masks: PackedMasks, ch: ChamberPlan,
 
 def _reports(plan: TrialPlan, seqs: dict[int, PackedMasks], *,
              fps: float, assay: str, prefix: str,
+             bl_norm_mode: str | None = None, bl_norm: float | None = None,
              ) -> tuple[dict[int, trial_report.TrialReport], dict[int, str]]:
     """逐隔间出报告。**一个隔间跑不出来不该让另外三个也没结果**，
-    但跳过的原因必须显式带回，不许静默少几行。"""
+    但跳过的原因必须显式带回，不许静默少几行。
+
+    `bl_norm` 由调用方直接指定归一化分母（批处理层可以给"同批组中位 BL"这种
+    跨录像的数，那不是本函数能看见的范围）；不给就按 `bl_norm_mode` 在**本录像
+    内**聚合。两者都不给 ⇒ 冻结口径。
+    """
     by = {cv.chamber: cv for cv in plan.trial_validity.chambers}
+    bls = {ch.index: rad.trial_body_length(seqs[ch.index])
+           for ch in plan.chambers
+           if seqs.get(ch.index) is not None and len(seqs[ch.index]) > 0}
+    dens = ({k: bl_norm for k in bls} if (bl_norm is not None and bl_norm > 0)
+            else bl_denominator(bls, bl_norm_mode))
     reports: dict[int, trial_report.TrialReport] = {}
     skipped: dict[int, str] = {}
     for ch in plan.chambers:
@@ -227,7 +281,8 @@ def _reports(plan: TrialPlan, seqs: dict[int, PackedMasks], *,
         try:
             reports[ch.index] = analyze_chamber(
                 masks, ch, by.get(ch.index), fps=fps, assay=assay,
-                trial_id=f"{prefix}-ch{ch.index}")
+                trial_id=f"{prefix}-ch{ch.index}",
+                bl_norm=dens.get(ch.index), bl_trial=bls.get(ch.index))
         except ValueError as e:
             skipped[ch.index] = str(e)
     return reports, skipped
@@ -237,6 +292,7 @@ def analyze_frames(calib_grays: list[np.ndarray], frames: Iterable[np.ndarray], 
                    fps: float, assay: str, trial_prefix: str,
                    n_chambers: int = 4, body_area_prior: float | None = None,
                    progress: Callable[[int, int | None], None] | None = None,
+                   bl_norm_mode: str | None = None, bl_norm: float | None = None,
                    ) -> tuple[TrialPlan, dict[int, trial_report.TrialReport],
                               dict[int, str]]:
     """全链（纯 numpy 版）：标定帧 + 全片帧 → (计划, 每隔间报告, 跳过原因)。
@@ -247,7 +303,8 @@ def analyze_frames(calib_grays: list[np.ndarray], frames: Iterable[np.ndarray], 
                       body_area_prior=body_area_prior)
     seqs = segment_series(frames, plan, progress=progress)
     reports, skipped = _reports(plan, seqs, fps=fps, assay=assay,
-                                prefix=trial_prefix)
+                                prefix=trial_prefix, bl_norm_mode=bl_norm_mode,
+                                bl_norm=bl_norm)
     return plan, reports, skipped
 
 
@@ -256,6 +313,7 @@ def analyze_video(path: str | Path, *, assay: str, n_chambers: int = 4,
                   n_calib: int = N_CALIB_FRAMES,
                   body_area_prior: float | None = None,
                   progress: Callable[[int, int | None], None] | None = None,
+                  bl_norm_mode: str | None = None, bl_norm: float | None = None,
                   ) -> tuple[video.VideoInfo, TrialPlan,
                              dict[int, trial_report.TrialReport], dict[int, str]]:
     """入口：一段录像 → 每隔间一份 trial 报告。
@@ -279,5 +337,6 @@ def analyze_video(path: str | Path, *, assay: str, n_chambers: int = 4,
 
     reports, skipped = _reports(
         plan, seqs, fps=info.fps, assay=assay,
-        prefix=trial_prefix or Path(path).stem)
+        prefix=trial_prefix or Path(path).stem,
+        bl_norm_mode=bl_norm_mode, bl_norm=bl_norm)
     return info, plan, reports, skipped
