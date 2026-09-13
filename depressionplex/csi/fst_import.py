@@ -16,13 +16,13 @@
 """
 from __future__ import annotations
 
-import hashlib
 import re
 import struct
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
 
+from . import clb
 from .xlsx import read_sheet
 
 __all__ = [
@@ -571,22 +571,33 @@ def parse_set(path) -> dict:
 
 
 def parse_clb(path) -> dict:
-    """`.CLB` 固定 308 字节。本阶段**只做无损转储**，不解释、不起名（R3）。
+    """`.CLB` 解析（DP-104 起走 `csi.clb` 的**结构**解析，不再写死 308 字节）。
 
-    返回 {'size', 'sha256', 'int32': [77 个], 'float32': [77 个]}。
-    长度不是 308 抛 CsiParseError。
+    旧行为（DP-094）：只认 308 字节、只做整文件无损转储。现在按逆向报告 §7.3 认两种头
+    与 `头 + 槽数×76` 的长度公式，所以 79 / 80 / 307 / 308 四种随包样例都能读。
+
+    返回 `csi.clb.parse_clb_struct` 的全部键，外加两个**向后兼容**键：
+
+    - `int32` / `float32`：整文件按 4 字节切开的无损转储。**只有旧格式（4 字节头）
+      长度才被 4 整除**，当前格式（3 字节头）切不开，此时两个键为 `None`
+      —— 不是省略这两个键（键不许因为没内容就消失），也不是给个空表冒充有值。
+
+    19 个数的含义仍然**未确认**，仍然不起名，理由见 `csi.clb` 模块 docstring。
     """
-    path = Path(path)
-    data = path.read_bytes()
-    if len(data) != 308:
-        raise CsiParseError(f"{path.name}: .CLB 是 {len(data)} 字节，应为 308")
-    n = len(data) // 4  # 77
-    return {
-        "size": len(data),
-        "sha256": hashlib.sha256(data).hexdigest(),
-        "int32": list(struct.unpack(f"<{n}i", data)),
-        "float32": list(struct.unpack(f"<{n}f", data)),
-    }
+    try:
+        out = dict(clb.parse_clb_struct(path))
+    except clb.ClbParseError as exc:  # 对外保持 DP-094 起的异常类型
+        raise CsiParseError(str(exc)) from exc
+
+    data = Path(path).read_bytes()
+    if len(data) % 4 == 0:
+        n = len(data) // 4
+        out["int32"] = list(struct.unpack(f"<{n}i", data))
+        out["float32"] = list(struct.unpack(f"<{n}f", data))
+    else:
+        out["int32"] = None
+        out["float32"] = None
+    return out
 
 
 def load_csi_dir(csi_dir) -> tuple[list[CsiTank], dict, list[dict]]:
