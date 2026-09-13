@@ -24,7 +24,11 @@ PAGE_ORDER = (
     ("自检", "SelfCheckPage"),
 )
 
-_CLASSES = {
+#: 类名 → 类。**「哪个类是哪一页」只许在这里回答一次**（DP-101 修）：
+#: `main.py` 的自检原来自己 `getattr(placeholders, cls_name)`，是第二个解析器；
+#: 页面一旦从 placeholders 搬进自己的模块，两个解析器就指到不同的地方。
+#: 页面模块化是每一页的必经之路，所以这个口子迟早会被踩到——B2 第一次踩上就是它。
+PAGE_CLASSES = {
     "WelcomePage": WelcomePage,
     "NewExperimentPage": NewExperimentPage,
     "QueuePage": QueuePage,
@@ -57,7 +61,7 @@ class MainWindow(QMainWindow):
         self.page_stack = QStackedWidget()
 
         # 全部页面在构造时就建好（自检要求：不许有「点了才建」的页面）
-        self.pages = {name: _CLASSES[cls_name](self) for name, cls_name in PAGE_ORDER}
+        self.pages = {name: PAGE_CLASSES[cls_name](self) for name, cls_name in PAGE_ORDER}
         for name, widget in self.pages.items():
             self.sidebar.addItem(QListWidgetItem(name))
             self.page_stack.addWidget(widget)

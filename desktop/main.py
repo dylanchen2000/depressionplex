@@ -13,8 +13,7 @@ import time
 import PySide6
 from PySide6.QtWidgets import QApplication
 
-from desktop.app.main_window import MainWindow, PAGE_ORDER
-from desktop.app.pages import placeholders
+from desktop.app.main_window import PAGE_CLASSES, MainWindow, PAGE_ORDER
 from desktop.app.utils.paths import resource_path, user_data_dir
 
 # Windows 控制台默认不是 UTF-8，中文页名会抛 UnicodeEncodeError 而不是打印乱码
@@ -58,10 +57,19 @@ def self_test() -> int:
     else:
         problems.append(f"皮肤缺失：{resource_path(STYLESHEET)}")
 
-    # 逐个单独构造，时间才是真的量出来的；顺带证明每个页面**不依赖父窗口**也能构造
+    # 逐个单独构造，时间才是真的量出来的；顺带证明每个页面**不依赖父窗口**也能构造。
+    #
+    # 类名一律从 `main_window.PAGE_CLASSES` 取，**不许再从某个页面模块 getattr**（DP-101 修）：
+    # 原来这里写的是 `getattr(placeholders, cls_name)`，等于给「哪个类是哪一页」开了
+    # 第二个解析器。页面从 placeholders 搬到自己的模块（这是每一页最终都要走的路）时，
+    # 主窗口用新类、自检还在老模块里找，于是自检以 AttributeError **崩掉**（退 1），
+    # 而不是「不通过」（退 2）—— 归因时先怀疑新页面本身，方向就错了。
     print("逐页构造：")
     for name, cls_name in PAGE_ORDER:
-        cls = getattr(placeholders, cls_name)
+        cls = PAGE_CLASSES.get(cls_name)
+        if cls is None:
+            problems.append(f"页面类 {cls_name} 不在 PAGE_CLASSES 里（PAGE_ORDER 与类表脱节）")
+            continue
         t = time.perf_counter()
         cls()
         print(f"  {name} ({cls_name}) {(time.perf_counter() - t) * 1000:.2f} ms")
