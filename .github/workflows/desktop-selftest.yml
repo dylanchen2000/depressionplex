@@ -1,6 +1,7 @@
 name: Desktop Self-Test
 
-on: [push, pull_request]
+# 只挂 push，理由同 tests.yml（windows 任务按 2× 计费，重复跑更贵）。
+on: push
 
 jobs:
   desktop-test:

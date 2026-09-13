@@ -1,6 +1,11 @@
 name: Tests
 
-on: [push, pull_request]
+# 只挂 push。**不要再加 pull_request**：本仓是单人私有仓、不用 fork，
+# 而检查结果是挂在 commit SHA 上的，PR 页面照样能看到 ⇒ 加了 pull_request
+# 只会让同一个 SHA 跑两遍，把 free plan 的 Actions 分钟数直接烧掉一半
+# （2026-09-13 实测：同一次推送产生 4 个 run，两个 event=push、两个 event=pull_request，
+#  结论完全相同）。
+on: push
 
 jobs:
   test:

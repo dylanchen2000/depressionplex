@@ -42,6 +42,22 @@ def test_no_error_masking():
             assert pattern not in content, f"{workflow.name} 包含 {pattern}（绿灯造假）"
 
 
+def test_no_duplicate_triggers():
+    """两个 workflow 都不许同时挂 push 与 pull_request。
+
+    同一个 SHA 会跑两遍，结论完全相同，白烧一倍 Actions 分钟数（windows 还按 2× 计费）。
+    检查结果挂在 commit SHA 上，只挂 push 时 PR 页面照样看得到。
+    """
+    for name in ("tests.yml", "desktop-selftest.yml"):
+        workflow = ROOT / ".github/workflows" / name
+        assert workflow.exists(), f"{name} 不存在"
+        content = workflow.read_text()
+        # 只看 `on:` 那一段之前的触发声明，注释里提到 pull_request 不算违规
+        body = "\n".join(ln for ln in content.splitlines()
+                         if not ln.lstrip().startswith("#"))
+        assert "pull_request" not in body, f"{name} 挂了 pull_request，会让同一个 SHA 跑两遍"
+
+
 def test_offscreen_qt():
     """desktop-selftest.yml 必须设置 QT_QPA_PLATFORM=offscreen"""
     workflow = ROOT / ".github/workflows/desktop-selftest.yml"
