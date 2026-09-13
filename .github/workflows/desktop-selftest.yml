@@ -6,6 +6,10 @@ on: push
 jobs:
   desktop-test:
     runs-on: ${{ matrix.os }}
+    # 封住「挂死烧分钟数」这条：外壳自检一旦误调 exec()（进 Qt 事件循环），
+    # 这个任务会一直挂到 runner 的 6 小时上限，windows 还按 2× 计费。
+    # 正常跑完 3 分钟以内，给 10 分钟余量；超时即失败，正是我们想要的结论。
+    timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:

@@ -10,6 +10,9 @@ on: push
 jobs:
   test:
     runs-on: ubuntu-latest
+    # 套件本地跑满约 3–4 分钟；给 20 分钟余量。封住「某个用例死循环挂到
+    # runner 6 小时上限」这条——超时即失败，而不是安静地烧掉分钟数。
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
