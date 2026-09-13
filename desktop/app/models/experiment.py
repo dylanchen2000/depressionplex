@@ -29,6 +29,12 @@ SCHEMA_KEYS = (
     "videos",
 )
 
+#: `videos[i]` 的键清单。和 `SCHEMA_KEYS` 一样是**唯一来源**：
+#: 读契约的一方（`services/engine.py` 拼 argv）必须按这两张表校验，
+#: 不许照着旗标名反推键名——DP-102 就是这么把 `n_chambers` 读成 `chambers`、
+#: 把逐视频的 `trial_prefix` 读成顶层字段的，两处都是**静默丢用户设置**。
+VIDEO_KEYS = ("path", "trial_prefix")
+
 
 @dataclass
 class VideoEntry:
