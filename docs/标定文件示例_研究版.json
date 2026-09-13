@@ -1,0 +1,19 @@
+{
+  "schema_version": "1",
+  "mode": "research",
+  "theta_mob": 0.0175,
+  "batch": "R0-2026Q3-未验收",
+  "dataset_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "signed_at": "2026-09-13T12:00:00+08:00",
+  "tool_version": "0.1.0",
+  "gates": {
+    "G7": {"value": null, "threshold": 0.818},
+    "G8": {"value": null, "threshold": 17.7},
+    "G11": {"value": null, "threshold": null}
+  },
+  "g10a_false_positives": 0,
+  "g10a_prime_false_positives": 0,
+  "mae_s": 0.0,
+  "rmse_s": 0.0,
+  "per_trial_error_range_s": [0.0, 0.0]
+}

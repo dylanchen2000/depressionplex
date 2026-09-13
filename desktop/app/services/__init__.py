@@ -1,1 +1,1 @@
-"""Services layer for desktop application."""
+"""外壳的服务层：起子进程、读结果文件、判定标定契约。**这里不许有算法。**"""
