@@ -77,36 +77,53 @@ SET_SENTINEL_REL = 123     # 第 1 个哨兵对相对 base 的偏移
 SET_SENTINEL_STRIDE = 276  # 哨兵对之间的间距
 SET_N_SENTINELS = 4        # 哨兵块恒为 4 个，**与 n_tanks 无关**
 
-#: 13 个 Motion 数在文件里的位置 → 面板字段，**已定到的程度**（2026-09-11）。
+#: 13 个 Motion 数在文件里的位置 → 面板字段（2026-09-13 更新，DP-096）。
 #:
-#: 定法：拿两份只改 Motion 的 `.SET` 做受控差分。用户把
+#: **第一步（2026-09-11，受控差分）**：拿两份只改 Motion 的 `.SET` 差分。用户把
 #: Merge Bouts Limit 20→25、Min Length Thresh 15→18、Noise Thresh 10→15、
 #: Bin Size 5→8（挣扎侧和放弃侧都改），其余 5 个字段不动。
 #: 于是"哪个位置是哪个**字段类型**"被新值一一点亮，5 个没变的位置就是
-#: 挣扎侧独有的那 5 个字段。
+#: 挣扎侧独有的那 5 个字段 ⇒ 剩 2**5 = 32 种排列。
 #:
-#: **仍未定的两件事**（都需要一份"13 个值互不相同"的 `.SET`）：
-#:   1. 同类型的两份里，哪个是 Struggle 哪个是 Float（4 对，各 2 种可能）
-#:   2. idx 0 和 idx 2 哪个是 WaterSurProxThresh、哪个是 ClimbMagnThresh
-#:      （两者都是 15 且都没变，这次差分点不亮）
-#: 所以还剩 2**5 = 32 种可能的完整排列，比原来的天文数字已经小了极多。
+#: **第二步（2026-09-13，逆向报告 §7.1 的字段声明顺序）**：
+#: `2026-09-09_逆向工程-DepressionSuite-report.md` 恢复了 ASCII SET 首行 30 字段的
+#: 读取顺序（读取函数 `0x0045DCD0`），其中第 16–21 项为
+#: `high motion, low motion, 水面距离, 攀爬高度, 攀爬幅度, MaxMove`。
+#: ⇒ **idx0=WaterSurProx、idx1=ClimbHeight、idx2=ClimbMagn 定死。**
+#: 独立佐证：`2026-09-10_实测验证` 报告读同一份 `10mg 2周.SET` 得
+#: water/climb/climbMagn/maxMove = `15/10/15/2`，与本解析器 idx0..3 逐项相同。
+#:
+#: **仍未定的只剩一个全局比特**：4 对同类型字段里，**低 idx 是 high(Escape/Struggle) 侧
+#: 还是 low(Immobile/Float) 侧**。两份 fixture 的挣扎侧与放弃侧**取值完全相同**
+#: （min 15/15、noise 10/10、merge 20/20、bin 5/5；改后 18/18、15/15、25/25、8/8），
+#: 所以数据点不亮这一位。下面按 **low idx = high 侧** 标注，依据是
+#: 逆向报告里**每一处**已恢复的顺序都把 high 放在 low 前面
+#: （ASCII 字段 16/17 = high motion, low motion；字段 22–30 = early merge、high 组、low 组；
+#: `FST_GetPostprocessThreshold 0x00482920` 亦按 high→low 映射）。
+#: **这是约定推断，不是字节级证明** —— 标注里一律带 `(约定推断)`。
+#: 收口只需一份把**任一个**参数的挣扎侧与放弃侧填成**不同值**的 `.SET`（例如
+#: Min Length 挣扎 20 / 放弃 40），比原先要求的"13 个值互不相同"便宜得多。
 #:
 #: **这个常量只作记录，不许拿它给 parse_set 的返回键起名**（R3）。
 MOTION_FIELD_HINTS = (
-    "WaterSurProxThresh 或 ClimbMagnThresh（与 idx2 互换，未定）",
+    "WaterSurProxThresh（逆向报告 §7.1 字段序定死）",
     "ClimbHeightThresh",
-    "WaterSurProxThresh 或 ClimbMagnThresh（与 idx0 互换，未定）",
+    "ClimbMagnThresh（逆向报告 §7.1 字段序定死）",
     "MaxMoveThresh（唯一的 float32）",
     "EarlyMergeLimit",
-    "MinLengthThresh（与 idx6 成对，Struggle/Float 未定）",
-    "MinLengthThresh（与 idx5 成对，Struggle/Float 未定）",
-    "NoiseThreshFrames（与 idx10 成对，Struggle/Float 未定）",
-    "MergeBoutsLimit（与 idx11 成对，Struggle/Float 未定）",
-    "BinSizeSeconds（与 idx12 成对，Struggle/Float 未定）",
-    "NoiseThreshFrames（与 idx7 成对，Struggle/Float 未定）",
-    "MergeBoutsLimit（与 idx8 成对，Struggle/Float 未定）",
-    "BinSizeSeconds（与 idx9 成对，Struggle/Float 未定）",
+    "MinLengthThresh[high/Escape]（与 idx6 成对，高低归属为约定推断）",
+    "MinLengthThresh[low/Immobile]（与 idx5 成对，高低归属为约定推断）",
+    "NoiseThreshFrames[high/Escape]（与 idx10 成对，高低归属为约定推断）",
+    "MergeBoutsLimit[high/Escape]（与 idx11 成对，高低归属为约定推断）",
+    "BinSizeSeconds[high/Escape]（与 idx12 成对，高低归属为约定推断）",
+    "NoiseThreshFrames[low/Immobile]（与 idx7 成对，高低归属为约定推断）",
+    "MergeBoutsLimit[low/Immobile]（与 idx8 成对，高低归属为约定推断）",
+    "BinSizeSeconds[low/Immobile]（与 idx9 成对，高低归属为约定推断）",
 )
+
+#: `MOTION_FIELD_HINTS` 里高低归属仍是约定推断的下标（成对出现，每对一个 bit）。
+#: 只要出现一份"某参数两侧取值不同"的 `.SET`，这份清单就该清空。
+MOTION_PAIR_UNRESOLVED_IDX = ((5, 6), (7, 10), (8, 11), (9, 12))
 
 #: 孔位文件名主干正则。**（N）后面可能还有人写的后缀**（实测存在 `抑郁8-10（4）空鼠`），
 #: 所以 suffix 用 `.*` 兜住，**不许把 `$` 顶在 `）` 后面**——那样会静默漏掉空鼠那一份。
@@ -519,7 +536,9 @@ def parse_set(path) -> dict:
 
     # base+51 起：13 个数 = 12 个 int32 + 1 个 float32。
     # 唯一那个 float32 是第 4 项（idx 3 = MaxMoveThresh = 2.0，0x40000000）。
-    # 逐项对应见 MOTION_FIELD_HINTS —— 已定到"字段类型"，Struggle/Float 归属未定（R3）。
+    # 逐项对应见 MOTION_FIELD_HINTS。idx0/1/2 已由逆向报告 §7.1 的字段声明顺序定死；
+    # 4 对同类型字段的高低归属仍是约定推断（MOTION_PAIR_UNRESOLVED_IDX），
+    # 所以返回键仍是位置化的 `motion_ints`，不按字段名拆（R3）。
     motion_ints: list[object] = []
     for k in range(13):
         off = base + SET_MOTION_REL + 4 * k

@@ -34,6 +34,7 @@ from depressionplex.csi.fst_import import (
     parse_bin_xlsx,
     parse_clb,
     MOTION_FIELD_HINTS,
+    MOTION_PAIR_UNRESOLVED_IDX,
     parse_set,
     parse_tank_filename,
     parse_tank_xlsx,
@@ -405,10 +406,51 @@ def test_motion_field_hints_shape() -> None:
     assert MOTION_FIELD_HINTS[3].startswith("MaxMoveThresh")
     assert MOTION_FIELD_HINTS[4] == "EarlyMergeLimit"
     # 4 对同类型字段，每对两个位置的提示文本必须指向同一个字段类型
-    for i, j in ((5, 6), (7, 10), (8, 11), (9, 12)):
-        assert MOTION_FIELD_HINTS[i].split("（")[0] == MOTION_FIELD_HINTS[j].split("（")[0]
-    # idx0 / idx2 那对还没定死，提示里必须写着"未定"
-    assert "未定" in MOTION_FIELD_HINTS[0] and "未定" in MOTION_FIELD_HINTS[2]
+    for i, j in MOTION_PAIR_UNRESOLVED_IDX:
+        assert MOTION_FIELD_HINTS[i].split("（")[0].split("[")[0] == \
+            MOTION_FIELD_HINTS[j].split("（")[0].split("[")[0]
+
+
+def test_motion_hints_idx012_pinned_by_reverse_report() -> None:
+    """DP-096：idx0/idx1/idx2 已由逆向报告 §7.1 的字段声明顺序定死，不许再写"未定"。
+
+    逆向报告（`2026-09-09_逆向工程-DepressionSuite-report.md` §7.1，读取函数
+    `0x0045DCD0`）给出 ASCII SET 首行第 16–21 项为
+    `high motion, low motion, 水面距离, 攀爬高度, 攀爬幅度, MaxMove`
+    ⇒ 去掉两个 float 阈值后，整数 Motion 区前 4 项就是
+    水面距离 / 攀爬高度 / 攀爬幅度 / MaxMove。
+    两份 fixture 的 idx0..3 = `15/10/15/2.0`，与`2026-09-10_实测验证`报告
+    独立读同一份 `10mg 2周.SET` 得到的 `15/10/15/2` 逐项相同。
+    """
+    assert MOTION_FIELD_HINTS[0].startswith("WaterSurProxThresh")
+    assert MOTION_FIELD_HINTS[2].startswith("ClimbMagnThresh")
+    for h in MOTION_FIELD_HINTS[:5]:
+        assert "未定" not in h, h
+    for name in ("10mg 2周.SET", "正常1-4对照更改.SET"):
+        m = parse_set(FIX / name)["motion_ints"]
+        assert m[:5] == [15, 10, 15, 2.0, 5], (name, m[:5])
+
+
+def test_motion_pair_unresolved_idx_still_holds() -> None:
+    """仍未定的只剩"低 idx 是 high 侧还是 low 侧"这一个全局比特。
+
+    只要出现一份把**任一个**参数的挣扎侧与放弃侧填成**不同值**的 `.SET`，
+    这条测试就会红，那时才该动 `MOTION_PAIR_UNRESOLVED_IDX` 和字段名。
+    在手头两份 fixture 上，每一对的两个位置**取值必须相同** —— 这正是
+    这一位点不亮的原因，也是本测试守住的前提。
+    """
+    assert MOTION_PAIR_UNRESOLVED_IDX == ((5, 6), (7, 10), (8, 11), (9, 12))
+    # 4 对共 8 个下标，恰好覆盖 idx5..idx12，无重复无遗漏
+    flat = [i for pair in MOTION_PAIR_UNRESOLVED_IDX for i in pair]
+    assert sorted(flat) == list(range(5, 13))
+    for name in ("10mg 2周.SET", "正常1-4对照更改.SET"):
+        m = parse_set(FIX / name)["motion_ints"]
+        for i, j in MOTION_PAIR_UNRESOLVED_IDX:
+            assert m[i] == m[j], (name, i, j, m[i], m[j])
+        # 归属未定的位置，提示文本必须自报"约定推断"，不许写成已证实
+        for i, j in MOTION_PAIR_UNRESOLVED_IDX:
+            assert "约定推断" in MOTION_FIELD_HINTS[i]
+            assert "约定推断" in MOTION_FIELD_HINTS[j]
 
 
 def test_set_broken_sentinel_raises() -> None:
