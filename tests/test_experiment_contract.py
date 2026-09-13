@@ -302,3 +302,131 @@ def test_serialized_file_conforms_to_contract():
         except FileExistsError as e:
             assert "已存在" in str(e) or "exist" in str(e).lower(), \
                 "FileExistsError 应该有清晰的错误信息"
+
+
+# ---------------------------------------------------------------------------
+# 守卫 7–10（架构师复核 B2 交付时补的，DP-101）
+#
+# 这四条守的是同一件事的四个侧面：**契约文件是边界产物，边界产物不许带着
+# 未验的东西离开这个模块**。B2 的实现在功能上是对的，这四处是可靠性上的窄口子。
+# ---------------------------------------------------------------------------
+def _minimal_plan(out_dir: Path, video: Path, *, assay: str = "TST") -> "experiment.ExperimentPlan":
+    return experiment.ExperimentPlan(
+        assay=assay, n_chambers=4, calib_frames=12, body_area_prior=None,
+        output_dir=out_dir, videos=[experiment.VideoEntry(video, None)],
+        operator=None, note=None,
+    )
+
+
+def test_validate_creates_nothing():
+    """守卫 7：`validate_experiment_plan` 只诊断，**不许在客户机上留下任何东西**。
+
+    原实现在验证里 `mkdir(parents=True)` 再写探针。后果有两个：校验失败或用户
+    看完提示又反悔时，客户机上凭空多出一串空目录；而且 `validate` 就不是可重复
+    调用的纯检查了，将来加一个「预检」按钮等于每点一下建一棵树。
+    同型教训见 `test_desktop_boundary.py::test_path_getters_have_no_side_effects`。
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        video = tmp / "v.mp4"
+        video.write_bytes(b"\x00")
+        target = tmp / "a" / "b" / "c"          # 三层都不存在
+
+        before = sorted(p.name for p in tmp.iterdir())
+        err = experiment.validate_experiment_plan(_minimal_plan(target, video))
+        assert err is None, f"这个计划应当通过校验，却报：{err}"
+
+        assert not target.exists(), f"validate 把输出目录建出来了：{target}"
+        assert not (tmp / "a").exists(), "validate 建了中间目录"
+        after = sorted(p.name for p in tmp.iterdir())
+        assert after == before, f"validate 在磁盘上留下了东西：{set(after) - set(before)}"
+
+
+def test_duplicate_videos_caught_after_resolve():
+    """守卫 8：视频查重必须按**解析后的绝对路径**比。
+
+    序列化时写的是 `resolve()` 的结果。拿没解析的 `Path` 比，「同一个文件的两种
+    写法」（相对/绝对、符号链接）就会漏过去——于是同一段录像在一次实验里跑两遍，
+    输出名还撞车，而报告上看不出是同一段。
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir).resolve()
+        real = tmp / "v.mp4"
+        real.write_bytes(b"\x00")
+        link = tmp / "same.mp4"
+        try:
+            link.symlink_to(real)
+        except (OSError, NotImplementedError):
+            link = None                        # Windows 上未必给建符号链接
+
+        pairs = [experiment.VideoEntry(real, None), experiment.VideoEntry(tmp / "." / "v.mp4", None)]
+        plan = experiment.ExperimentPlan(
+            assay="TST", n_chambers=4, calib_frames=12, body_area_prior=None,
+            output_dir=tmp / "out", videos=pairs, operator=None, note=None)
+        err = experiment.validate_experiment_plan(plan)
+        assert err and "重复" in err, f"同一文件的两种写法没被判重：{err!r}"
+
+        if link is not None:
+            plan.videos = [experiment.VideoEntry(real, None), experiment.VideoEntry(link, None)]
+            err = experiment.validate_experiment_plan(plan)
+            assert err and "重复" in err, f"符号链接指向同一文件没被判重：{err!r}"
+
+
+def test_unknown_assay_rejected_at_contract_layer():
+    """守卫 9：未知范式在契约层就得拦下，不许写进 experiment.json。
+
+    引擎侧 `--assay` 是 `choices=sorted(ASSAY_WINDOWS)`，所以未知范式最终会被
+    argparse 拦住——但那要等队列把文件交给 CLI，隔了两层，报错离出错的地方太远；
+    在此之前那个 `.json` 已经躺在客户的输出目录里，看着像个正经实验计划。
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        video = tmp / "v.mp4"
+        video.write_bytes(b"\x00")
+        err = experiment.validate_experiment_plan(
+            _minimal_plan(tmp / "out", video, assay="OFT"))
+        assert err, "未知范式 'OFT' 竟然通过了校验"
+        assert "OFT" in err and "TST" in err and "FST" in err, \
+            f"报错得说清不认识哪个、认识哪些：{err!r}"
+
+        # 认识的两个必须都能过（别把守卫写成「只认 TST」）
+        for good in sorted(trial_report.ASSAY_WINDOWS):
+            assert experiment.validate_experiment_plan(
+                _minimal_plan(tmp / "out", video, assay=good)) is None, good
+
+
+def test_partial_write_leaves_no_file():
+    """守卫 10：写一半失败必须把半截文件删掉。
+
+    留着它的后果不是「文件坏了」而是**重试被自己堵死**：`write_experiment_json`
+    见到已存在就抛 `FileExistsError`，于是用户下次点完成看到的是「文件已存在」，
+    而真正的错误（磁盘满、盘被拔）已经看不见了。
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        video = tmp / "v.mp4"
+        video.write_bytes(b"\x00")
+        plan = _minimal_plan(tmp / "out", video)
+
+        real_dump = json.dump
+
+        def boom(*a, **k):
+            real_dump(*a, **k)                 # 先写进去一部分，再炸
+            raise OSError("磁盘满（测试注入）")
+
+        json.dump = boom
+        try:
+            experiment.write_experiment_json(plan)
+        except OSError as e:
+            assert "磁盘满" in str(e), f"异常被吞掉换成了别的：{e}"
+        else:
+            raise AssertionError("注入的 OSError 没有抛出来")
+        finally:
+            json.dump = real_dump
+
+        left = plan.output_dir / "experiment.json"
+        assert not left.exists(), "写失败后留下了半截 experiment.json（会把重试堵死）"
+
+        # 清理干净之后必须能重试成功
+        p = experiment.write_experiment_json(plan)
+        assert p.exists() and json.loads(p.read_text(encoding="utf-8"))["assay"] == "TST"
