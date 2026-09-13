@@ -146,12 +146,17 @@ def build_plan(calib_grays: list[np.ndarray], *, n_chambers: int = 4,
 
 def segment_series(frames: Iterable[np.ndarray],
                    plan: TrialPlan, *,
-                   progress: Callable[[int, int], None] | None = None) -> dict[int, PackedMasks]:
+                   progress: Callable[[int, int | None], None] | None = None,
+                   ) -> dict[int, PackedMasks]:
     """一次顺序扫帧，同时给所有隔间出掩膜序列（位打包，见 maskseq）。
 
     只扫一遍：每个隔间各扫一遍要解码 N 次，一段 6 min 素材就是 N 倍解码时间。
 
-    progress: 可选的进度回调 (已处理帧数, 总帧数)。总帧数未知时传 0。
+    progress: 可选的进度回调 `(已处理帧数, 总帧数)`。这一层只见 `Iterable`，
+              数不出总数，所以**总帧数一律传 None**——不传 0。
+              0 是个能被当成数字用的「未知」（`5/0`、`0%`、「共 0 帧」），
+              和 CSV 里未放行的 `immobility_s` 留空而不填 0 是同一条纪律：
+              未知不许长成数字的样子。知道总数的那一层（`analyze_video`）负责补上。
               回调抛异常会往上抛，不会被吞掉。回调的返回值一律忽略。
     """
     seqs: dict[int, PackedMasks] = {}
@@ -169,7 +174,7 @@ def segment_series(frames: Iterable[np.ndarray],
             seqs[ch.index].append(res.mask if res.ok else None)
         frame_count += 1
         if progress is not None:
-            progress(frame_count, 0)
+            progress(frame_count, None)
     return seqs
 
 
@@ -231,7 +236,7 @@ def _reports(plan: TrialPlan, seqs: dict[int, PackedMasks], *,
 def analyze_frames(calib_grays: list[np.ndarray], frames: Iterable[np.ndarray], *,
                    fps: float, assay: str, trial_prefix: str,
                    n_chambers: int = 4, body_area_prior: float | None = None,
-                   progress: Callable[[int, int], None] | None = None,
+                   progress: Callable[[int, int | None], None] | None = None,
                    ) -> tuple[TrialPlan, dict[int, trial_report.TrialReport],
                               dict[int, str]]:
     """全链（纯 numpy 版）：标定帧 + 全片帧 → (计划, 每隔间报告, 跳过原因)。
@@ -250,7 +255,7 @@ def analyze_video(path: str | Path, *, assay: str, n_chambers: int = 4,
                   trial_prefix: str | None = None,
                   n_calib: int = N_CALIB_FRAMES,
                   body_area_prior: float | None = None,
-                  progress: Callable[[int, int], None] | None = None,
+                  progress: Callable[[int, int | None], None] | None = None,
                   ) -> tuple[video.VideoInfo, TrialPlan,
                              dict[int, trial_report.TrialReport], dict[int, str]]:
     """入口：一段录像 → 每隔间一份 trial 报告。
@@ -263,9 +268,10 @@ def analyze_video(path: str | Path, *, assay: str, n_chambers: int = 4,
     plan = build_plan(video.frames_at(info, idx), n_chambers=n_chambers,
                       calib_indices=tuple(idx), body_area_prior=body_area_prior)
 
-    # 为 progress 回调封装总帧数（analyze_video 知道帧数，但 segment_series 只见 Iterable）
+    # 为 progress 回调补上总帧数：analyze_video 从 probe 知道帧数，
+    # segment_series 只见 Iterable 所以只会传 None（见那边的 docstring）。
     if progress is not None:
-        def progress_with_total(current: int, _total_unused: int) -> None:
+        def progress_with_total(current: int, _total_is_none: int | None) -> None:
             progress(current, info.n_frames)
         seqs = segment_series(video.iter_gray(info), plan, progress=progress_with_total)
     else:
