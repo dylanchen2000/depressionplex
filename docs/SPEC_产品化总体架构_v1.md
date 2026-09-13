@@ -1,0 +1,374 @@
+# DEPRESSION-PLEX 产品化总体架构 v1（DP-095）
+
+> 起因：2026-09-13 道俊要求「在这么多工作的基础上，形成正式产品软件」，并定分工：
+> Capy 作为架构师负责总体框架与疑难问题，对最终产品负责；大量消耗 token 且机械的活外派。
+> 本文是架构裁决文件，不是进度表。改本文需在 `docs/ISSUES.md` 留记录。
+>
+> **修订记录**
+> - 2026-09-13 v1 初版（DP-095）
+> - 2026-09-13 **DP-097 修订四处**：§4 解锁条件加 G11 前置（CSI 实测同时通过 G7+G8 却把空杯
+>   报成 466.88 s 不动）、新增 §3.3 CSI 兼容层边界（五种格式逐一裁决，DT 永不执行）、
+>   §5 轨道 A 多一项交付物（T1 须定出 G11 门槛）、§8 第 6 条已解决 + 新增第 7 条（源片档位）。
+> - 2026-09-13 **DP-098 修订三处**（实测沙箱装不了 PySide6、无显示、本仓无 CI）：新增 §6.0
+>   把 CI 拆成 **B0** 且排到所有外派件之前、§3 加第二条铁律（`desktop/` 必须无显示可跑
+>   `--self-test`）、§7 里程碑拆 M0a（有 CI）/ M0b（骨架）。
+> - 2026-09-13 **DP-098 交付后回填 + 一处更正**：§6.0 的可用性表改为五条已实测结论、
+>   §6.1 的 B0 行改为已交付（PR #87，`通过 289 失败 0`）、§7 的 M0a 判定同步；
+>   **§8 第 8 条（Actions 额度）撤回**——我曾拿 20 次陈旧缓存 GET 当现状，误判 free plan
+>   分钟数耗尽，见 §6.0 的更正框（规程：不许凭同一个 API URL 的重复 GET 判定 run 状态）。
+> - 2026-09-13 **DP-099 新增两节（B1 出单前的前置裁决）**：§3.4 外壳与引擎之间是**进程边界**
+>   （分开 freeze、GUI 不许 import 引擎、三重机械封堵、取消 = 杀进程）、§3.5 数据契约
+>   （数字只走既有 CSV，新增 `--run-json` 只装 CSV 故意不含的上下文与报警，进度走 stderr 的
+>   NDJSON）；连带 §6.1 新增 **B3a**（引擎侧进度回调 + 两个新参数）、B1/B3/B4/B10 判据同步、
+>   M1 含 B3a。**入口写死 `python -m desktop.main --self-test`，不抄姊妹仓的顶层 `app` 包。**
+
+## 0. 结论先行（三句）
+
+1. **产品外壳现在就能做，而且必须现在做**——引擎的对外接口（`trial_report` / CSV 字段 /
+   `TrialValidity`）已经稳定，外壳不碰任何真值口径，是纯机械活，可外派。
+2. **引擎精度还不够挂"计量仪器"的名**——G7 读数 r = 0.7641 对门槛 0.818，G8 只过 5/26，
+   平均 |bias| 35.15 s（DP-055）。这不是调参能补的：误差不是偏移（均值 +1.74 s、斜率 0.933），
+   是两组方向相反的失效各占 52% / 48%。
+3. 所以产品从第一天起就**分两个发布态**：**研究模式**（Research，现在可交付）与
+   **计量模式**（Validated，**G7 + G8 + G11 全过**后才解锁；G11 这条是 DP-097 加的，
+   因为 CSI 实测同时通过了 G7 和 G8——见 §4）。**这是本文最重要的一条架构决策**——
+   它让产品化与精度攻关并行，且不需要任何一方说谎。
+
+## 1. 现状判定（哪些能产品化，哪些不能）
+
+| 块 | 状态 | 证据 |
+|---|---|---|
+| 分析引擎端到端可跑 | **可用** | DP-053：`video.py` / `maskseq.py` / `runner.py` / `cli/analyze.py`，视频进、trial 级数字出 |
+| 依赖足迹 | **极轻** | `pyproject.toml` 核心只 `numpy>=1.24`；全仓第三方 import 只有 numpy（+ `subprocess` 调 ffmpeg）。无 torch / onnx / cv2 强依赖 |
+| 每个数字带分母 | **已实现** | `cli/analyze.py` 的 CSV 字段含 `scorable_frames` / `unknown_frames_window` / `validity_status`；证据冲突出 `unknown` 不猜 |
+| 排除态处理 | **已实现** | 排除态隔间不产数字，只产 `score_gate` 报警行（DP-028 N1/N3） |
+| 单位不变量 | **已实现** | 阈值一律物理单位，像素/帧常数只许进噪声底台账 |
+| 精度门 G7/G8 | **未过** | DP-055；θ_mob = 0.0175 需在 T1 上重标 |
+| FST 计分窗口 | **未定** | DP-057/DP-074：7 段 FST 实长 362.20–467.56 s，`ASSAY_WINDOWS` 里的 `(120, 360)` 假设录像从入水开始，未验证。**agent 不许替道俊选** |
+| T1 精标条件 | **缺一件** | DP-027①：秒表工具还没有 seek / 逐帧步进 ⇒ 真值层做不出来。**这是精度轨的唯一硬阻塞** |
+| CSI 参数互通 | **接近打通** | DP-094 修了 `.SET` 表头变长（PR #82）；DP-096 用逆向报告的字段声明序把 13 个数从 32 种排列收到**1 个比特**（4 对同类型字段的高低归属仍是约定推断），缺一份「任一参数两侧填不同值」的 `.SET` |
+| CSI 二进制格式 | **已恢复、无 reader** | DP-097：逆向报告给出 FSR3(`5592+12N`) / TSR1(`5536+12N`) / CLB(19×int32) / 自定义线性 DT(magic `0x29489AD3`) 的布局。**格式已恢复 ≠ 我们有 reader**，见 §3.3 |
+| 桌面外壳 / 安装包 / 报告 / 审计 | **零** | 仓内只有 `ui/results_viewer/index.html`（720 行）和两个 `tools/` HTML，都是研发工装，不是产品 |
+
+## 2. 产品定义
+
+| 项 | 定义 |
+|---|---|
+| 产品名 | **DEPRESSION-PLEX**（Gene&I PHENOME 产品线，与 DRUGEFFECT-PLEX 同族） |
+| 范式 | FST 强迫游泳 + TST 悬尾 |
+| 形态 | **Windows 桌面 .exe 安装包**，纯 CPU、离线、不监听端口、U 盘可交付 |
+| 对标 | CSI DepressionScan（不是抄，是**可比 + 可审计**：CSI 不给分母，我们给） |
+| 客户机 | Windows 优先（客户实验室都是 Win）；macOS 只做开发自用 |
+| 数据不出本机 | 无云、无遥测；审计文件落 `user_data_dir()` |
+
+## 3. 总体架构（分层 + 复用边界）
+
+```
+┌─────────────────────────────────────────────────────────┐
+│ L6 产品外壳  desktop/  (PySide6)                         │
+│   页面：欢迎 / 新建实验向导 / 队列 / 复核 / 结果 / 导出 / 自检 │
+│   服务：experiment_store · audit_log · provenance ·      │
+│         exporter(xlsx/pdf) · self_check · csi_set_io     │
+├─────────────────────────────────────────────────────────┤
+│ L5 指标与导出  assay_core/trial_report.py · timeline.py   │  ← 已有
+│ L4 CSI 兼容 bout 流水  assay_core/bouts.py                │  ← 已有
+│ L3 规则引擎  assay_core/rules.py                          │  ← 已有
+│ L2 轮廓几何 + RAD  assay_core/{geometry,rad,silhouette}.py │  ← 已有
+│ L1 分割  assay_core/segment.py · validity.py              │  ← 已有
+│ L0 几何语义图  assay_core/primitives.py                    │  ← 已有
+├─────────────────────────────────────────────────────────┤
+│ I/O 层  video.py(ffmpeg) · maskseq.py · runner.py         │  ← 已有
+└─────────────────────────────────────────────────────────┘
+```
+
+**铁律：L6 只许通过 `runner` / `trial_report` 的公开数据类与 L0–L5 说话，不许 import
+`assay_core` 内部函数，不许在外壳里重算任何指标。** 外壳里出现第二套算法 = 立即拒收。
+理由是 DP-054 那类事故（报告层自己算分母，打印出 198.9%）只能靠边界杜绝。
+
+**第二条铁律（2026-09-13 加）：`desktop/` 必须始终保持「无显示可跑」**——
+`QT_QPA_PLATFORM=offscreen python3 desktop/main.py --self-test` 构造每个页面、打印页面清单与
+启动耗时、退出码 0。任何让这条命令跑不通的改动（弹模态框、开线程等 GUI 事件、读注册表、
+联网）**一律拒收**。理由见 §6.0：CI 是外壳的唯一执行者，不可无头运行 = 不可验收。
+
+### 3.1 从 `drugeffectscan` 复用什么（已核实存在）
+
+姊妹仓 `dylanchen2000/drugeffectscan` 有一套跑通的同族外壳，**照抄结构、不照抄业务**：
+
+| 复用 | 来源 | 说明 |
+|---|---|---|
+| 目录骨架 | `desktop/{main.py,app/{main_window,pages,services,styles,widgets,workers,utils}}` | 一比一照搬 |
+| VI 深色皮肤 | `desktop/app/styles/dark.qss`（39 KB）+ `colors.py` | 同公司 VI v2.0，**已于 2026-09-13 搬入本仓** `desktop/app/styles/`（源 commit `52e392d`，带来源说明头）。已核实全文**无 `url(...)` 引用**、字体只按 family 名引用且都带 fallback ⇒ **不打包 .ttf 也能生效**，所以 B1 不含字体资产 |
+| 模式徽章 | `styles/mode_badge.qss` | **只借样式写法，不借语义**：那四态是 DrugEffectScan 的（待机/实时推理中/加载候选包/备份演示），与本文 §4 的 research / validated / 标定不可信**完全不是一回事**。本仓的徽章由 B8 自己写（资质边界不外派），**不许直接搬这个文件** |
+| 跨平台七条约束 | `desktop/README.md` | `resource_path()` / `user_data_dir()` / CPU-only / `spawn` / `QDesktopServices` |
+| 审计与溯源 | `services/{audit_log,audit_log_paths,audit_metadata_registry,provenance,model_card}.py` | GLP 要件，接口照搬 |
+| 自检页 | `pages/self_check_page.py` + `services/self_check.py` | 对应我方 P2 硬门（对比度 / 噪声底 / 面积抖动） |
+| 导出 | `services/{exporter,exporter_pdf}.py` | 只借框架，报告内容全部重写 |
+| 打包链 | `build_windows.spec` + `installer/{build.ps1,drugeffect-plex.iss,languages/ChineseSimplified.isl}` + `.github/workflows/windows-*.yml` | **GUI 与分析后端分别 freeze、后端并入 `backend/`** 这个模式直接继承 |
+| 字体资产 | `app/assets/fonts/{Inter,DMSerifDisplay,JetBrainsMono}` | 同族观感 |
+
+**不复用**：`htr_*`（HTR 抽头模型）、`topscan_*`、`result_package_v2*_loader`、
+`fusion_demo`、`b_inference_page`、`models_page` —— 那些是 DrugEffectScan 的业务与模型仓，
+DepressionPlex 没有神经网络模型，**不许把 onnxruntime / ultralytics 拖进依赖**。
+
+### 3.2 依赖清单（锁死，这是产品化最大的结构性优势）
+
+```
+PySide6==6.7.3        # 与 drugeffectscan 同版，踩过的坑不重踩
+numpy==1.26.4
+openpyxl==3.1.5       # xlsx 导出
+fpdf2==2.8.1          # pdf 报告
+# 无 onnxruntime、无 opencv、无 torch、无 scipy
+# ffmpeg：随包分发单个可执行文件，只用于解码（DP-053：ffmpeg 只许在 assay_core 之外）
+```
+
+预期安装包体积**远小于** DRUGEFFECT-PLEX（后者要带模型权重与 ONNX 运行时）。
+
+### 3.3 CSI 兼容层的边界（DP-097 补，五种格式逐一裁决）
+
+逆向报告到手后，CSI 的五种产物布局都已恢复。**恢复了不等于都要读**——每种都要付
+解析器 + 测试 + 长期维护的价，而客户价值差得很远。裁决如下（我拍）：
+
+| 格式 | 内容 | 产品要不要 | 理由 |
+|---|---|---|---|
+| `.SET` (FSS3/TSS3) | 参数集：双阈值、min length、noise frames、merge、bin | **读 + 写**，M3（B9） | 客户从 CSI 迁过来，第一句话就是「我原来那套参数」。写出去是为了**让 CSI 自己读回**去验证我们没读错——这是唯一能机器闭环的一项 |
+| `.CLB` | 每个 arena 19 个 int32 的标定矩形 | **读**，M3（B9 内） | 省掉客户重画隔间，几十行代码，收益/成本比最高 |
+| CSI 导出 `.xlsx` | 每孔位的 bout 事件表（`parse_tank_xlsx` 已实现） | **已有，保留为对照工具** | DP-094 已在用。产品里只许出现在「与历史 CSI 结果对照」页，**不许并进我们自己的指标列** |
+| `FSR3` / `TSR1` | 原始逐帧结果二进制（`5592+12N` / `5536+12N`） | **不做**，除非客户拿不出 xlsx | 内容与导出 xlsx 重叠，而字节级解析的出错代价高（一个 stride 猜错就是静默错数）。**留在文档里，不写 reader** |
+| 自定义线性 DT（magic `0x29489AD3`） | CSI 训练好的决策树分类器 | **永不执行**，只许当取证材料读 | 跑它 = 我们的秒数变成 CSI 的秒数。我们全部差异化只有一条：**CSI 不给分母，我们给**；照抄它的判别器就把这条抹掉了。另有 IP 风险 |
+
+**一条铁律**：任何从 CSI 导入的数字，在库、在界面、在导出里都必须带
+`source = "CSI"` 且**不参与** `validity_status` / 分母 / 报警的计算。理由见 §4 的表——
+CSI 的输出里含「空杯位 = 466.88 s 不动」，一旦混进我们的列，分母体系当场失效。
+
+### 3.4 外壳与引擎之间是**进程边界**，不是 import 边界（DP-099 裁决）
+
+§3 的铁律「外壳不许重算指标」原来只靠人看。**改成结构上办不到**：
+
+| 决定 | 内容 |
+|---|---|
+| 分开 freeze | GUI 一个 exe（`desktop/main.py`），分析后端另一个（`depression-analyzer`，入口 = 现有 `depressionplex/cli/analyze.py`），后端整个文件夹装进 `DEPRESSION-PLEX/backend/`。继承 `drugeffectscan` 的 `build_windows.spec` + `build_analyzer_windows.spec` 双 spec 模式 |
+| GUI 不 import 引擎 | `desktop/` 下**任何文件都不许出现** `import depressionplex` / `from depressionplex`（含 `assay_core`）。GUI 只会：起子进程、读它写出的 CSV / `run.json`、读它 stderr 上的进度行 |
+| 三重机械封堵 | ① 守卫测试 AST 扫 `desktop/**/*.py` 的 import 图（**沙箱里就能跑，因为不需要 import PySide6，只 parse**）；② GUI 的 spec 里写 `excludes=["depressionplex"]` ⇒ 谁偷偷 import 了，冻出来的 GUI 一运行就炸；③ `desktop/requirements.txt` 里没有本仓包 |
+| 取消 = 杀进程 | 不在引擎里做协作式取消。**引擎的所有输出文件都在末尾一次写出**，所以被杀的运行不会留下半张 CSV |
+
+**为什么值这个代价**（否则一个 exe 更省事）：`cli/analyze.py` 是**唯一**产出数字的代码路径，
+进程边界让「外壳里出现第二套算法」从「要靠 review 拦」变成「跨进程根本拿不到函数」。
+DP-054（报告层自己算分母，打出 198.9%）那类事故的成本远高于双 spec 的麻烦。
+附带三个好处：取消干净、长解码崩了不带走 GUI、B3 的验收判据（与 CLI 逐位相同）**自动成立**
+——因为它调的就是同一条 CLI。
+
+**入口形式（写死，与 CI 对齐）**：`python -m desktop.main --self-test`，仓根为 cwd，
+`desktop/` 是真包（有 `__init__.py`），内部一律绝对导入 `from desktop.app.… import …`。
+**不抄 `drugeffectscan` 那套 `sys.path.insert(desktop/)` + 顶层 `app` 包**：本仓根下已经有
+可导入的 `depressionplex` 包，再挂一个顶层 `app` 是命名地雷，也让 import 守卫难写。
+代价是从姊妹仓抄过来的文件要把 `from app.` 改成 `from desktop.app.`（机械活），
+以及 B10 的 spec 用 `pathex=[仓根]` + `hiddenimports=["desktop.app.…"]`。
+
+### 3.5 外壳 ↔ 引擎的数据契约（DP-099 裁决，B3a 落地）
+
+**一个数字只许有一个序列化器。** 现在的 CSV（`cli/analyze.py` 的 `CSV_FIELDS` 16 列）就是数字的
+唯一契约，**不动、不复制、不在别处再写一份 JSON 装数字**。缺的只是 CSV 按设计不含的东西：
+
+| 通道 | 内容 | 谁写 |
+|---|---|---|
+| `--csv`（已存在，不改） | trial 级数字 + 分母 + `validity_status`（16 列） | 引擎 |
+| **`--run-json`（新增）** | CSV **故意不含**的上下文：素材探测结果（fps / 帧数 / 来源 / 画幅）、隔间几何提案、`plan.warnings`、逐隔间 `ChamberValidity`、**未产出数字的隔间及其原因**、实际生效的计分窗口（取自 `ASSAY_WINDOWS`）、工具版本、θ_mob。**不许重复 CSV 里的任何数字** | 引擎 |
+| **stderr 上的 NDJSON 进度行（新增）** | `{"ev":"progress","frame":i,"n":N}`，节流到约 1 行/秒 | 引擎 |
+| stdout 人读报告（已存在，不改） | `_plan_text` + `trial_report_text` | 引擎 |
+| 退出码（已存在，不改） | 0 = 至少一个隔间出数字；2 = 一个都没出；1 = 解码失败 | 引擎 |
+
+为什么进度走 **stderr**：stdout 是人读报告，B3 的验收要拿它和 CLI 直跑逐位比对，
+掺进度行就比不了了。`run.json` 同时是 B6 审计包与 B4 报警行的数据源
+——**「排除态隔间只产报警行」这条如果只有 CSV，外壳根本看不见**（CSV 按设计不写这些隔间）。
+
+## 4. 双发布态（核心架构决策）
+
+产品在任何时刻都必须**自己知道**它有没有资格报秒数。
+
+| 发布态 | 解锁条件 | 界面表现 | 导出表现 |
+|---|---|---|---|
+| **研究模式** Research | 默认 | 顶栏黄色徽章「研究用途 · 未计量标定」；结果页每个秒数旁挂分母与 `validity_status` | 报告首页强制印一段未标定声明 + 当前 θ_mob 与其标定来源；文件名带 `_research` |
+| **计量模式** Validated | 见下方「解锁条件（DP-097 加严）」——**G7 + G8 + G11 三个数值门全过，且 G10a / G10a′ 无假阳性**，在冻结数据集上复现 | 绿色徽章 + 验收批次号 | 印验收批次号、数据集哈希、θ_mob 冻结值、**MAE / RMSE / 逐试次误差范围** |
+
+### 解锁条件（DP-097 加严，这是本文 v1 之后的第一次实质修改）
+
+| 门 | 阈值 | 性质 |
+|---|---|---|
+| G7 Pearson r | ≥ 0.818 | 数值门，**不动** |
+| G8 \|Bland-Altman bias\| | ≤ 17.7 s | 数值门，**不动** |
+| **G11 逐秒 Jaccard** | **必须是一个实数**（现为 `None`，待 T1 精标定标） | **新增为解锁前置** |
+| G10a / G10a′ | 假阳性 = 0（空隔间 / 已声明为空的隔间不得递出任何 immobility） | 硬安全门 |
+| MAE / RMSE / 逐试次误差范围 | 无阈值，但**必须印在报告里** | 只堵读法，不设门 |
+
+**为什么加 G11**：逆向报告第三份 §4.1 给了一个实测反例——CSI 在我们这 27 个非空试次上
+**r = 0.842（过 G7）、偏差 +0.15 s（过 G8）**，而 MAE 24.63 s、逐试次误差
+**−66.66 … +62.98 s**（正负抵消把偏差抵成 0.15）。同一个 CSI，把一个只有水没有鼠的杯位
+报成 **466.88 s 不动（99.923%）**。
+
+⇒ **G7 + G8 全过 = 「达到 CSI 水平」，而 CSI 水平包含「空杯 = 最重抑郁」。**
+`SPEC_人工比对与验收_v2.md` §6 早写了「总量对、时间错的软件能过 G7 而过不了任何科学审视」，
+这是那句话的第一个实测样本，而且是个在卖的商业产品。所以**总量门不足以签发资质**，
+必须有一个逐秒时间对齐门。G11 的门槛值本身仍待 T1 精标（人工-人工上限约 0.82），
+**「不报 ≠ 过」——门槛是 `None` 时，Validated 永不解锁。**
+
+这条同时说明 G8 的口径有结构性弱点（正负抵消），但**不改 17.7 s**：它锚在可测的参照物噪声上，
+为了掩盖抵消而抬高它是把两件事混成一件。抵消问题由 G11 + 强制并印 MAE/RMSE 解决。
+
+详细对账见 `docs/备忘_逆向报告并入_2026-09-13.md`（DP-097）。
+
+实现方式：**一个随包分发的只读 `calibration.json`**（θ_mob、验收批次、数据集哈希、签发时间，
+以及 **G7 / G8 / G11 三个读数 + G11 当时生效的门槛值 + MAE / RMSE / 逐试次误差范围**），
+启动时由 `services/self_check.py` 校验哈希；缺失或哈希不符 ⇒ **降到研究模式，不是报错退出**，
+但徽章变红「标定文件不可信」。**外壳不许有任何路径能把模式手动切到 Validated。**
+
+`calibration.json` 里 **`gates.G11.threshold` 为 `null` 时，`mode` 字段一律强制为 `research`**——
+这条判定写在 `services/self_check.py` 里，且必须有一个直接踩它的测试（B8 验收项）。
+没有这条，一份「G7/G8 漂亮、G11 空着」的标定文件就能签出绿徽章，正是 CSI 那个反例的形状。
+
+理由：这是 DP-054 / DP-052 / DP-071 三次教训的共同结论——**静默兜底比报错危险，但假装有资质比两者都危险**。
+CSI 就是不给分母，我们的差异化只有在自己不越界时才成立。
+
+## 5. 两条并行轨道与关键路径
+
+### 轨道 A：精度（我自己干，不外派）
+
+WORKFLOW §8 定的四类不外派：真值口径 / 验收门 / 契约裁决 / 失败归因。轨道 A 全在里面。
+
+```
+DP-027① 秒表 seek+逐帧步进  ──┐
+DP-057/074 FST 窗口裁决(道俊) ─┼→ T1 精标（双评+仲裁）→ θ_mob 在 T1 上重标(LOVO-CV, 仍只拟合 1 个标量)
+DP-075 BL 把尾/胶带算进体长 ──┘                                    ↓
+                                              G7/G8 复读 + G11 定门槛 → 解锁计量模式
+```
+
+**T1 精标现在多了一项交付物**：除了真值本身，它还必须**定出 G11 的实数门槛**（DP-097）。
+在此之前 Validated 永不解锁，所以 DP-027① 那把秒表不只是精度轨的阻塞，也是**资质轨的阻塞**。
+
+已裁决、不再是候选路径（避免重复劳动）：
+- **DP-071 距离场残差：实现了但不换。** 26 试次 A/B 帧级 AUC 中位 −0.017、正向仅 1/26，
+  判据跑前写死 ⇒ `DEFAULT_RESIDUAL_MODE` 保持 `binary_xor`，新口径留而不用。
+- **DP-073 BL² 分母：保持 `per_trial`。** 最佳候选 pooled J 只 +0.0044（要 ≥ +0.02）、
+  pooled AUC −0.0019 ⇒ 落在「分不出」档。且好处集中在 4 个试次，
+  ρ(|ΔJ|, |BL 偏离同录像中位|) = 0.765 ⇒ 同录像中位是在遮坏 BL，不是在提高判别力。
+- 上面两条把矛头指向 **DP-075**：`trial_body_length` 量的是「体长 + 尾/胶带」
+  （`30mg_2周-ch2` BL 49.06 px vs 同录像 25.75 / 28.54，隔间宽仅约 95 px；y 跨度 +89% 而面积只 +33%、
+  填充率 0.60→0.41 ⇒ 多出的是约 24×2.4 px 细长竖直附属物）。**清干净 BL 是精度轨的第一顺位技术活。**
+
+### 轨道 B：产品化（可外派，机械且边界清楚）
+
+不依赖轨道 A 的任何结论，因为研究模式不报资质。
+
+## 6. 模块清单与派工边界
+
+### 6.0 先解决「谁来验」——本沙箱验不了外壳（2026-09-13 实测）
+
+派工之前必须先回答「产出怎么机器验收」。实测三条，都已核过：
+
+| 事实 | 怎么核的 | 后果 |
+|---|---|---|
+| **沙箱装不了 PySide6** | `pip install PySide6==6.7.3` ⇒ pip 自身 `OSError: [Errno 5] Input/output error`（不是找不到包，是 pip 读自己的字节码就炸） | 外壳代码在沙箱里**一行都跑不起来** |
+| **沙箱无显示** | 无 X / 无 Wayland | 「起窗」这种验收判据在沙箱里天然不可判 |
+| **本仓 `.github/workflows/` 不存在** | `ls .github/workflows/` ⇒ No such file | **我们现在一个 CI 都没有**（引擎的 284 项测试只在本地跑） |
+
+⇒ **架构决定（我拍）：GitHub Actions 是外壳的唯一执行者，所以 CI 必须先于外壳第一行代码存在。**
+原 §6 里 B10（打包）排在最后是错的顺序——它含 CI，而 CI 是**验收工具**不是交付物。
+因此拆出 **B0**，它是所有外派件的第一件。
+
+**连带的产品要求（写死进 §3 边界）：`desktop/` 必须有一个无显示可跑的自检入口**
+
+```bash
+QT_QPA_PLATFORM=offscreen python3 desktop/main.py --self-test
+```
+
+它构造每一个页面、打印页面清单与启动耗时、退出码 0。**理由不是「为了让沙箱能验」**——
+而是「起窗」这类只能人眼判的判据，在任何 CI 上都不可判；不可判的判据等于没有判据。
+有了 `--self-test`，同一条命令在 ubuntu(offscreen) / windows-latest / 开发者机上都成立。
+
+**Actions 本身的可用性：已实测，可用**（B0 于 2026-09-13 交付并转绿，PR #87）
+
+| 查了什么 | 结果 |
+|---|---|
+| 沙箱的 PAT 能不能推 `.github/workflows/`（缺 `workflow` scope 会被 remote 直接拒） | **能** |
+| 本仓 Actions 有没有被关掉 | **没关**。`actions/permissions` ⇒ `enabled: true, allowed_actions: all` |
+| 引擎测试能不能在 Actions 上跑 | **能**。`tests.yml` 在 ubuntu 上 `python3 run_tests.py` 全绿（只需装 numpy，**不需要 ffmpeg**） |
+| PySide6 6.7.3 能不能装上并无显示起 `QApplication` | **能，ubuntu + windows 双绿。** ubuntu 上第一次失败于缺 `libEGL.so.1`，补 `libegl1 / libxkbcommon0 / libdbus-1-3` 后转绿——**这个坑在沙箱里永远撞不到，也不会在 Win 机上出现，正是 CI 存在的价值** |
+| 触发器该怎么挂 | **只挂 `push`。** `on: [push, pull_request]` 会让同一个 SHA 跑两遍（实测一次推送出 4 个 run，结论相同），windows 按 2× 计费，free plan 分钟数直接烧一半；检查结果挂在 SHA 上，PR 页面照样看得到。守卫测试 `test_no_duplicate_triggers` 锁住这条 |
+
+> **⚠️ 更正留档（方法错，不是结论错）**：出单前我曾用 REST API 轮询探针 run
+> **20 次跨 15 分钟，每次都读到 `queued`**，据此在本节写下「排队不起跑，疑似 free plan
+> 分钟数耗尽」，还升成了道俊的裁决项。**这是错的**——该 run 的
+> `run_started_at == created_at == 04:10:36Z`、最终 `conclusion=success`，
+> **它在我第一次轮询之前就起跑了**，我读到的全是陈旧缓存响应。
+> ⇒ **规程：不许凭同一个 API URL 的重复 GET 判定 run 状态**，必须交叉核对
+> `run_started_at`（一旦被填就说明已起跑）。与 DP-023「出单前必须先 fetch」同源：
+> **都是拿陈旧快照当现状。** 详见 `docs/ISSUES.md` DP-098。
+
+### 6.1 清单
+
+| # | 模块 | 谁干 | 可机器验收的产出 |
+|---|---|---|---|
+| **B0** | CI 骨架：`.github/workflows/tests.yml`（ubuntu，跑 `python3 run_tests.py`）+ `desktop-selftest.yml`（ubuntu offscreen + windows-latest，装 PySide6 跑 `--self-test`） | **已交付**（外派，PR #87，DP-098） | ✅ 两个 workflow 均绿（windows + ubuntu 三个 job 全 success）；引擎那条打出 `通过 289  失败 0`（原 284 + 5 条 CI 守卫） |
+| B1 | `desktop/` 骨架：`desktop/__init__.py` + `main.py`（含 `--self-test`）+ `app/main_window.py` + 侧边栏 + `dark.qss` + `app/utils/paths.py` | **外派** | **Actions 上 `desktop-selftest.yml` 转绿**（`python -m desktop.main --self-test`，ubuntu offscreen + windows 双绿）；自检打出全部页面名与启动耗时 < 2 s；**import 守卫测试**（AST 扫 `desktop/**/*.py`，§3.4）证明没有 `depressionplex` / `assay_core` 的 import，也没引入 PySide6 以外的新第三方依赖 |
+| **B3a** | 引擎侧两件（**纯增量，不改任何既有输出**）：`segment_series/analyze_frames/analyze_video` 加 `progress=` 关键字（默认 `None`）+ `cli/analyze.py` 加 `--progress-json`（NDJSON 进度写 **stderr**）与 `--run-json`（§3.5 的上下文，**不含 CSV 已有的数字**） | **外派**（契约由 §3.5 给死） | 同一段素材带/不带 `progress=` 跑出的报告**逐位相同**（测试直接比）；不带新参数时 stdout 与 CSV 与改动前逐位相同；`--run-json` 的 schema 有测试；`run.json` 里必须出现「未产出数字的隔间及原因」 |
+| B2 | 实验向导（范式选择 / 视频导入 / 隔间数 / 悬挂点或水面确认 / 计分窗口） | **外派**（窗口默认值由我给死） | 向导产出一份 `experiment.json`，字段与 `runner.TrialPlan` 一一对上 |
+| B3 | 分析队列 + 进度 + 取消（**起 `backend/` 子进程**，读 stderr 进度行；取消 = 杀进程，见 §3.4） | **外派** | 跑完产出与 `cli/analyze.py --csv` **逐位相同**的 CSV（进程边界让这条自动成立）；取消后不留半张 CSV |
+| B4 | 结果页：trial 表 + 分母列 + `validity_status` + 报警行（数字读 CSV，报警行与上下文读 `run.json`，见 §3.5） | **外派** | 每个秒数旁必须有分母，缺一列即拒收；**未产出数字的隔间必须显示为报警行，不许从表里消失** |
+| B5 | 时间线复核视图（逐帧掩膜叠加 + 事件带） | **外派** | 与 `timeline.py` 输出一致；不许在外壳里重算事件 |
+| B6 | 导出：xlsx + pdf 报告 + 审计包 | **外派**（报告文案我写） | 报告必印分母、θ_mob、发布态声明；pdf 可无字体报错生成 |
+| B7 | 自检页：对比度 ≥ 100 灰阶且 ≥ 2×、分割噪声底、面积抖动 p90 | **外派** | 复现 P2 硬门读数（对比度 208.5 / 6.77×；噪声底 0.43 px；p90 = 0.0035） |
+| B8 | `calibration.json` 契约 + 模式徽章 + 哈希校验 | **我自己干**（这是资质边界） | 三条路径各有测试：①篡改标定文件 ⇒ 降级且变红；②`gates.G11.threshold = null` ⇒ 强制 research；③无任何手动切 Validated 的入口 |
+| B9 | CSI 兼容层：`.SET` 读+写、`.CLB` 读（范围见 §3.3，**不含 FSR3/TSR1/DT**） | **我自己干**（逆向裁决） | 两份 `.SET` 夹具全部正确解析；生成的 `.SET` **被 CSI 自己读回**；`.CLB` 解出的矩形与 DP-032 隔间定位一致 |
+| B10 | 打包：**双 spec**（GUI `build_windows.spec` + 后端 `build_analyzer_windows.spec`，见 §3.4）+ Inno Setup（**Actions 骨架已在 B0**） | **外派** | Actions 出 `DEPRESSION-PLEX-Setup-x.y.z.exe`，客户机双击可装可跑；GUI 的 spec 必须写 `excludes=["depressionplex"]`（第三重封堵）；GUI 用 `pathex=[仓根]` + `hiddenimports=["desktop.app.…"]` |
+| B11 | ffmpeg 随包分发与路径解析 | **外派** | 断网、无系统 ffmpeg 的干净 Win 机上能解码 |
+
+派工单一律按 WORKFLOW §8 七段写，分支名由我给死，输入绝对路径由我先确认存在。
+
+## 7. 里程碑
+
+| 里程碑 | 内容 | 判定 |
+|---|---|---|
+| **M0a** 有 CI | **B0** | ✅ **已达成（2026-09-13，PR #87）**：两个 workflow 均绿（ubuntu 引擎 + ubuntu/windows offscreen 自检），引擎那条打出 `通过 289  失败 0`。**这是第一个里程碑，因为在它之前我们没有任何能验外壳的执行者**（§6.0） |
+| **M0b** 骨架 | B1 | `desktop-selftest.yml` 在 ubuntu offscreen + windows-latest 双绿 |
+| **M1** 能跑完一场 | **B3a** + B2 + B3 + B4 | 一段真视频从导入到 trial 表，CSV 与 CLI 逐位相同；未产出数字的隔间以报警行出现 |
+| **M2** 能交付研究版 | B6 + B7 + B8 + B10 + B11 | 客户机装上、跑完、导出带声明的报告；徽章为黄 |
+| **M3** 可复核 | B5 + B9 | 复核视图与 `timeline` 一致；`.SET` 双向互通；`.CLB` 可读 |
+| **M4** 计量版 | 轨道 A 完成（含 **G11 门槛在 T1 上定出实数**）→ 签发 `calibration.json` | 徽章转绿，报告印验收批次号 + MAE/RMSE/逐试次误差范围 |
+
+**M2 不等 M4。** 研究版先进客户实验室换真实反馈与真实素材，是本项目最缺的东西
+（现有 27 试次全是 T2 层，且素材是多年前的客户旧料）。
+
+## 8. 需要道俊裁决的事（agent 不许替他选）
+
+1. **FST 计分窗口**（DP-057/DP-074）：录像起点是否为入水？还是按每段实长各自定窗？
+   这条不定，FST 一侧的所有秒数都不许出。
+2. **M2 研究版是否现在就发客户**：发，就能换到新素材与真实反馈；发，就必须接受客户看到黄徽章。
+3. **秒表工具 v1.6（含 seek/逐帧）什么时候换给正在评分的两位同事**——他们手上是 v1.4，中途换有协调成本。
+4. **重评的 4 个试次算哪一遍**（DP-077 遗留的真值口径）。
+5. **`.SET` 收口所需的那份文件（已降级，比原来便宜得多）**：原来要「13 个数互不相同」，
+   DP-096 后只需**任一个参数把挣扎侧与放弃侧填成不同值**（例如 Min Length 挣扎 20 / 放弃 40），
+   保存即可，不用跑分析。剩下的就是这一个比特。
+6. ~~逆向工程报告的位置~~ **已解决（2026-09-13）**：三份报告已由道俊提供并并入
+   `docs/逆向/`，逐条对账见 DP-097。引用规则见 `docs/逆向/README.md`（聚合数字一律引第三份）。
+7. **要不要换源片**（DP-097 §四，**先要一个 `ffprobe` 答案**）：逆向报告 F-009 说 FST 源视频
+   `494×262 / 503×266 / 512×270`、码率比 CSI 转码版高 **2–2.6 倍**；我们记载手上素材宽
+   **464–484 px**，正落在「转码后」那一档 ⇒ **我们可能一直在用转码版**。沙箱核不了。
+   道俊只需回答：**宽度是 464/480 那一档，还是 494/503/512 那一档？** 命令在 DP-097 备忘里。
+   若确认在用转码版，**换不换、什么时候换是道俊的决定**——CLB / 背景图 / 全部切片映射都是
+   转码坐标系下标定的，换片等于重标一遍几何。**注意：这条不能用来翻 DP-071**（宽 6.5% 对
+   0.106 px vs 0.5 px 死区，差一个数量级），有价值的是码率。
+8. ~~GitHub Actions 的分钟数还有没有~~ **已撤回（2026-09-13，是我判错了）**：
+   我曾据「探针排队 15 分钟不起跑」怀疑 free plan 分钟数耗尽——那 20 次轮询读到的全是
+   陈旧缓存响应，该 run 其实秒级起跑并 success。B0 已交付并双绿，**Actions 可用，
+   不需要道俊做任何事**。留在这里只为记住那条规程（见 §6.0 的更正框）。
+
+## 9. 风险
+
+| 风险 | 应对 |
+|---|---|
+| 研究版被当计量版用 | §4 的徽章 + 报告强制声明 + 无手动切换路径 |
+| **总量门全过就以为达标**（CSI 的真实形状：r 0.842 / 偏差 +0.15 s，同时把空杯报成 466.88 s） | §4 加 G11 为解锁前置 + `G11.threshold = null ⇒ 强制 research` + 报告强制并印 MAE/RMSE/逐试次误差范围 |
+| 从 CSI 导入的数字混进我们的指标列 | §3.3 铁律：导入项一律带 `source = "CSI"`，不参与 `validity_status` / 分母 / 报警 |
+| 外派 agent 在外壳里重算指标 | §3 边界铁律 + 派工单 §5「不许做什么」明写 + 验收比对 CLI 逐位相同 |
+| 精度轨卡在 T1（人力密集） | M2 先交付，不让产品化被真值层堵死 |
+| 打包踩 Mac 打不出 .exe | 继承 drugeffectscan 结论：日常在联想 Win 机打，里程碑用 Actions windows-latest |
+| 素材只有旧料、只有 T2 层 | M2 进客户现场换新素材；背光采集是最高杠杆项（README 已定 ≥100 灰阶 / ≥2×） |

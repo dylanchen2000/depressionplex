@@ -1,0 +1,1811 @@
+/*
+ * dark.qss —— Gene&I VI v2.0 Dark Mode
+ *
+ * 来源：姊妹仓 dylanchen2000/drugeffectscan 的 desktop/app/styles/dark.qss
+ * （commit 52e392d），原样搬入。同公司 VI，样式不许在这里改动色值；
+ * 需要新增控件样式时追加在文件末尾，并注明用在哪个页面。
+ *
+ * 已核实：全文没有任何 url(...) 引用 ⇒ 不依赖图标/字体文件即可生效。
+ * 字体只按 family 名引用且都带 fallback（Microsoft YaHei UI / PingFang SC /
+ * Georgia / Consolas），所以不打包 .ttf 也不会报错，只是观感退化。
+ */
+/* DRUGEFFECT-PLEX VI v2.0 Dark Mode
+ * bg #0F1A2E  primary #22D3EE  accent #5EEAD4
+ * 4-quad: TL#22D3EE  TR#FCD34D  BL#F472B6  BR#6EE7B7
+ * Cross-platform fonts: Microsoft YaHei UI / PingFang SC fallback
+ */
+
+QWidget {
+    font-family: "Microsoft YaHei UI", "PingFang SC", "Hiragino Sans GB",
+                 "Segoe UI", sans-serif;
+}
+
+/* Color scoped to app containers — prevents leak into native macOS dialogs */
+QMainWindow,
+QMainWindow QWidget,
+QDialog QWidget {
+    color: #E5F2FF;
+}
+
+QMainWindow,
+QWidget#root,
+QWidget#rightCol {
+    background-color: #0F1A2E;
+}
+
+/* === Sidebar === */
+QWidget#sidebar {
+    background-color: #0A1424;
+    border-right: 1px solid #1E2C45;
+}
+
+QWidget#brand {
+    border-bottom: 1px solid #1E2C45;
+}
+
+QLabel#brandTitle {
+    font-size: 18px;
+    font-weight: 700;
+    color: #22D3EE;
+    letter-spacing: 1px;
+}
+
+QLabel#brandSub {
+    font-size: 13px;
+    font-weight: 600;
+    color: #5EEAD4;
+    letter-spacing: 3px;
+}
+
+QLabel#brandVersion {
+    font-size: 11px;
+    color: #6B7A99;
+}
+
+QListWidget#nav {
+    background-color: transparent;
+    border: none;
+    padding: 12px 12px;
+    outline: 0;
+}
+
+QListWidget#nav::item {
+    color: #B7C4DB;
+    padding: 0 16px;
+    border-radius: 8px;
+}
+
+QListWidget#nav::item:hover {
+    background-color: #15233D;
+    color: #E5F2FF;
+}
+
+QListWidget#nav::item:selected {
+    background-color: #15293D;
+    color: #22D3EE;
+    border-left: 3px solid #22D3EE;
+}
+
+QLabel#footer {
+    color: #4A5878;
+    font-size: 11px;
+    padding: 14px 8px;
+    border-top: 1px solid #1E2C45;
+    qproperty-alignment: AlignCenter;
+}
+
+/* === Top bar (above stack) === */
+QWidget#topbar {
+    background-color: #0F1A2E;
+    border-bottom: 1px solid #1E2C45;
+}
+
+QLabel#topbarTitle {
+    font-size: 13px;
+    font-weight: 600;
+    color: #5EEAD4;
+    letter-spacing: 2px;
+}
+
+QLabel#topbarPkg {
+    font-size: 12px;
+    color: #8FA0BF;
+}
+
+QLabel#runtimeChip {
+    font-size: 11px;
+    color: #22D3EE;
+    background-color: #15293D;
+    padding: 4px 12px;
+    border: 1px solid #1E3A55;
+    border-radius: 10px;
+}
+
+/* === Menu bar === */
+QMenuBar {
+    background-color: #0A1424;
+    color: #B7C4DB;
+    border-bottom: 1px solid #1E2C45;
+}
+QMenuBar::item:selected {
+    background-color: #15293D;
+    color: #22D3EE;
+}
+QMenu {
+    background-color: #15233D;
+    border: 1px solid #1E3A55;
+    color: #E5F2FF;
+}
+QMenu::item:selected {
+    background-color: #15293D;
+    color: #22D3EE;
+}
+
+/* === Page area === */
+QStackedWidget#stack {
+    background-color: #0F1A2E;
+}
+
+QWidget#page {
+    background-color: #0F1A2E;
+}
+
+QLabel#pageTitle {
+    font-size: 28px;
+    font-weight: 700;
+    color: #E5F2FF;
+}
+
+QLabel#pageSubtitle {
+    font-size: 14px;
+    color: #22D3EE;
+    letter-spacing: 0.5px;
+}
+
+QLabel#pageBody {
+    font-size: 13px;
+    color: #8FA0BF;
+    line-height: 1.7;
+}
+
+QLabel#scopeNote {
+    font-size: 12px;
+    color: #6EE7B7;
+    background-color: #112A24;
+    border: 1px solid #1F4C3F;
+    border-radius: 6px;
+    padding: 8px 12px;
+}
+
+QLabel#colTitle {
+    font-size: 13px;
+    font-weight: 700;
+    color: #22D3EE;
+    letter-spacing: 2px;
+    padding: 4px 0;
+}
+
+QLabel#formLabel {
+    font-size: 11px;
+    color: #8FA0BF;
+    letter-spacing: 1px;
+    padding-top: 4px;
+}
+
+/* === Buttons === */
+QPushButton#primaryBtn {
+    background-color: #22D3EE;
+    color: #0F1A2E;
+    border: none;
+    border-radius: 6px;
+    padding: 8px 18px;
+    font-weight: 600;
+    font-size: 12px;
+}
+QPushButton#primaryBtn:hover {
+    background-color: #5EEAD4;
+}
+QPushButton#primaryBtn:disabled {
+    background-color: #1E3A55;
+    color: #4A5878;
+}
+
+QPushButton#ghostBtn {
+    background-color: transparent;
+    color: #B7C4DB;
+    border: 1px solid #2A3A57;
+    border-radius: 6px;
+    padding: 8px 16px;
+    font-size: 12px;
+}
+QPushButton#ghostBtn:hover {
+    background-color: #15233D;
+    color: #E5F2FF;
+}
+QPushButton#ghostBtn:disabled {
+    color: #4A5878;
+    border-color: #1E2C45;
+}
+
+/* Review buttons (J/K/L) — color-coded so the keyboard shortcut sticks */
+QPushButton#reviewBtnJ,
+QPushButton#reviewBtnK,
+QPushButton#reviewBtnL {
+    border: none;
+    border-radius: 6px;
+    padding: 12px 8px;
+    font-weight: 700;
+    font-size: 13px;
+}
+QPushButton#reviewBtnJ {
+    background-color: #22D3EE;
+    color: #0F1A2E;
+}
+QPushButton#reviewBtnJ:hover {
+    background-color: #5EEAD4;
+}
+QPushButton#reviewBtnK {
+    background-color: #FCD34D;
+    color: #422E00;
+}
+QPushButton#reviewBtnK:hover {
+    background-color: #FDE68A;
+}
+QPushButton#reviewBtnL {
+    background-color: #6B7A99;
+    color: #0F1A2E;
+}
+QPushButton#reviewBtnL:hover {
+    background-color: #8FA0BF;
+}
+
+/* === Import page cards === */
+QFrame#importCard {
+    background-color: #15233D;
+    border: 1px solid #1E3A55;
+    border-radius: 10px;
+}
+QLabel#importCardTitle {
+    font-size: 16px;
+    font-weight: 700;
+    color: #22D3EE;
+}
+QLabel#importCardBody {
+    font-size: 12px;
+    color: #B7C4DB;
+    line-height: 1.7;
+}
+QLabel#importStatus {
+    font-size: 11px;
+    color: #6EE7B7;
+    padding-top: 4px;
+}
+
+/* === Workspace splitter === */
+QSplitter#workspaceSplitter::handle {
+    background-color: #1E2C45;
+}
+QSplitter#workspaceSplitter::handle:hover {
+    background-color: #2A3A57;
+}
+
+/* === Package info bar === */
+QWidget#pkgInfoBar {
+    background-color: #0A1424;
+    border-bottom: 1px solid #1E2C45;
+}
+QLabel#pkgInfoLabel {
+    color: #E5F2FF;
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 0.5px;
+}
+QLabel#pkgCounts {
+    color: #8FA0BF;
+    font-size: 11px;
+}
+
+/* === Candidate list === */
+QWidget#candidateListWrap {
+    background-color: #0F1A2E;
+    border-right: 1px solid #1E2C45;
+}
+QListWidget#candidateList {
+    background-color: transparent;
+    border: 1px solid #1E2C45;
+    border-radius: 6px;
+    outline: 0;
+    font-size: 12px;
+    padding: 4px;
+}
+QListWidget#candidateList::item {
+    color: #B7C4DB;
+    padding: 8px 10px;
+    border-radius: 4px;
+}
+QListWidget#candidateList::item:hover {
+    background-color: #15233D;
+    color: #E5F2FF;
+}
+QListWidget#candidateList::item:selected {
+    background-color: #15293D;
+    color: #22D3EE;
+}
+
+/* === Video placeholder === */
+QFrame#videoPlaceholder {
+    background-color: #0A1424;
+    border: 1px dashed #1E3A55;
+}
+QLabel#videoPlaceholderHead {
+    color: #5EEAD4;
+    font-size: 14px;
+    font-weight: 700;
+    letter-spacing: 2px;
+}
+QLabel#videoPlaceholderBody {
+    color: #6B7A99;
+    font-size: 12px;
+    line-height: 1.7;
+}
+
+/* === Review panel === */
+QWidget#reviewPanel {
+    background-color: #0F1A2E;
+    border-left: 1px solid #1E2C45;
+}
+QLabel#candidateInfo {
+    background-color: #15233D;
+    border: 1px solid #1E3A55;
+    border-radius: 6px;
+    padding: 12px;
+    font-size: 12px;
+    color: #E5F2FF;
+}
+QLabel#reviewActionsTitle {
+    color: #22D3EE;
+    font-size: 11px;
+    letter-spacing: 1px;
+    font-weight: 600;
+    padding-top: 4px;
+}
+QComboBox#reasonCombo,
+QTextEdit#noteEdit {
+    background-color: #0A1424;
+    border: 1px solid #1E3A55;
+    border-radius: 4px;
+    padding: 6px 8px;
+    color: #E5F2FF;
+    font-size: 12px;
+}
+QComboBox#reasonCombo::drop-down {
+    border: none;
+    width: 18px;
+}
+QComboBox#reasonCombo QAbstractItemView {
+    background-color: #15233D;
+    color: #E5F2FF;
+    selection-background-color: #15293D;
+    border: 1px solid #1E3A55;
+}
+
+/* === Export page === */
+QFrame#exportSummary {
+    background-color: #15233D;
+    border: 1px solid #1E3A55;
+    border-radius: 8px;
+}
+QTextEdit#exportSummaryText {
+    background-color: transparent;
+    border: none;
+    color: #B7C4DB;
+    font-size: 12px;
+}
+
+/* === Scrollbars === */
+QScrollBar:vertical {
+    background-color: transparent;
+    width: 8px;
+    margin: 0;
+}
+
+QScrollBar::handle:vertical {
+    background-color: #2A3A57;
+    border-radius: 4px;
+    min-height: 30px;
+}
+
+QScrollBar::handle:vertical:hover {
+    background-color: #3A4F73;
+}
+
+QScrollBar::add-line:vertical,
+QScrollBar::sub-line:vertical {
+    height: 0;
+}
+
+/* ===================================================================
+ * PR-2.1 additions — workspace polish (mockup wireframes/3 visual target)
+ * =================================================================== */
+
+/* --- Section separators --- */
+QFrame#workspaceSep {
+    background-color: #1E2C45;
+    max-height: 1px;
+    min-height: 1px;
+    border: none;
+}
+
+/* --- Project meta strip --- */
+QWidget#projectMetaBar {
+    background-color: #0A1424;
+    border-bottom: 1px solid #1E2C45;
+}
+QLabel#metaProject {
+    color: #22D3EE;
+    font-size: 13px;
+    font-weight: 700;
+    letter-spacing: 1px;
+}
+QLabel#metaVideo {
+    color: #E5F2FF;
+    font-size: 12px;
+}
+QLabel#metaStats {
+    color: #8FA0BF;
+    font-size: 11px;
+}
+
+/* --- Review counters strip (top of workspace) --- */
+QWidget#reviewCounters {
+    background-color: #0A1424;
+}
+
+/* counter common: number large, caption small */
+QWidget#reviewCounters QLabel {
+    font-family: "Microsoft YaHei UI", "PingFang SC", "Segoe UI", sans-serif;
+}
+
+/* Caption label under each counter */
+QLabel#counterCaption {
+    color: #6B7A99;
+    font-size: 11px;
+    letter-spacing: 1px;
+}
+
+/* Numeric values — colored per kind */
+QLabel#counterTotalValue,
+QLabel#counterReviewedValue,
+QLabel#counterTrueHtrValue,
+QLabel#counterFalsePosValue,
+QLabel#counterUnclearValue {
+    font-size: 22px;
+    font-weight: 700;
+    padding: 2px 8px;
+}
+QLabel#counterTotalValue       { color: #E5F2FF; }
+QLabel#counterReviewedValue    { color: #22D3EE; }
+QLabel#counterTrueHtrValue     { color: #22D3EE; }
+QLabel#counterFalsePosValue    { color: #FCD34D; }
+QLabel#counterUnclearValue     { color: #8FA0BF; }
+
+QProgressBar#reviewProgress {
+    background-color: #0F1A2E;
+    border: 1px solid #1E3A55;
+    border-radius: 8px;
+    text-align: center;
+    color: #E5F2FF;
+    font-size: 11px;
+    height: 16px;
+}
+QProgressBar#reviewProgress::chunk {
+    background-color: #22D3EE;
+    border-radius: 7px;
+}
+
+/* --- Filter bar above candidate list --- */
+QWidget#candidateFilterBar QLabel#colTitle {
+    padding-bottom: 4px;
+}
+
+QComboBox#filterCombo {
+    background-color: #0A1424;
+    border: 1px solid #1E3A55;
+    border-radius: 6px;
+    padding: 4px 8px;
+    color: #E5F2FF;
+    font-size: 12px;
+    min-height: 24px;
+}
+QComboBox#filterCombo:hover {
+    border-color: #22D3EE;
+}
+QComboBox#filterCombo::drop-down {
+    border: none;
+    width: 18px;
+}
+QComboBox#filterCombo QAbstractItemView {
+    background-color: #15233D;
+    color: #E5F2FF;
+    selection-background-color: #15293D;
+    border: 1px solid #1E3A55;
+}
+
+QLineEdit#filterSearch {
+    background-color: #0A1424;
+    border: 1px solid #1E3A55;
+    border-radius: 6px;
+    padding: 5px 10px;
+    color: #E5F2FF;
+    font-size: 12px;
+}
+QLineEdit#filterSearch:focus {
+    border-color: #22D3EE;
+}
+
+QLabel#listEmptyHint {
+    color: #4A5878;
+    font-size: 12px;
+    padding: 18px;
+}
+
+/* --- Big judgment buttons (J/K/L) — override of existing review btn rules --- */
+QPushButton#reviewBtnJ,
+QPushButton#reviewBtnK,
+QPushButton#reviewBtnL {
+    border: 2px solid transparent;
+    border-radius: 10px;
+    padding: 10px 6px;
+    font-weight: 700;
+    font-size: 12px;
+    text-align: center;
+}
+QPushButton#reviewBtnJ {
+    background-color: #15293D;
+    color: #22D3EE;
+}
+QPushButton#reviewBtnJ:hover {
+    background-color: #163A4A;
+    border-color: #22D3EE;
+}
+QPushButton#reviewBtnJ[active="true"] {
+    background-color: #22D3EE;
+    color: #0F1A2E;
+    border-color: #5EEAD4;
+}
+
+QPushButton#reviewBtnK {
+    background-color: #2A2410;
+    color: #FCD34D;
+}
+QPushButton#reviewBtnK:hover {
+    background-color: #3D3318;
+    border-color: #FCD34D;
+}
+QPushButton#reviewBtnK[active="true"] {
+    background-color: #FCD34D;
+    color: #422E00;
+    border-color: #FDE68A;
+}
+
+QPushButton#reviewBtnL {
+    background-color: #1E2638;
+    color: #B7C4DB;
+}
+QPushButton#reviewBtnL:hover {
+    background-color: #283147;
+    border-color: #6B7A99;
+}
+QPushButton#reviewBtnL[active="true"] {
+    background-color: #6B7A99;
+    color: #0F1A2E;
+    border-color: #8FA0BF;
+}
+
+/* --- Reason chips --- */
+QPushButton#reasonChip {
+    background-color: #15233D;
+    border: 1px solid #1E3A55;
+    border-radius: 14px;
+    padding: 6px 10px;
+    color: #B7C4DB;
+    font-size: 12px;
+    text-align: center;
+}
+QPushButton#reasonChip:hover {
+    background-color: #163A4A;
+    border-color: #22D3EE;
+    color: #E5F2FF;
+}
+QPushButton#reasonChip:checked {
+    background-color: #22D3EE;
+    color: #0F1A2E;
+    border-color: #5EEAD4;
+    font-weight: 600;
+}
+QPushButton#reasonChip:disabled {
+    background-color: #0F1A2E;
+    color: #4A5878;
+    border-color: #1E2C45;
+}
+
+/* --- Form section headers in review panel --- */
+QLabel#formSection {
+    color: #5EEAD4;
+    font-size: 11px;
+    letter-spacing: 1px;
+    font-weight: 600;
+    padding-top: 6px;
+}
+
+QLabel#reviewCurrent {
+    color: #E5F2FF;
+    font-size: 13px;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+}
+
+QLabel#noteCounter {
+    color: #6B7A99;
+    font-size: 10px;
+    padding-right: 2px;
+}
+
+QLabel#frameInfoCard {
+    background-color: #15233D;
+    border: 1px solid #1E3A55;
+    border-radius: 6px;
+    padding: 10px 12px;
+    color: #E5F2FF;
+    font-size: 12px;
+}
+
+/* --- Custom candidate list rendering uses delegate; tighten container --- */
+QListWidget#candidateList {
+    padding: 2px;
+}
+QListWidget#candidateList::item {
+    padding: 0;          /* delegate paints its own padding */
+    background: transparent;
+    border: none;
+}
+QListWidget#candidateList::item:selected {
+    background: transparent;   /* delegate paints selection bg */
+}
+
+/* --- Video placeholder (PR-4 will replace) --- */
+QWidget#videoPlaceholder {
+    background-color: #0A1424;
+    border: 1px dashed #1E3A55;
+}
+QLabel#videoPlaceholderTitle {
+    color: #5EEAD4;
+    font-size: 16px;
+    font-weight: 700;
+    letter-spacing: 2px;
+}
+QLabel#videoPlaceholderHint {
+    color: #6B7A99;
+    font-size: 12px;
+}
+QLabel#videoPlaceholderMeta {
+    color: #B7C4DB;
+    font-size: 12px;
+    background-color: #15233D;
+    border: 1px solid #1E3A55;
+    border-radius: 6px;
+    padding: 8px 12px;
+}
+
+/* --- Status bar --- */
+QStatusBar#appStatus {
+    background-color: #0A1424;
+    color: #8FA0BF;
+    border-top: 1px solid #1E2C45;
+}
+QStatusBar#appStatus::item {
+    border: none;
+}
+QLabel#statusReviewer {
+    color: #22D3EE;
+    font-size: 11px;
+    padding: 0 12px 0 8px;
+    border-right: 1px solid #1E2C45;
+}
+QLabel#statusAutosave {
+    color: #6EE7B7;
+    font-size: 11px;
+    padding: 0 12px;
+}
+QLabel#statusProgress {
+    color: #B7C4DB;
+    font-size: 11px;
+    qproperty-alignment: AlignRight;
+    padding-right: 12px;
+}
+QPushButton#statusKeysBtn {
+    color: #22D3EE;
+    background: transparent;
+    border: 1px solid #1E3A55;
+    border-radius: 4px;
+    padding: 2px 10px;
+    font-size: 11px;
+}
+QPushButton#statusKeysBtn:hover {
+    background-color: #15293D;
+    border-color: #22D3EE;
+}
+
+/* ========================================================================
+ * PR-2.2 — Workspace empty state (dual-path welcome)
+ * ====================================================================== */
+
+QWidget#workspaceEmpty {
+    background-color: #0F1A2E;
+}
+
+QLabel#emptyTitle {
+    color: #E5F2FF;
+    font-size: 28px;
+    font-weight: 700;
+    letter-spacing: 4px;
+}
+QLabel#emptySub {
+    color: #8FA0BF;
+    font-size: 13px;
+    letter-spacing: 1px;
+}
+QLabel#emptyHint {
+    color: #6B7A99;
+    font-size: 12px;
+}
+QLabel#emptyStatus {
+    color: #F87171;
+    font-size: 12px;
+}
+
+/* --- Dual cards --- */
+QFrame#emptyCardA {
+    background-color: #15233D;
+    border: 1px solid #22D3EE;
+    border-radius: 12px;
+}
+QFrame#emptyCardA:hover {
+    background-color: #15293D;
+    border: 1px solid #5EEAD4;
+}
+QFrame#emptyCardB {
+    background-color: #0F1F33;
+    border: 1px dashed #2A4263;
+    border-radius: 12px;
+}
+
+QLabel#emptyCardTitle {
+    color: #E5F2FF;
+    font-size: 16px;
+    font-weight: 700;
+    letter-spacing: 1px;
+}
+QFrame#emptyCardA QLabel#emptyCardTitle {
+    color: #22D3EE;
+}
+QFrame#emptyCardB QLabel#emptyCardTitle {
+    color: #6B7A99;
+}
+QLabel#emptyCardBody {
+    color: #B7C4DB;
+    font-size: 12px;
+    line-height: 1.6;
+}
+QFrame#emptyCardB QLabel#emptyCardBody {
+    color: #6B7A99;
+}
+QLabel#emptyCardDisabledHint {
+    color: #FCD34D;
+    background-color: rgba(252, 211, 77, 0.08);
+    border: 1px solid #3A2E1A;
+    border-radius: 6px;
+    padding: 6px 10px;
+    font-size: 11px;
+}
+
+/* Primary / ghost buttons reused from PR-2.1 selectors;
+ * tweak only when inside the empty cards. */
+QFrame#emptyCardA QPushButton#primaryBtn {
+    min-height: 32px;
+    padding: 0 18px;
+    font-size: 13px;
+    font-weight: 700;
+    letter-spacing: 1px;
+}
+QFrame#emptyCardB QPushButton#ghostBtn {
+    min-height: 32px;
+    padding: 0 18px;
+    color: #6B7A99;
+    background-color: transparent;
+    border: 1px solid #2A4263;
+    border-radius: 6px;
+}
+
+/* ========================================================================
+ * PR-2.4 — Queue page sections + Import 4-step preview
+ * ====================================================================== */
+
+/* --- Queue page --- */
+QLabel#queueBanner {
+    background-color: rgba(252, 211, 77, 0.10);
+    color: #FCD34D;
+    border: 1px solid #3A2E1A;
+    border-radius: 6px;
+    padding: 8px 14px;
+    font-size: 12px;
+}
+
+QScrollArea#queueScroll {
+    background: transparent;
+    border: none;
+}
+QScrollArea#queueScroll > QWidget > QWidget {
+    background: transparent;
+}
+
+QFrame#queueSection {
+    background-color: #15233D;
+    border: 1px solid #1E3A55;
+    border-radius: 8px;
+}
+QFrame#queueSection[accent="running"] {
+    border-left: 3px solid #22D3EE;
+}
+QFrame#queueSection[accent="queued"] {
+    border-left: 3px solid #FCD34D;
+}
+QFrame#queueSection[accent="done"] {
+    border-left: 3px solid #6EE7B7;
+}
+
+QLabel#queueSectionTitle {
+    font-size: 14px;
+    font-weight: 700;
+    color: #E5F2FF;
+    letter-spacing: 1px;
+}
+QLabel#queueSectionTitle[accent="running"] { color: #22D3EE; }
+QLabel#queueSectionTitle[accent="queued"]  { color: #FCD34D; }
+QLabel#queueSectionTitle[accent="done"]    { color: #6EE7B7; }
+
+QLabel#queueSectionCount {
+    color: #B7C4DB;
+    background-color: #0A1424;
+    border: 1px solid #1E3A55;
+    border-radius: 10px;
+    padding: 1px 10px;
+    font-size: 11px;
+    min-width: 18px;
+}
+QLabel#queueSectionCount[accent="running"] { border-color: #22D3EE; color: #22D3EE; }
+QLabel#queueSectionCount[accent="queued"]  { border-color: #FCD34D; color: #FCD34D; }
+QLabel#queueSectionCount[accent="done"]    { border-color: #6EE7B7; color: #6EE7B7; }
+
+QLabel#queueEmptyHint {
+    color: #6B7A99;
+    background-color: #0F1A2E;
+    border: 1px dashed #1E3A55;
+    border-radius: 6px;
+    padding: 24px 16px;
+    font-size: 12px;
+}
+
+/* --- Import: B-path 4-step preview --- */
+QLabel#bPathPreviewHead {
+    color: #8FA0BF;
+    font-size: 12px;
+    letter-spacing: 1px;
+    padding-top: 6px;
+}
+
+QFrame#stepPreview {
+    background-color: #0F1F33;
+    border: 1px dashed #2A4263;
+    border-radius: 8px;
+}
+QLabel#stepNum {
+    color: #6B7A99;
+    background-color: #15233D;
+    border: 1px solid #2A4263;
+    border-radius: 12px;
+    min-width: 22px;
+    max-width: 22px;
+    min-height: 22px;
+    max-height: 22px;
+    qproperty-alignment: AlignCenter;
+    font-weight: 700;
+    font-size: 11px;
+}
+QLabel#stepTitle {
+    color: #B7C4DB;
+    font-size: 13px;
+    font-weight: 600;
+    letter-spacing: 1px;
+}
+QLabel#stepDesc {
+    color: #6B7A99;
+    font-size: 11px;
+    line-height: 1.5;
+}
+
+/* ========================================================================
+ * PR-2.5 — Mini timeline strip (full-width below splitter)
+ * ====================================================================== */
+
+QWidget#miniTimeline {
+    background-color: #0A1424;
+    border-top: 1px solid #1E3A55;
+}
+
+/* ========================================================================
+ * PR-2.6 — Models page (model package management)
+ * ====================================================================== */
+
+QWidget#modelsPage {
+    background-color: #0F1A2E;
+}
+
+QFrame#modelCurrentCard {
+    background-color: #15233D;
+    border: 1px solid #22D3EE;
+    border-radius: 10px;
+}
+
+QLabel#modelCardHead {
+    color: #22D3EE;
+    font-size: 11px;
+    letter-spacing: 2px;
+    font-weight: 700;
+}
+
+QLabel#modelCardTitle {
+    color: #E6EDF7;
+    font-size: 18px;
+    font-weight: 600;
+}
+
+QLabel#modelCardMeta {
+    color: #8FA0BF;
+    font-size: 12px;
+}
+
+QLabel#modelCardNote {
+    color: #6B7A99;
+    font-size: 12px;
+    font-style: italic;
+}
+
+QLabel#modelCardThresholds {
+    color: #B7C4DB;
+    font-size: 12px;
+    background-color: #0A1424;
+    border: 1px solid #1E3A55;
+    border-radius: 6px;
+    padding: 8px 12px;
+}
+
+QLabel#modelsListHead {
+    color: #8FA0BF;
+    font-size: 12px;
+    letter-spacing: 1px;
+    padding-top: 4px;
+}
+
+QListWidget#modelsList {
+    background-color: transparent;
+    border: 1px solid #1E3A55;
+    border-radius: 8px;
+    padding: 4px;
+}
+
+QListWidget#modelsList::item {
+    background-color: transparent;
+    border: none;
+    padding: 0;
+    margin: 0;
+}
+QListWidget#modelsList::item:selected {
+    background-color: #1E3A55;
+    border-radius: 6px;
+}
+
+QFrame#modelRow {
+    background-color: #15233D;
+    border: 1px solid #1E3A55;
+    border-radius: 6px;
+}
+QFrame#modelRow[current="true"] {
+    border: 1px solid #22D3EE;
+    background-color: #16304A;
+}
+QFrame#modelRow[invalid="true"] {
+    border: 1px dashed #F87171;
+    background-color: #1B1F2E;
+}
+
+QLabel#modelRowDot {
+    color: #6B7A99;
+    font-size: 14px;
+    min-width: 16px;
+}
+QLabel#modelRowDot[current="true"] {
+    color: #22D3EE;
+}
+
+QLabel#modelRowTitle {
+    color: #E6EDF7;
+    font-size: 14px;
+    font-weight: 600;
+}
+QLabel#modelRowSub {
+    color: #6B7A99;
+    font-size: 11px;
+}
+QLabel#modelRowError {
+    color: #F87171;
+    font-size: 11px;
+}
+
+QLabel#modelRowChip {
+    color: #8FA0BF;
+    background-color: #0F1F33;
+    border: 1px solid #2A4263;
+    border-radius: 10px;
+    padding: 2px 10px;
+    font-size: 11px;
+    font-weight: 600;
+}
+QLabel#modelRowChip[variant="current"] {
+    color: #0F1A2E;
+    background-color: #22D3EE;
+    border-color: #22D3EE;
+}
+QLabel#modelRowChip[variant="bad"] {
+    color: #F87171;
+    border-color: #F87171;
+}
+
+QLabel#modelsEmptyHint {
+    color: #6B7A99;
+    font-size: 12px;
+    background-color: #0A1424;
+    border: 1px dashed #2A4263;
+    border-radius: 8px;
+    padding: 16px;
+}
+
+
+/* PR-2.8: model + runtime line under the project meta strip */
+QLabel#metaRuntime {
+    color: #94A3B8;
+    font-size: 11px;
+    letter-spacing: 0.3px;
+}
+
+
+
+/* ============================================================
+ * Launch Flow v2 (PR-A foundation)
+ *
+ * Placeholder selectors only — implementations land in:
+ *   PR-B Splash (qss-splash-*)
+ *   PR-C Welcome (qss-welcome-*)
+ *   PR-E Wizard  (qss-wizard-*)
+ *
+ * Tokens reference desktop/app/styles/colors.py::C.
+ * Hardcoded hex below is intentional (QSS doesn't support Python imports);
+ * any future change must update both files in lockstep.
+ * ============================================================ */
+
+/* Splash: full-window placeholder — body lives in PR-B */
+QWidget#qss-splash-root {
+    background-color: #0F1A2E;
+}
+QLabel#qss-splash-product {
+    color: #E5EAF2;
+    font-family: "DM Serif Display", "Georgia", serif;
+    font-size: 52px;
+}
+QLabel#qss-splash-tagline {
+    color: #98A6BF;
+    font-size: 14px;
+    letter-spacing: 1.5px;
+}
+QLabel#qss-splash-version {
+    color: #5F7090;
+    font-family: "JetBrains Mono", "Consolas", monospace;
+    font-size: 10px;
+}
+
+/* Welcome: shell-level tokens — content rules land in PR-C */
+QWidget#qss-welcome-root {
+    background-color: #0F1A2E;
+}
+QFrame#qss-welcome-topbar {
+    background-color: #142238;
+    border-bottom: 1px solid #1F2D48;
+}
+QFrame#qss-welcome-sidebar {
+    background-color: #142238;
+    border-right: 1px solid #1F2D48;
+}
+QLabel#qss-welcome-greeting {
+    color: #E5EAF2;
+    font-size: 24px;
+    font-weight: 600;
+}
+
+/* Wizard: stepper / aside placeholders — full styling in PR-E */
+QFrame#qss-wizard-stepper {
+    background-color: transparent;
+}
+QFrame#qss-wizard-aside {
+    background-color: #142238;
+    border-left: 1px solid #1F2D48;
+    border-radius: 12px;
+}
+/* Wizard root background */
+QWidget#wizardRoot {
+    background-color: #0F1A2E;
+}
+/* Wizard: container widgets transparent so dark root bg shows through.
+   NOTE: this broad rule also hits QPushButton/QLineEdit, so their
+   backgrounds are re-asserted below at higher specificity. */
+QWidget#wizardRoot QWidget {
+    background-color: transparent;
+}
+
+QWidget#wizardRoot QScrollArea {
+    background-color: #0F1A2E;
+    border: none;
+}
+
+/* Wizard text inputs need their own dark background */
+QWidget#wizardRoot QLineEdit,
+QWidget#wizardRoot QTextEdit,
+QWidget#wizardRoot QComboBox {
+    background-color: #142238;
+    border: 1px solid #1F2D48;
+    border-radius: 6px;
+    padding: 6px 10px;
+    color: #E5F2FF;
+}
+
+/* Re-assert button backgrounds (the broad transparent rule above would
+   otherwise hide them until hover). Higher specificity = always visible. */
+QWidget#wizardRoot QPushButton {
+    background-color: #1A2A45;
+}
+QWidget#wizardRoot QPushButton:disabled {
+    background-color: #142238;
+}
+QWidget#wizardRoot QPushButton#wizardBtnPrimary {
+    background-color: #14B8A6;
+}
+QWidget#wizardRoot QPushButton#wizardBtnPrimary:hover {
+    background-color: #5EEAD4;
+}
+QWidget#wizardRoot QPushButton#wizardBtnPrimary:disabled {
+    background-color: #1F2F4D;
+}
+QWidget#wizardRoot QPushButton#wizardBtnSecondary {
+    background-color: transparent;
+}
+QWidget#wizardRoot QPushButton#wizardBtnSecondary:hover {
+    background-color: #1F2F4D;
+}
+QWidget#wizardRoot QPushButton#wizardBtnGhost {
+    background-color: transparent;
+}
+
+
+
+
+/* ============================================================
+ * PR-C Welcome page — concrete styling
+ *
+ * Uses camelCase objectNames matching desktop/app/pages/welcome.py.
+ * Complements (does NOT replace) the qss-welcome-* placeholders above.
+ * Hardcoded hex literals must stay in lockstep with colors.py::C.
+ * ============================================================ */
+
+QWidget#welcomeRoot {
+    background-color: #0F1A2E;
+}
+
+/* TopBar */
+QWidget#welcomeTopBar {
+    background-color: #142238;
+    border-bottom: 1px solid #1F2D48;
+}
+QLabel#welcomeTopBarLogo {
+    color: #0F1A2E;
+    background-color: #14B8A6;
+    border-radius: 6px;
+    font-family: "DM Serif Display", "Georgia", serif;
+    font-size: 18px;
+    font-weight: bold;
+}
+QLabel#welcomeTopBarPill {
+    color: #E5EAF2;
+    background-color: #1A2A45;
+    border: 1px solid #2A3B5C;
+    border-radius: 12px;
+    padding: 4px 12px;
+    font-size: 12px;
+    letter-spacing: 1px;
+}
+QPushButton#welcomeTopBarBtn {
+    background-color: transparent;
+    color: #98A6BF;
+    border: none;
+    border-radius: 6px;
+    font-size: 16px;
+}
+QPushButton#welcomeTopBarBtn:hover {
+    background-color: #1A2A45;
+    color: #E5EAF2;
+}
+QFrame#welcomeTopBarUser {
+    background-color: #1A2A45;
+    border: 1px solid #2A3B5C;
+    border-radius: 14px;
+}
+QLabel#welcomeTopBarAvatar {
+    color: #FFFFFF;
+    background-color: #0E7490;
+    border-radius: 12px;
+    font-size: 11px;
+}
+QLabel#welcomeTopBarUserName {
+    color: #E5EAF2;
+    font-size: 12px;
+}
+
+/* Sidebar */
+QWidget#welcomeSidebar {
+    background-color: #142238;
+    border-right: 1px solid #1F2D48;
+}
+QPushButton#welcomeNav {
+    background-color: transparent;
+    border: none;
+    border-radius: 8px;
+    text-align: left;
+    padding: 0;
+}
+QPushButton#welcomeNav[active="true"] {
+    background-color: #1A2A45;
+}
+QPushButton#welcomeNav:hover {
+    background-color: #1F2F4D;
+}
+QPushButton#welcomeNav:disabled {
+    color: #5F7090;
+}
+QLabel#welcomeNavIcon {
+    color: #98A6BF;
+}
+QLabel#welcomeNavLabel {
+    color: #E5EAF2;
+    font-size: 13px;
+}
+QLabel#welcomeNavBadge {
+    color: #98A6BF;
+    background-color: #1A2A45;
+    border-radius: 9px;
+    padding: 2px 8px;
+    font-size: 10px;
+}
+
+/* License card (sidebar bottom) */
+QFrame#welcomeLicenseCard {
+    background-color: #1A2A45;
+    border: 1px solid #2A3B5C;
+    border-radius: 10px;
+}
+QLabel#welcomeLicenseDot {
+    background-color: #14B8A6;
+    border-radius: 4px;
+}
+QLabel#welcomeLicenseStatus {
+    color: #E5EAF2;
+    font-size: 12px;
+    font-weight: 600;
+}
+QLabel#welcomeLicenseMeta {
+    color: #98A6BF;
+    font-size: 11px;
+}
+
+/* Greeting */
+QLabel#welcomeGreetingTitle {
+    color: #E5EAF2;
+    font-size: 22px;
+    font-weight: 500;
+}
+QLabel#welcomeGreetingSub {
+    color: #5F7090;
+    font-family: "JetBrains Mono", "Consolas", monospace;
+    font-size: 12px;
+}
+
+/* DropZone */
+QWidget#welcomeDropZone {
+    background-color: #1A2A45;
+    border-radius: 16px;
+}
+QLabel#welcomeDropZoneIcon {
+    color: #14B8A6;
+    background-color: #0F1A2E;
+    border-radius: 32px;
+    font-size: 36px;
+    font-weight: bold;
+}
+QLabel#welcomeDropZoneTitle {
+    color: #E5EAF2;
+    font-size: 16px;
+    font-weight: 600;
+}
+QLabel#welcomeDropZoneDesc {
+    color: #98A6BF;
+    font-size: 12px;
+}
+QPushButton#welcomeBtnPrimary {
+    background-color: #14B8A6;
+    color: #0F1A2E;
+    border: none;
+    border-radius: 8px;
+    font-size: 13px;
+    font-weight: 600;
+    padding: 0 18px;
+    min-width: 140px;
+}
+QPushButton#welcomeBtnPrimary:hover {
+    background-color: #2DD4BF;
+}
+QPushButton#welcomeBtnSecondary {
+    background-color: #142238;
+    color: #98A6BF;
+    border: 1px solid #2A3B5C;
+    border-radius: 8px;
+    font-size: 13px;
+    padding: 0 18px;
+    min-width: 140px;
+}
+QPushButton#welcomeBtnSecondary:hover {
+    background-color: #1F2F4D;
+    color: #E5EAF2;
+}
+
+/* Recent placeholder */
+QWidget#welcomeRecentPH {
+    background-color: transparent;
+}
+QLabel#welcomeSectionTitle {
+    color: #E5EAF2;
+    font-size: 14px;
+    font-weight: 600;
+}
+QLabel#welcomeRecentEmpty {
+    color: #5F7090;
+    font-size: 12px;
+    background-color: #142238;
+    border: 1px dashed #2A3B5C;
+    border-radius: 12px;
+    padding: 24px;
+}
+
+/* Tutorial card */
+QFrame#welcomeTutorial {
+    background-color: #1A2A45;
+    border: 1px solid #2A3B5C;
+    border-radius: 12px;
+}
+QLabel#welcomeTutorialIcon {
+    color: #FCD34D;
+    background-color: #142238;
+    border-radius: 24px;
+    font-size: 22px;
+}
+QLabel#welcomeTutorialTitle {
+    color: #E5EAF2;
+    font-size: 14px;
+    font-weight: 600;
+}
+QLabel#welcomeTutorialTag {
+    color: #FFFFFF;
+    background-color: #0E7490;
+    border-radius: 6px;
+    padding: 1px 6px;
+    font-size: 9px;
+    font-weight: bold;
+    letter-spacing: 1px;
+}
+QLabel#welcomeTutorialDesc {
+    color: #98A6BF;
+    font-size: 12px;
+}
+QLabel#welcomeTutorialPill {
+    color: #98A6BF;
+    background-color: #142238;
+    border-radius: 10px;
+    padding: 3px 10px;
+    font-size: 11px;
+}
+QPushButton#welcomeTutorialPlay {
+    background-color: #142238;
+    color: #98A6BF;
+    border: 1px solid #2A3B5C;
+    border-radius: 6px;
+    padding: 5px 12px;
+    font-size: 11px;
+}
+QPushButton#welcomeTutorialPlay:hover:!disabled {
+    background-color: #1F2F4D;
+    color: #E5EAF2;
+}
+QPushButton#welcomeTutorialClose {
+    background-color: transparent;
+    color: #5F7090;
+    border: none;
+    font-size: 18px;
+}
+QPushButton#welcomeTutorialClose:hover {
+    background-color: #1A2A45;
+    color: #E5EAF2;
+    border-radius: 4px;
+}
+
+/* Scroll area */
+QScrollArea#welcomeScroll {
+    background-color: transparent;
+    border: none;
+}
+QWidget#welcomeMain {
+    background-color: #0F1A2E;
+}
+
+
+/* ============================================================
+ * PR-J-1: 全局表单控件样式补丁
+ *
+ * 修复 dark mode 下的可见性问题：
+ * 1. 全局 `* { color: #E5F2FF }` 把字体设成浅色，但 macOS 默认
+ *    QLineEdit/QTextEdit 是白底 → 白底+白字看不见。
+ * 2. wizardBtn{Primary,Secondary,Ghost} 在前面 1400 行 QSS 里
+ *    完全没定义，按钮文字看不见。
+ * 3. QRadioButton/QCheckBox indicator 用 macOS 系统默认渲染，
+ *    在深色背景上对比度差。
+ *
+ * 这段全部 append 到末尾，不改前面任何样式（最稳，0 回归风险）。
+ * 颜色引用自 colors.py：BG_CARD #1A2A45, BORDER #2A3B5C, TEXT_1 #E5EAF2,
+ * BRAND_MINT #14B8A6.
+ * ============================================================ */
+
+QLineEdit,
+QTextEdit,
+QPlainTextEdit,
+QComboBox,
+QSpinBox,
+QDoubleSpinBox,
+QDateEdit,
+QTimeEdit,
+QDateTimeEdit {
+    background-color: #1A2A45;
+    color: #E5EAF2;
+    border: 1px solid #2A3B5C;
+    border-radius: 6px;
+    padding: 6px 10px;
+    selection-background-color: #14B8A6;
+    selection-color: #0F1A2E;
+}
+
+QLineEdit:focus,
+QTextEdit:focus,
+QPlainTextEdit:focus,
+QComboBox:focus,
+QSpinBox:focus,
+QDoubleSpinBox:focus {
+    border: 1px solid #14B8A6;
+}
+
+QLineEdit:disabled,
+QTextEdit:disabled,
+QPlainTextEdit:disabled,
+QComboBox:disabled {
+    background-color: #142238;
+    color: #5F7090;
+    border-color: #1F2D48;
+}
+
+/* placeholder 颜色（输入框为空时的提示文字）*/
+QLineEdit[placeholderText],
+QTextEdit[placeholderText] {
+    color: #E5EAF2;
+}
+
+/* ComboBox 下拉箭头 */
+QComboBox::drop-down {
+    subcontrol-origin: padding;
+    subcontrol-position: top right;
+    width: 24px;
+    border: none;
+}
+QComboBox::down-arrow {
+    image: none;
+    border-left: 4px solid transparent;
+    border-right: 4px solid transparent;
+    border-top: 5px solid #98A6BF;
+    margin-right: 8px;
+}
+QComboBox QAbstractItemView {
+    background-color: #1A2A45;
+    color: #E5EAF2;
+    border: 1px solid #2A3B5C;
+    selection-background-color: #14B8A6;
+    selection-color: #0F1A2E;
+    outline: none;
+}
+
+/* RadioButton: 圆形 indicator + 选中点 */
+QRadioButton {
+    color: #E5EAF2;
+    spacing: 8px;
+}
+QRadioButton::indicator {
+    width: 16px;
+    height: 16px;
+    border-radius: 9px;
+    border: 2px solid #5F7090;
+    background-color: #142238;
+}
+QRadioButton::indicator:hover {
+    border-color: #14B8A6;
+}
+QRadioButton::indicator:checked {
+    border: 2px solid #14B8A6;
+    background-color: #14B8A6;
+}
+QRadioButton:disabled {
+    color: #5F7090;
+}
+
+/* CheckBox */
+QCheckBox {
+    color: #E5EAF2;
+    spacing: 8px;
+}
+QCheckBox::indicator {
+    width: 16px;
+    height: 16px;
+    border-radius: 4px;
+    border: 2px solid #5F7090;
+    background-color: #142238;
+}
+QCheckBox::indicator:hover {
+    border-color: #14B8A6;
+}
+QCheckBox::indicator:checked {
+    background-color: #14B8A6;
+    border-color: #14B8A6;
+}
+QCheckBox:disabled {
+    color: #5F7090;
+}
+
+/* 默认 PushButton (无 ObjectName) — 给系统按钮兜底 */
+QPushButton {
+    background-color: #1A2A45;
+    color: #E5EAF2;
+    border: 1px solid #2A3B5C;
+    border-radius: 6px;
+    padding: 6px 16px;
+}
+QPushButton:hover {
+    background-color: #1F2F4D;
+    border-color: #14B8A6;
+}
+QPushButton:pressed {
+    background-color: #14B8A6;
+    color: #0F1A2E;
+}
+QPushButton:disabled {
+    background-color: #142238;
+    color: #5F7090;
+    border-color: #1F2D48;
+}
+
+/* Wizard 三套按钮（spec §5）*/
+QPushButton#wizardBtnPrimary {
+    background-color: #14B8A6;
+    color: #0F1A2E;
+    border: none;
+    border-radius: 6px;
+    padding: 8px 24px;
+    font-weight: 600;
+}
+QPushButton#wizardBtnPrimary:hover {
+    background-color: #5EEAD4;
+}
+QPushButton#wizardBtnPrimary:disabled {
+    background-color: #1F2F4D;
+    color: #5F7090;
+}
+
+QPushButton#wizardBtnSecondary {
+    background-color: transparent;
+    color: #E5EAF2;
+    border: 1px solid #2A3B5C;
+    border-radius: 6px;
+    padding: 8px 24px;
+}
+QPushButton#wizardBtnSecondary:hover {
+    background-color: #1F2F4D;
+    border-color: #14B8A6;
+    color: #14B8A6;
+}
+QPushButton#wizardBtnSecondary:disabled {
+    color: #5F7090;
+    border-color: #1F2D48;
+}
+
+QPushButton#wizardBtnGhost {
+    background-color: transparent;
+    color: #98A6BF;
+    border: none;
+    padding: 8px 16px;
+}
+QPushButton#wizardBtnGhost:hover {
+    color: #14B8A6;
+}
+
+/* 通用 primaryBtn / ghostBtn 兜底（导出页等用到）*/
+QPushButton#primaryBtn {
+    background-color: #14B8A6;
+    color: #0F1A2E;
+    border: none;
+    border-radius: 6px;
+    padding: 8px 20px;
+    font-weight: 600;
+}
+QPushButton#primaryBtn:hover {
+    background-color: #5EEAD4;
+}
+QPushButton#primaryBtn:disabled {
+    background-color: #1F2F4D;
+    color: #5F7090;
+}
+QPushButton#ghostBtn {
+    background-color: transparent;
+    color: #98A6BF;
+    border: 1px solid #2A3B5C;
+    border-radius: 6px;
+    padding: 8px 16px;
+}
+QPushButton#ghostBtn:hover {
+    color: #E5EAF2;
+    border-color: #14B8A6;
+}
+
+/* GroupBox 标题（用于 wizard 步骤里的分组）*/
+QGroupBox {
+    color: #E5EAF2;
+    border: 1px solid #2A3B5C;
+    border-radius: 6px;
+    margin-top: 12px;
+    padding-top: 8px;
+}
+QGroupBox::title {
+    subcontrol-origin: margin;
+    subcontrol-position: top left;
+    left: 12px;
+    padding: 0 6px;
+    color: #98A6BF;
+}
+
+/* ToolTip */
+QToolTip {
+    background-color: #1A2A45;
+    color: #E5EAF2;
+    border: 1px solid #2A3B5C;
+    padding: 6px 10px;
+    border-radius: 4px;
+}
+
+/* ============================================================ */
+
+/* ─────────────────────────────────────────────────────────────
+   ExperimentCard  (PR-F, welcome recent grid)
+   ───────────────────────────────────────────────────────────── */
+QFrame#experimentCard {
+    background-color: #15233D;
+    border: 1px solid #1E3A55;
+    border-radius: 12px;
+}
+QFrame#experimentCard:hover {
+    border-color: #22D3EE;
+    background-color: #19294A;
+}
+QFrame#expCardThumb {
+    background-color: #0A1424;
+    border-top-left-radius: 12px;
+    border-top-right-radius: 12px;
+}
+QLabel#expCardChip {
+    color: #22D3EE;
+    background-color: #0E2030;
+    border: 1px solid #22D3EE;
+    border-radius: 8px;
+    padding: 2px 8px;
+    font-size: 11px;
+}
+QLabel#expCardTitle {
+    color: #E5F2FF;
+    font-size: 13px;
+    font-weight: 600;
+}
+QLabel#expCardMeta {
+    color: #8FA0BF;
+    font-size: 11px;
+}
+QLabel#expCardArmExtra {
+    color: #6B7A99;
+    font-size: 10px;
+}
+QLabel#expCardPctLabel {
+    color: #6B7A99;
+    font-size: 10px;
+}
+QLabel#welcomeSectionTitle {
+    color: #E5F2FF;
+    font-size: 14px;
+    font-weight: 600;
+}
+QLabel#welcomeRecentEmpty {
+    color: #6B7A99;
+    font-size: 12px;
+}
+
+/* Video pill buttons in workspace launch bar */
+#workspaceVideoPill {
+    background: transparent;
+    border: 1px solid #2a4a6a;
+    border-radius: 12px;
+    padding: 4px 12px;
+    color: #8ab4d4;
+    font-size: 12px;
+}
+#workspaceVideoPill:hover {
+    background: #1a3050;
+    border-color: #3a6a9a;
+}
+#workspaceVideoPill:checked {
+    background: #1a3a5a;
+    border-color: #22D3EE;
+    color: #22D3EE;
+    font-weight: bold;
+}
+
+/* Review panel scroll area */
+#reviewScroll {
+    background: transparent;
+    border: none;
+}
+
+/* PR-M fix: radio/checkbox label visibility in dark mode */
+QRadioButton,
+QCheckBox {
+    color: #E5EAF2;
+    spacing: 8px;
+}
+QRadioButton:disabled,
+QCheckBox:disabled {
+    color: #5F7090;
+}
