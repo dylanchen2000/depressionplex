@@ -17,7 +17,9 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import sys
+import time
 from pathlib import Path
 
 from .. import runner, video
@@ -80,6 +82,93 @@ def _row(r: trial_report.TrialReport) -> dict[str, object]:
     }
 
 
+def _get_tool_version() -> str:
+    """从 pyproject.toml 读取版本号，读不到返回 "unknown"。"""
+    try:
+        from pathlib import Path
+        root = Path(__file__).parent.parent.parent
+        pyproject = root / "pyproject.toml"
+        if pyproject.exists():
+            for line in pyproject.read_text(encoding="utf-8").splitlines():
+                if line.startswith("version"):
+                    # version = "0.1.0.dev0"
+                    parts = line.split("=", 1)
+                    if len(parts) == 2:
+                        return parts[1].strip().strip('"').strip("'")
+    except Exception:
+        pass
+    return "unknown"
+
+
+def _build_run_json(info: video.VideoInfo, plan: runner.TrialPlan,
+                    assay: str, skipped: dict[int, str]) -> dict:
+    """构造 run.json 数据结构（CSV 故意不含的上下文）。"""
+    # numpy 类型需要转成 Python int/float
+    def to_native(val):
+        if hasattr(val, "item"):  # numpy scalar
+            return val.item()
+        return val
+
+    scoring_window_s = list(trial_report.ASSAY_WINDOWS[assay])
+
+    chambers_list = []
+    for ch in plan.chambers:
+        ch_obj = {
+            "index": ch.index,
+            "col_range": list(ch.col_range),
+            "width": ch.width,
+            "source": ch.source,
+        }
+        if ch.corridor is not None:
+            ch_obj["corridor"] = {
+                "col_range": list(ch.corridor.col_range),
+                "band_range": list(ch.corridor.band_range),
+                "bl_est": to_native(ch.corridor.bl_est) if ch.corridor.bl_est else None,
+                "sealed": ch.corridor.sealed,
+            }
+        else:
+            ch_obj["corridor"] = None
+        ch_obj["suspension"] = list(ch.suspension) if ch.suspension else None
+        chambers_list.append(ch_obj)
+
+    chamber_validity_list = []
+    for cv in plan.trial_validity.chambers:
+        cv_obj = {
+            "chamber": cv.chamber,
+            "status": cv.status,
+            "occupied_fraction": to_native(cv.occupied_fraction) if cv.occupied_fraction is not None else None,
+            "unsegmentable_fraction": to_native(cv.unsegmentable_fraction) if cv.unsegmentable_fraction is not None else None,
+            "note": cv.note or "",
+        }
+        chamber_validity_list.append(cv_obj)
+
+    not_scored_list = []
+    for chamber, reason in skipped.items():
+        not_scored_list.append({"chamber": chamber, "reason": reason})
+
+    return {
+        "schema_version": "1",
+        "tool_version": _get_tool_version(),
+        "assay": assay,
+        "scoring_window_s": scoring_window_s,
+        "video": {
+            "path": str(info.path.resolve()),
+            "name": info.path.name,
+            "fps": info.fps,
+            "n_frames": info.n_frames,
+            "frame_count_source": info.frame_count_source,
+            "width": info.width,
+            "height": info.height,
+            "duration_s": info.duration_s,
+        },
+        "calib_indices": [int(i) for i in plan.calib_indices],
+        "chambers": chambers_list,
+        "plan_warnings": list(plan.warnings),
+        "chamber_validity": chamber_validity_list,
+        "not_scored": not_scored_list,
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="录像 → trial 级 immobility 数字")
     ap.add_argument("video", type=Path)
@@ -96,13 +185,30 @@ def main(argv: list[str] | None = None) -> int:
                     help="逐段时间线（Mobility 段，**录像起点**时基）。"
                          "给了才写；与人工侧 export_human_timeline 同一种行形状，"
                          "两张表可直接拼起来比。总量比不出分歧长在哪一段，段比得出")
+    ap.add_argument("--progress-json", action="store_true",
+                    help="写进度 NDJSON 到 stderr（节流到约 1 行/秒）")
+    ap.add_argument("--run-json", type=Path, default=None,
+                    help="写上下文 JSON（素材信息、隔间几何、未产出数字的隔间等 CSV 故意不含的东西）")
     args = ap.parse_args(argv)
+
+    # 进度回调（--progress-json 开启时写 NDJSON 到 stderr，节流到约 1 行/秒）
+    progress_cb = None
+    if args.progress_json:
+        last_emit = [0.0]  # 可变容器，用于闭包捕获
+
+        def progress_cb(frame: int, n: int) -> None:
+            now = time.monotonic()
+            # 第一帧和最后一帧必须各出一行；中间帧节流到约 1 行/秒
+            if frame == 1 or (n > 0 and frame == n) or (now - last_emit[0] >= 1.0):
+                obj = {"ev": "progress", "frame": frame, "n": n}
+                print(json.dumps(obj, ensure_ascii=False), file=sys.stderr, flush=True)
+                last_emit[0] = now
 
     try:
         info, plan, reports, skipped = runner.analyze_video(
             args.video, assay=args.assay, n_chambers=args.chambers,
             trial_prefix=args.trial_prefix, n_calib=args.calib_frames,
-            body_area_prior=args.body_area_prior)
+            body_area_prior=args.body_area_prior, progress=progress_cb)
     except video.VideoError as e:
         print(f"[解码失败] {e}", file=sys.stderr)
         return 1
@@ -136,6 +242,12 @@ def main(argv: list[str] | None = None) -> int:
             # 与上面的 CSV 同一处理：未产出的隔间不进表，原因在上面的报告里。
             print(f"  未产出数字的 {len(skipped)} 个隔间不进时间线，"
                   "原因见上面各 ch 的说明——不是悄悄少行")
+
+    if args.run_json:
+        run_data = _build_run_json(info, plan, args.assay, skipped)
+        with args.run_json.open("w", encoding="utf-8") as fh:
+            json.dump(run_data, fh, indent=2, ensure_ascii=False)
+        print(f"\n上下文已写：{args.run_json}")
 
     if not reports:
         print("\n[结果] 没有任何隔间产出数字——退出码 2", file=sys.stderr)
