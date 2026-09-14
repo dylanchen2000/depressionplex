@@ -422,22 +422,24 @@ def test_ffmpeg_hash_must_be_none_not_placeholder():
 
 
 def test_bin_extraction_no_hardcoded_dll_list():
-    """守卫 H6：bin/ 提取规则不许手写 DLL 名单。
+    """守卫 A6：bin/ 提取规则不许手写 DLL 名单。
 
     -shared 构建需要 7 个 DLL（avcodec / avfilter / avformat / swscale / avdevice /
     avutil / swresample），上游版本升级可能改 DLL 后缀（如 avcodec-62 → -63）。
     手写名单会在客户机上变成「缺失 ...dll」弹窗。必须用循环提取 bin/ 下全部文件。
+
+    A6 修复：去掉「必须同时有路径分隔符」这个条件——任何人硬编码名单，写出来就是
+    ["avcodec-62.dll", ...] 没有分隔符，而旧版守卫只认带分隔符的，最像的那种看不见。
     """
     fetch_py = ROOT / "packaging" / "fetch_ffmpeg.py"
     tree = ast.parse(fetch_py.read_text(encoding="utf-8"), filename=str(fetch_py))
 
-    # 从 AST 提取所有字符串常量，只看可能是文件名/路径的（包含 .dll 且包含斜杠）
+    # 从 AST 提取所有字符串常量，只看包含 .dll 的（A6：去掉分隔符条件）
     string_constants = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Constant) and isinstance(node.value, str):
             s = node.value.lower()
-            # 只检查看起来像 DLL 文件名/路径的字符串（同时包含 .dll 和路径分隔符）
-            if '.dll' in s and ('/' in s or '\\' in s):
+            if '.dll' in s:
                 string_constants.append(s)
 
     # 不许在这些字符串中出现 DLL 基础名（说明硬编码了成员名）
@@ -454,10 +456,37 @@ def test_bin_extraction_no_hardcoded_dll_list():
         f"必须循环提取 bin/ 全体，不许手写成员名"
     )
 
-    # 必须有循环提取 bin/ 的逻辑
-    src = fetch_py.read_text(encoding="utf-8")
-    assert "bin/" in src and "for " in src and "member" in src.lower(), \
-        "fetch_ffmpeg.py 必须循环提取 bin/ 下的文件"
+    # 必须有循环提取 bin/ 的逻辑：main() 里必须存在遍历 namelist() 的循环，
+    # 且 bin_prefix 参与了成员筛选（A6：改用 AST，不许只看注释里的子串）
+    main_func = None
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == "main":
+            main_func = node
+            break
+
+    assert main_func is not None, "fetch_ffmpeg.py 里找不到 main() 函数"
+
+    # 检查 main() 里是否有循环调用 .namelist()
+    has_namelist_loop = False
+    has_bin_prefix_filter = False
+
+    for node in ast.walk(main_func):
+        # 找调用 .namelist() 的循环
+        if isinstance(node, ast.For):
+            # 检查迭代对象是否是 .namelist() 调用
+            if isinstance(node.iter, ast.Call):
+                if isinstance(node.iter.func, ast.Attribute) and node.iter.func.attr == "namelist":
+                    has_namelist_loop = True
+                    # 检查循环体内是否有 bin_prefix 的使用（通常在 if member.startswith(...) 里）
+                    for inner_node in ast.walk(node):
+                        if isinstance(inner_node, ast.Name) and "bin" in inner_node.id.lower():
+                            has_bin_prefix_filter = True
+                            break
+
+    assert has_namelist_loop, \
+        "fetch_ffmpeg.py::main() 必须有循环遍历 .namelist()"
+    assert has_bin_prefix_filter, \
+        "fetch_ffmpeg.py::main() 的循环里必须有 bin_prefix 参与成员筛选"
 
 
 def test_cli_encoding_reconfigure_single_source():
@@ -741,4 +770,64 @@ def test_cli_subcommand_registry():
 
     assert not violations, (
         "CLI 子命令名册校验失败：\n" + "\n".join(violations)
+    )
+
+
+def test_no_hardcoded_ffmpeg_tool_names():
+    """守卫 A14：除 video.py 与 packaging/ 外，不许出现 ffmpeg 工具名字符串常量。
+
+    H11 要禁的是「不许在 video.py 之外用字面量 "ffmpeg"/"ffprobe" 起进程」，
+    而旧守卫只认 subprocess.*([列表字面量]) 这一种形状，实际调用是 _run(cmd) / Popen(cmd)。
+    改成更硬的规则（A14）：
+    1. 除 video.py 与 packaging/ 外，depressionplex/ 的任何源文件里不许出现这四个字符串常量
+    2. video.py 里除 _resolve_ffmpeg_tool 外的函数体内也不许出现（_resolve_ffmpeg_tool 是唯一入口）
+    """
+    depressionplex_dir = ROOT / "depressionplex"
+    video_py = depressionplex_dir / "video.py"
+
+    forbidden_strings = ["ffmpeg", "ffprobe", "ffmpeg.exe", "ffprobe.exe"]
+    violations = []
+
+    # 1. 检查 depressionplex/ 下除 video.py 外的所有 .py 文件
+    for py_file in depressionplex_dir.rglob("*.py"):
+        if py_file == video_py:
+            continue  # video.py 单独检查
+
+        tree = ast.parse(py_file.read_text(encoding="utf-8"), filename=str(py_file))
+
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                if node.value in forbidden_strings:
+                    violations.append(
+                        f"{py_file.relative_to(ROOT)}:{node.lineno}: "
+                        f"出现字符串常量 {node.value!r}。"
+                        f"ffmpeg 工具解析只许在 video._resolve_ffmpeg_tool 里进行"
+                    )
+
+    # 2. 检查 video.py 里除 _resolve_ffmpeg_tool 外的函数
+    if video_py.exists():
+        tree = ast.parse(video_py.read_text(encoding="utf-8"), filename=str(video_py))
+
+        # 找到 _resolve_ffmpeg_tool 函数的节点
+        resolve_func_node = None
+        for node in tree.body:
+            if isinstance(node, ast.FunctionDef) and node.name == "_resolve_ffmpeg_tool":
+                resolve_func_node = node
+                break
+
+        # 检查除 _resolve_ffmpeg_tool 外的所有函数定义
+        for node in tree.body:
+            if isinstance(node, ast.FunctionDef) and node != resolve_func_node:
+                # 在这个函数体内查找禁止的字符串常量
+                for inner_node in ast.walk(node):
+                    if isinstance(inner_node, ast.Constant) and isinstance(inner_node.value, str):
+                        if inner_node.value in forbidden_strings:
+                            violations.append(
+                                f"video.py:{inner_node.lineno} ({node.name}): "
+                                f"出现字符串常量 {inner_node.value!r}。"
+                                f"除 _resolve_ffmpeg_tool 外不许直接用工具名字面量"
+                            )
+
+    assert not violations, (
+        "发现硬编码的 ffmpeg 工具名：\n" + "\n".join(violations)
     )

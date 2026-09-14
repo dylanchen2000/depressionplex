@@ -47,6 +47,20 @@ jobs:
             exit 1
           }
 
+      - name: Verify tag matches version (A9b)
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref }}" -replace 'refs/tags/v', ''
+          $version = "${{ steps.get_version.outputs.VERSION }}"
+          if ($tag -ne $version) {
+            echo "ERROR: Tag 'v$tag' does not match pyproject.toml version '$version'"
+            echo "A tag pushed as v$tag will produce installer named DEPRESSION-PLEX-Setup-$version.exe"
+            echo "Tag and version must match exactly (no -dev0, no build suffixes)"
+            exit 1
+          }
+          echo "Tag v$tag matches version $version"
+
       - name: Build installer (Inno Setup)
         working-directory: packaging
         shell: pwsh
@@ -70,8 +84,50 @@ jobs:
           packaging\dist\DEPRESSION-PLEX\DEPRESSION-PLEX.exe --self-test
 
       - name: Record build environment
+        shell: pwsh
         run: |
-          pip freeze > packaging/build_env.txt
+          # A11: 补全构建环境信息（将来会贴进论文方法学附录/客户验证报告）
+          $envFile = "packaging/build_env.txt"
+
+          # 1. Python deps
+          pip freeze | Out-File -FilePath $envFile -Encoding utf8
+
+          # 2. Python version
+          "" | Out-File -FilePath $envFile -Append -Encoding utf8
+          "# Python version" | Out-File -FilePath $envFile -Append -Encoding utf8
+          python -VV | Out-File -FilePath $envFile -Append -Encoding utf8
+
+          # 3. ffmpeg info (URL + SHA256 + 成员清单)
+          "" | Out-File -FilePath $envFile -Append -Encoding utf8
+          "# ffmpeg source" | Out-File -FilePath $envFile -Append -Encoding utf8
+          $fetchPy = Get-Content -Path packaging/fetch_ffmpeg.py -Raw
+          if ($fetchPy -match 'FFMPEG_URL\s*=\s*"([^"]+)"') {
+            "URL: $($matches[1])" | Out-File -FilePath $envFile -Append -Encoding utf8
+          }
+          if ($fetchPy -match 'FFMPEG_SHA256\s*=\s*"([^"]+)"') {
+            "SHA256: $($matches[1])" | Out-File -FilePath $envFile -Append -Encoding utf8
+          }
+          if ($fetchPy -match 'FFMPEG_BYTES\s*=\s*(\d+)') {
+            "Bytes: $($matches[1])" | Out-File -FilePath $envFile -Append -Encoding utf8
+          }
+          "Members:" | Out-File -FilePath $envFile -Append -Encoding utf8
+          Get-ChildItem vendor/ffmpeg | ForEach-Object { "  $_" } | Out-File -FilePath $envFile -Append -Encoding utf8
+
+          # 4. Inno Setup version
+          "" | Out-File -FilePath $envFile -Append -Encoding utf8
+          "# Inno Setup version" | Out-File -FilePath $envFile -Append -Encoding utf8
+          & "C:\Program Files (x86)\Inno Setup 6\iscc.exe" /? 2>&1 | Select-String "Inno Setup" | Out-File -FilePath $envFile -Append -Encoding utf8
+
+          # 5. UPX (A10: 记录 absent，因为 CI 无 upx，spec 里 upx=False)
+          "" | Out-File -FilePath $envFile -Append -Encoding utf8
+          "# UPX" | Out-File -FilePath $envFile -Append -Encoding utf8
+          "absent (upx=False in specs)" | Out-File -FilePath $envFile -Append -Encoding utf8
+
+          # 6. Git tag + commit SHA
+          "" | Out-File -FilePath $envFile -Append -Encoding utf8
+          "# Git reference" | Out-File -FilePath $envFile -Append -Encoding utf8
+          "ref: ${{ github.ref }}" | Out-File -FilePath $envFile -Append -Encoding utf8
+          "sha: ${{ github.sha }}" | Out-File -FilePath $envFile -Append -Encoding utf8
 
       - name: Upload installer artifact
         uses: actions/upload-artifact@v4

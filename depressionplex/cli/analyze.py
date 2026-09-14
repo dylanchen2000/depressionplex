@@ -167,7 +167,7 @@ def _build_run_json(info: video.VideoInfo, plan: runner.TrialPlan,
                     assay: str, skipped: dict[int, str],
                     scored: Collection[int],
                     ffmpeg_path: str, ffmpeg_source: str,
-                    ffprobe_path: str) -> dict:
+                    ffprobe_path: str, ffprobe_source: str) -> dict:
     """构造 run.json 数据结构（**CSV 故意不含的上下文**）。
 
     `scored` 是产出了 CSV 行的隔间号集合，必传：`chamber_validity` 只写不在 CSV 里的
@@ -177,9 +177,10 @@ def _build_run_json(info: video.VideoInfo, plan: runner.TrialPlan,
     同时写就等于同一个数字有两条来路，哪天其中一条变了没人会发现（DP-054）。
     未产出数字的隔间没有 CSV 行，它的有效性只能在这里说，所以留在这里。
 
-    `ffmpeg_path`, `ffmpeg_source`, `ffprobe_path` 由调用方提供（H10）：
+    `ffmpeg_path`, `ffmpeg_source`, `ffprobe_path`, `ffprobe_source` 由调用方提供（H10+A4）：
     在分析完成后才调 resolver 会导致「数字算出来了但 run.json 崩了 + CSV 也没有」，
     所以调用方必须在分析前就获取这些信息（如果工具不存在，分析开始前就失败）。
+    两个工具各自解析一次，各有自己的 source（混着来能发生：只设 DPX_FFMPEG / 随包漏文件）。
     """
     # numpy 类型需要转成 Python int/float
     def to_native(val):
@@ -188,10 +189,13 @@ def _build_run_json(info: video.VideoInfo, plan: runner.TrialPlan,
         return val
 
     # decoder 块：这批帧是哪个解码器解出来的（架构 §3.5，B6 审计包要印）
-    # source 由 _resolve_ffmpeg_tool 返回，不许二次推导（H9）
-    decoder_source = ffmpeg_source
-
+    # source 由 _resolve_ffmpeg_tool 返回，不许二次推导（H9+A4）
+    # 两个工具各有自己的 path/source/version；ffprobe 决定 fps/n_frames/计分窗口边界
     ffmpeg_version = _get_ffmpeg_version(ffmpeg_path)
+    ffprobe_version = _get_ffmpeg_version(ffprobe_path)  # ffprobe -version 格式与 ffmpeg 相同
+
+    # mixed_source: 两个工具来源不同时为 True（混着来能发生，且影响审计结论）
+    mixed_source = (ffmpeg_source != ffprobe_source)
 
     scoring_window_s = list(trial_report.ASSAY_WINDOWS[assay])
 
@@ -246,11 +250,19 @@ def _build_run_json(info: video.VideoInfo, plan: runner.TrialPlan,
         # 而这些数字是「这批秒数凭什么这么算」的全部依据（B6 的报告要印 θ_mob）。
         "rules": dataclasses.asdict(rules.TstRulesParams()),
         # decoder 块：审计包必须能回答「这批帧是哪个解码器解出来的」（B6 要印）
+        # 两个工具各有自己的 path/source/version（A4）；混着来时 mixed_source 为 True
         "decoder": {
-            "ffmpeg_path": ffmpeg_path,
-            "ffprobe_path": ffprobe_path,
-            "source": decoder_source,  # "env" | "bundled" | "path"
-            "ffmpeg_version": ffmpeg_version,  # None（取不到）| str（第一行）
+            "ffmpeg": {
+                "path": ffmpeg_path,
+                "source": ffmpeg_source,    # "env" | "bundled" | "system"
+                "version": ffmpeg_version,  # None（取不到）| str（第一行）
+            },
+            "ffprobe": {
+                "path": ffprobe_path,
+                "source": ffprobe_source,   # "env" | "bundled" | "system"
+                "version": ffprobe_version, # None（取不到）| str（第一行）
+            },
+            "mixed_source": mixed_source,   # True 时审计包需印警告：两工具来源不同
         },
         "video": {
             "path": str(info.path.resolve()),
@@ -309,9 +321,10 @@ def main(argv: list[str] | None = None) -> int:
                 last_emit[0] = now
 
     # H10：在分析前获取 ffmpeg 信息（如果工具不存在，这里就失败，不会在分析后才崩）
+    # A4：两个工具各自解析一次，不许丢 source（混着来能发生：只设 DPX_FFMPEG / 随包漏一个文件）
     try:
         ffmpeg_path, ffmpeg_source = video._resolve_ffmpeg_tool("ffmpeg")
-        ffprobe_path, _ = video._resolve_ffmpeg_tool("ffprobe")
+        ffprobe_path, ffprobe_source = video._resolve_ffmpeg_tool("ffprobe")
     except video.VideoError as e:
         print(f"[ffmpeg 工具缺失] {e}", file=sys.stderr)
         return 1
@@ -358,7 +371,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.run_json:
         # `reports` 的键就是「进了 CSV 的隔间」，传进去让 chamber_validity 避开它们
         run_data = _build_run_json(info, plan, args.assay, skipped, set(reports),
-                                    ffmpeg_path, ffmpeg_source, ffprobe_path)
+                                    ffmpeg_path, ffmpeg_source,
+                                    ffprobe_path, ffprobe_source)
         with args.run_json.open("w", encoding="utf-8") as fh:
             json.dump(run_data, fh, indent=2, ensure_ascii=False)
         print(f"\n上下文已写：{args.run_json}")

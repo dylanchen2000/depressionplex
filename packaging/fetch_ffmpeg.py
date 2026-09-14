@@ -22,6 +22,15 @@ from pathlib import Path
 # **哈希与下载地址只此一处**（CI 与本地构建都用这一份）
 # 架构师实测：字节数 80114619，顶层目录 ffmpeg-n8.1.2-52-g5a03dfa0f6-win64-lgpl-shared-8.1
 # autobuild-<日期时刻> 是不动的 tag（latest 不是），lgpl-shared 满足法律边界
+#
+# A13 TODO: BtbN 的 autobuild tag 会被滚动清理（老 tag 会被删除）。
+# 这份 zip (80,114,619 字节, SHA256 8bb18e29...38c9) 需要镜像到本仓 Release，
+# 然后 FFMPEG_URL 改成指向我们的镜像：
+#   https://github.com/dylanchen2000/depressionplex/releases/download/ffmpeg-n8.1.2-lgpl/ffmpeg-n8.1.2-52-g5a03dfa0f6-win64-lgpl-shared-8.1.zip
+# 上游 URL（下面这行）作为出处保留在注释里（法律上要能说清 LGPL 二进制从哪来的）。
+#
+# 上游出处（BtbN FFmpeg-Builds）：
+#   https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-09-13-14-50/ffmpeg-n8.1.2-52-g5a03dfa0f6-win64-lgpl-shared-8.1.zip
 FFMPEG_URL = "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-09-13-14-50/ffmpeg-n8.1.2-52-g5a03dfa0f6-win64-lgpl-shared-8.1.zip"
 FFMPEG_SHA256 = "8bb18e29b002851b5c2cc765e575162ee1636263f7d900f79f62409d106138c9"
 FFMPEG_BYTES = 80114619  # 长度校验比哈希失败可读得多
