@@ -831,3 +831,69 @@ def test_no_hardcoded_ffmpeg_tool_names():
     assert not violations, (
         "发现硬编码的 ffmpeg 工具名：\n" + "\n".join(violations)
     )
+
+
+def test_cli_dispatcher_help_and_exit_codes():
+    """守卫：CLI 子命令分发器的 --help 与退出码契约（A12 smoke test 依赖）。
+
+    退出码契约：
+    - 0: --help / -h / 无参数（客户双击 exe 不该看到错误）
+    - 1: 内部错误（导入失败）
+    - 2: 用法错误（未知子命令）
+
+    --help 输出必须包含所有子命令名——否则加了子命令忘了注册，用法里就少一行而没人知道。
+    """
+    import subprocess
+    import sys
+
+    # 构造调用：python -m depressionplex.cli <args>
+    def call_dispatcher(args: list[str]) -> tuple[int, str, str]:
+        """返回 (rc, stdout, stderr)"""
+        result = subprocess.run(
+            [sys.executable, "-m", "depressionplex.cli"] + args,
+            capture_output=True,
+            text=True,
+            cwd=ROOT
+        )
+        return result.returncode, result.stdout, result.stderr
+
+    # 1. --help: rc 0，输出包含所有子命令名
+    rc, stdout, stderr = call_dispatcher(["--help"])
+    assert rc == 0, f"--help 应返回 0，实际 {rc}"
+    
+    # 从 depressionplex/cli/__init__.py 读取 SUBCOMMANDS
+    cli_init = ROOT / "depressionplex" / "cli" / "__init__.py"
+    tree = ast.parse(cli_init.read_text(encoding="utf-8"), filename=str(cli_init))
+    subcommands_dict = None
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name) and target.id == "SUBCOMMANDS":
+                    if isinstance(node.value, ast.Dict):
+                        subcommands_dict = {}
+                        for key in node.value.keys:
+                            if isinstance(key, ast.Constant):
+                                subcommands_dict[key.value] = None
+                    break
+
+    assert subcommands_dict is not None, "找不到 SUBCOMMANDS 字典"
+    
+    for subcmd in subcommands_dict:
+        assert subcmd in stdout, \
+            f"--help 输出里没有子命令 {subcmd!r}（加了子命令忘了注册，用法里就少一行）"
+
+    # 2. -h: 同上
+    rc, stdout, stderr = call_dispatcher(["-h"])
+    assert rc == 0, f"-h 应返回 0，实际 {rc}"
+    for subcmd in subcommands_dict:
+        assert subcmd in stdout, f"-h 输出里没有子命令 {subcmd!r}"
+
+    # 3. 无参数: rc 0
+    rc, stdout, stderr = call_dispatcher([])
+    assert rc == 0, f"无参数应返回 0（客户双击 exe 不该看到错误），实际 {rc}"
+
+    # 4. 未知子命令: rc 2（用法错误，不是 1）
+    rc, stdout, stderr = call_dispatcher(["nonexistent-subcommand"])
+    assert rc == 2, f"未知子命令应返回 2（用法错误），实际 {rc}"
+    assert "未知子命令" in stderr or "nonexistent-subcommand" in stderr, \
+        "未知子命令应打印错误到 stderr"

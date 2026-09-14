@@ -48,18 +48,31 @@ jobs:
           }
 
       - name: Verify tag matches version (A9b)
-        if: startsWith(github.ref, 'refs/tags/v')
         shell: pwsh
         run: |
-          $tag = "${{ github.ref }}" -replace 'refs/tags/v', ''
           $version = "${{ steps.get_version.outputs.VERSION }}"
-          if ($tag -ne $version) {
-            echo "ERROR: Tag 'v$tag' does not match pyproject.toml version '$version'"
-            echo "A tag pushed as v$tag will produce installer named DEPRESSION-PLEX-Setup-$version.exe"
-            echo "Tag and version must match exactly (no -dev0, no build suffixes)"
+
+          # 每次都跑：dispatch 时断言 version 非空，有 tag 时断言逐字相同
+          if ([string]::IsNullOrWhiteSpace($version)) {
+            echo "ERROR: Failed to extract version from pyproject.toml"
             exit 1
           }
-          echo "Tag v$tag matches version $version"
+          echo "Version from pyproject.toml: $version"
+
+          # 如果是 tag 触发，校验 tag 与 version 必须逐字相同
+          $ref = "${{ github.ref }}"
+          if ($ref -like 'refs/tags/v*') {
+            $tag = $ref -replace 'refs/tags/v', ''
+            if ($tag -ne $version) {
+              echo "ERROR: Tag 'v$tag' does not match pyproject.toml version '$version'"
+              echo "A tag pushed as v$tag will produce installer named DEPRESSION-PLEX-Setup-$version.exe"
+              echo "Tag and version must match exactly (no -dev0, no build suffixes)"
+              exit 1
+            }
+            echo "✓ Tag v$tag matches version $version"
+          } else {
+            echo "✓ No tag, version validation passed (workflow_dispatch or other trigger)"
+          }
 
       - name: Build installer (Inno Setup)
         working-directory: packaging

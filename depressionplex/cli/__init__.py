@@ -20,17 +20,33 @@ SUBCOMMANDS = {
 
 
 def main() -> int:
-    """子命令分发器。退出码由子命令的 main() 决定。"""
-    if len(sys.argv) < 2:
-        print("用法: depressionplex.cli <子命令> [参数...]", file=sys.stderr)
-        print(f"可用子命令: {', '.join(SUBCOMMANDS.keys())}", file=sys.stderr)
-        return 2
+    """子命令分发器。
+
+    退出码契约（smoke test 依赖这个）：
+    - 0: 正常（--help / -h / 无参数 / 子命令成功）
+    - 1: 内部错误（导入失败、模块缺 main 等）
+    - 2: 用法错误（未知子命令）
+    - 其他：由子命令的 main() 决定
+    """
+    # --help / -h / 无参数：打印用法到 stdout，rc 0
+    # （客户双击 exe 不该看到错误，加了子命令忘了更新用法也能从 --help 发现）
+    if len(sys.argv) < 2 or sys.argv[1] in ("--help", "-h"):
+        print("用法: depression-analyzer <子命令> [参数...]")
+        print()
+        print("可用子命令:")
+        for subcmd in sorted(SUBCOMMANDS.keys()):
+            print(f"  {subcmd}")
+        print()
+        print("详细用法: depression-analyzer <子命令> --help")
+        return 0
 
     subcommand = sys.argv[1]
 
+    # 未知子命令：打印用法到 stderr，rc 2（用法错误）
     if subcommand not in SUBCOMMANDS:
         print(f"未知子命令: {subcommand}", file=sys.stderr)
-        print(f"可用子命令: {', '.join(SUBCOMMANDS.keys())}", file=sys.stderr)
+        print(f"可用子命令: {', '.join(sorted(SUBCOMMANDS.keys()))}", file=sys.stderr)
+        print("运行 depression-analyzer --help 查看用法", file=sys.stderr)
         return 2
 
     # 导入并调用子命令的 main()
