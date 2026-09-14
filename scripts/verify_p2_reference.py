@@ -29,6 +29,27 @@ _REL_TOL = 0.10  # 10%
 REF_PATH = Path(__file__).resolve().parent.parent / "tests" / "fixtures" / "p2_reference.json"
 
 
+def _detect_ffmpeg_version() -> str | None:
+    """探测当前环境的 ffmpeg 版本字符串（用于解码器对账）。
+
+    返回 None 表示找不到 ffmpeg，返回字符串为版本行（如 "ffmpeg version 6.0..."）。
+    """
+    import re
+    import shutil
+    try:
+        # 先试 depressionplex.video 内部的路径解析逻辑，再 fallback 到系统 PATH
+        ffmpeg_path = shutil.which("ffmpeg")
+        if ffmpeg_path is None:
+            return None
+        out = subprocess.run(
+            [ffmpeg_path, "-version"], capture_output=True, text=True, timeout=5
+        )
+        first_line = out.stdout.splitlines()[0] if out.stdout else out.stderr.splitlines()[0]
+        return first_line.strip()
+    except Exception as e:
+        return f"(探测失败: {e})"
+
+
 def _load_ref() -> dict:
     with open(REF_PATH, encoding="utf-8") as f:
         return json.load(f)
@@ -128,8 +149,32 @@ def main() -> int:
             f"得到 {jitter_val}，冻结值 {ref['area_jitter_p90']}"
         )
 
+    # ── 解码器信息（DP-071 教训）────────────────────────────────────────────
+    # 先探测本次用的 ffmpeg 版本，用于对账
+    current_ffmpeg = _detect_ffmpeg_version()
+    frozen_ffmpeg = ref.get("decoder", {}).get("ffmpeg_version") if ref.get("decoder") else None
+
+    if frozen_ffmpeg is None:
+        # 冻结表解码器身份未知（2026-08-24 实测时未记录）
+        # 不能因此放过比对，也不能因此判失败——照常比数值，但明确打印解码器差异风险
+        print(
+            f"⚠  参考读数的解码器身份未知（冻结表 decoder.ffmpeg_version=null）。\n"
+            f"   本次复现用的是：{current_ffmpeg}\n"
+            f"   若数值不符，第一嫌疑是解码器差异而不是算法变了（见 DP-071）。\n"
+            f"   建议事后更新冻结表：将 decoder.ffmpeg_version 填为 {current_ffmpeg!r}"
+        )
+    elif frozen_ffmpeg != current_ffmpeg:
+        print(
+            f"⚠  解码器版本不匹配：\n"
+            f"   冻结表：{frozen_ffmpeg}\n"
+            f"   本次  ：{current_ffmpeg}\n"
+            f"   若数值不符，第一嫌疑是解码器差异（DP-071）。"
+        )
+    else:
+        print(f"解码器版本一致：{current_ffmpeg}")
+
     # SHA256 检查（冻结表目前为 null，提示用户手动核）
-    if ref["sha256"] is None:
+    if ref.get("sha256") is None:
         print("注意：SHA256 冻结值为 null，未做哈希比对。如需锁定素材完整性，请手动计算并更新冻结表。")
 
     if errors:
