@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QFileDialog,
     QHeaderView,
+    QMessageBox,
 )
 
 from desktop.app.models.results import load_results, ResultsTable, ResultsRow, DENOMINATORS
@@ -47,10 +48,19 @@ class ResultsPage(QWidget):
         badge_row.addWidget(self.badge_slot)
         layout.addLayout(badge_row)
 
-        # 打开按钮
+        # 按钮行：打开目录 + 导出
+        btn_row = QHBoxLayout()
         open_btn = QPushButton("打开输出目录…")
         open_btn.clicked.connect(self._on_open_directory)
-        layout.addWidget(open_btn)
+        btn_row.addWidget(open_btn)
+
+        # B6 导出按钮（只加按钮与调用，不动表格逻辑）
+        self.export_btn = QPushButton("导出…")
+        self.export_btn.setEnabled(False)  # 没有加载数据时禁用
+        self.export_btn.clicked.connect(self._on_export)
+        btn_row.addWidget(self.export_btn)
+        btn_row.addStretch()
+        layout.addLayout(btn_row)
 
         # 元信息区域
         self.meta_label = QLabel("")
@@ -107,6 +117,7 @@ class ResultsPage(QWidget):
 
         self._display_meta(table_data)
         self._display_table(table_data)
+        self.export_btn.setEnabled(True)  # 有数据后启用导出按钮
 
     def _display_meta(self, table_data: ResultsTable):
         """显示页面顶部的元信息。"""
@@ -230,3 +241,55 @@ class ResultsPage(QWidget):
         item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)  # 只读
 
         return item
+
+    def _on_export(self) -> None:
+        """导出按钮点击处理（B6 新增，只加按钮与调用，不动表格逻辑）。"""
+        if self._current_exp is None:
+            return
+
+        from desktop.app.services.calibration import evaluate_calibration
+        from desktop.app.services.export import export_paths, export_xlsx, export_audit
+        from desktop.app.services.export_pdf import FontUnavailableError
+        from desktop.app.services.calibration import Mode
+
+        calib_status = evaluate_calibration(None)
+        e_paths = export_paths(
+            self._current_exp, self._current_video_index, calib_status.mode
+        )
+
+        # 让用户选择导出到哪个目录
+        dir_path = QFileDialog.getExistingDirectory(self, "选择导出目录")
+        if not dir_path:
+            return
+
+        out_dir = Path(dir_path)
+
+        xlsx_path = out_dir / e_paths["xlsx"].name
+        audit_path = out_dir / e_paths["audit_zip"].name
+        pdf_path = out_dir / e_paths["pdf"].name
+
+        errors: list[str] = []
+
+        try:
+            export_xlsx(self._current_exp, self._current_video_index, None, xlsx_path)
+        except Exception as e:
+            errors.append(f"xlsx 导出失败：{e}")
+
+        try:
+            export_audit(self._current_exp, self._current_video_index, None, audit_path)
+        except Exception as e:
+            errors.append(f"审计包导出失败：{e}")
+
+        try:
+            from desktop.app.services.export import export_pdf as _export_pdf
+            _export_pdf(self._current_exp, self._current_video_index, None, pdf_path)
+        except FontUnavailableError as e:
+            # 缺中文字体 → 友好提示，xlsx 和审计包不受影响
+            errors.append(f"PDF 未导出：{e}")
+        except Exception as e:
+            errors.append(f"PDF 导出失败：{e}")
+
+        if errors:
+            QMessageBox.warning(self, "导出完成（有警告）", "\n".join(errors))
+        else:
+            QMessageBox.information(self, "导出成功", f"已导出到：{out_dir}")

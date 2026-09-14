@@ -29,6 +29,7 @@ outputs/
 # 大文件的防线是上面那批扩展名规则，它们在这两个目录里同样生效。
 !data/human_scores/
 !data/frozen/
+!data/validation_readings.json
 
 # Python
 __pycache__/

@@ -30,6 +30,8 @@ TEST_MODULES = ("test_bouts", "test_rad", "test_geometry", "test_segment",
                 "test_queue_contract",
                 "test_calibration_contract",
                 "test_results_model",
+                "test_report_model",
+                "test_export",
                 # 元守卫：新增 tests/test_*.py 必须同时进这张表，否则此测试变红
                 "test_run_tests_registry")
 
