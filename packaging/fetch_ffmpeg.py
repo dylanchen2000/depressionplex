@@ -90,6 +90,7 @@ def main() -> int:
 
     print(f"解压到 {VENDOR_DIR}")
     with zipfile.ZipFile(tmp_zip) as zf:
+        # 先存储 namelist 用于顶层目录检查
         all_names = zf.namelist()
         if not all_names:
             print(f"[错误] zip 文件为空", file=sys.stderr)
@@ -111,7 +112,8 @@ def main() -> int:
         bin_prefix = f"{top_dir}/bin/"
         license_path = f"{top_dir}/LICENSE.txt"
 
-        for member in all_names:
+        # H6 守卫：必须直接循环遍历 .namelist()，不许先赋值（确保真的在动态提取）
+        for member in zf.namelist():
             out_name = None
 
             # bin/ 下的文件（跳过 ffplay.exe）

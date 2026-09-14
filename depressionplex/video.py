@@ -30,6 +30,10 @@ import numpy as np
 #: decoder.source 的取值集合（A4）。三种来源，优先级由 _resolve_ffmpeg_tool 决定。
 DECODER_SOURCES = ("env", "bundled", "system")
 
+#: ffmpeg 工具名常量（A14 守卫：除 video.py 外不许出现字面量，所以从这里导出）
+TOOL_FFMPEG = "ffmpeg"
+TOOL_FFPROBE = "ffprobe"
+
 
 class VideoError(RuntimeError):
     """解码/探测失败。**不降级、不猜参数**，直接抛给上层。"""

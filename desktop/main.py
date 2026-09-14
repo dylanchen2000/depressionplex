@@ -13,9 +13,9 @@ import time
 import PySide6
 from PySide6.QtWidgets import QApplication
 
-from depressionplex.cli._stdio import force_utf8
 from desktop.app.main_window import PAGE_CLASSES, MainWindow, PAGE_ORDER
 from desktop.app.utils.paths import resource_path, user_data_dir
+from desktop.app.utils.stdio import force_utf8
 
 STYLESHEET = "app/styles/dark.qss"
 

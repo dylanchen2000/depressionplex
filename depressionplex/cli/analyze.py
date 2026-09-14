@@ -28,6 +28,7 @@ from collections.abc import Collection
 from pathlib import Path
 
 from .. import runner, video
+from ..video import TOOL_FFMPEG, TOOL_FFPROBE
 from ..assay_core import rules, timeline, trial_report
 from . import _stdio
 
@@ -252,12 +253,12 @@ def _build_run_json(info: video.VideoInfo, plan: runner.TrialPlan,
         # decoder 块：审计包必须能回答「这批帧是哪个解码器解出来的」（B6 要印）
         # 两个工具各有自己的 path/source/version（A4）；混着来时 mixed_source 为 True
         "decoder": {
-            "ffmpeg": {
+            TOOL_FFMPEG: {
                 "path": ffmpeg_path,
                 "source": ffmpeg_source,    # "env" | "bundled" | "system"
                 "version": ffmpeg_version,  # None（取不到）| str（第一行）
             },
-            "ffprobe": {
+            TOOL_FFPROBE: {
                 "path": ffprobe_path,
                 "source": ffprobe_source,   # "env" | "bundled" | "system"
                 "version": ffprobe_version, # None（取不到）| str（第一行）
@@ -323,8 +324,8 @@ def main(argv: list[str] | None = None) -> int:
     # H10：在分析前获取 ffmpeg 信息（如果工具不存在，这里就失败，不会在分析后才崩）
     # A4：两个工具各自解析一次，不许丢 source（混着来能发生：只设 DPX_FFMPEG / 随包漏一个文件）
     try:
-        ffmpeg_path, ffmpeg_source = video._resolve_ffmpeg_tool("ffmpeg")
-        ffprobe_path, ffprobe_source = video._resolve_ffmpeg_tool("ffprobe")
+        ffmpeg_path, ffmpeg_source = video._resolve_ffmpeg_tool(TOOL_FFMPEG)
+        ffprobe_path, ffprobe_source = video._resolve_ffmpeg_tool(TOOL_FFPROBE)
     except video.VideoError as e:
         print(f"[ffmpeg 工具缺失] {e}", file=sys.stderr)
         return 1

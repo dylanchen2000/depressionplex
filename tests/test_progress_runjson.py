@@ -200,9 +200,9 @@ def test_runjson_no_csv_overlap() -> None:
         skipped = {1: "悬挂点不可估（走廊标定失败 ⇒ 悬挂点不可估（不猜））⇒ 拒绝产出数字"}
 
         ffmpeg_path, ffmpeg_source = video._resolve_ffmpeg_tool("ffmpeg")
-        ffprobe_path, _ = video._resolve_ffmpeg_tool("ffprobe")
+        ffprobe_path, ffprobe_source = video._resolve_ffmpeg_tool("ffprobe")
         run_data = analyze._build_run_json(info, plan, "TST", skipped, set(),
-                                           ffmpeg_path, ffmpeg_source, ffprobe_path)
+                                           ffmpeg_path, ffmpeg_source, ffprobe_path, ffprobe_source)
 
         # 递归提取所有键名
         def extract_keys(obj, prefix=""):
@@ -279,9 +279,9 @@ def test_runjson_not_scored_present() -> None:
         }
 
         ffmpeg_path, ffmpeg_source = video._resolve_ffmpeg_tool("ffmpeg")
-        ffprobe_path, _ = video._resolve_ffmpeg_tool("ffprobe")
+        ffprobe_path, ffprobe_source = video._resolve_ffmpeg_tool("ffprobe")
         run_data = analyze._build_run_json(info, plan, "TST", skipped, set(),
-                                           ffmpeg_path, ffmpeg_source, ffprobe_path)
+                                           ffmpeg_path, ffmpeg_source, ffprobe_path, ffprobe_source)
 
         # not_scored 必须存在且非空
         assert "not_scored" in run_data, "run.json 缺少 not_scored 键"
@@ -323,9 +323,9 @@ def test_runjson_not_scored_empty_but_present() -> None:
             width=400, height=H, frame_count_source="nb_frames")
 
         ffmpeg_path, ffmpeg_source = video._resolve_ffmpeg_tool("ffmpeg")
-        ffprobe_path, _ = video._resolve_ffmpeg_tool("ffprobe")
+        ffprobe_path, ffprobe_source = video._resolve_ffmpeg_tool("ffprobe")
         run_data = analyze._build_run_json(info, plan, "TST", skipped, set(reports),
-                                           ffmpeg_path, ffmpeg_source, ffprobe_path)
+                                           ffmpeg_path, ffmpeg_source, ffprobe_path, ffprobe_source)
 
         # not_scored 必须存在
         assert "not_scored" in run_data, \
@@ -361,9 +361,9 @@ def test_runjson_omits_validity_of_scored_chambers() -> None:
 
         scored = {int(k) for k in reports}
         ffmpeg_path, ffmpeg_source = video._resolve_ffmpeg_tool("ffmpeg")
-        ffprobe_path, _ = video._resolve_ffmpeg_tool("ffprobe")
+        ffprobe_path, ffprobe_source = video._resolve_ffmpeg_tool("ffprobe")
         run_data = analyze._build_run_json(info, plan, "TST", skipped, scored,
-                                           ffmpeg_path, ffmpeg_source, ffprobe_path)
+                                           ffmpeg_path, ffmpeg_source, ffprobe_path, ffprobe_source)
 
         listed = {item["chamber"] for item in run_data["chamber_validity"]}
         dup = listed & scored
@@ -521,15 +521,15 @@ def test_runjson_keeps_zero_bl_est_distinct_from_none() -> None:
                 chambers=(cv,)), calib_indices=(0, 5), warnings=())
 
         ffmpeg_path, ffmpeg_source = video._resolve_ffmpeg_tool("ffmpeg")
-        ffprobe_path, _ = video._resolve_ffmpeg_tool("ffprobe")
+        ffprobe_path, ffprobe_source = video._resolve_ffmpeg_tool("ffprobe")
 
         zero = analyze._build_run_json(info, _plan(0.0), "TST", {}, set(),
-                                        ffmpeg_path, ffmpeg_source, ffprobe_path)
+                                        ffmpeg_path, ffmpeg_source, ffprobe_path, ffprobe_source)
         assert zero["chambers"][0]["corridor"]["bl_est"] == 0.0, \
             "bl_est=0.0 被写成了 null——「量出来是 0」和「量不出来」不是一件事"
 
         none = analyze._build_run_json(info, _plan(None), "TST", {}, set(),
-                                        ffmpeg_path, ffmpeg_source, ffprobe_path)
+                                        ffmpeg_path, ffmpeg_source, ffprobe_path, ffprobe_source)
         assert none["chambers"][0]["corridor"]["bl_est"] is None
 
 
@@ -555,16 +555,16 @@ def test_runjson_keeps_note_none_distinct_from_empty() -> None:
                 chambers=(cv,)), calib_indices=(0, 5), warnings=())
 
         ffmpeg_path, ffmpeg_source = video._resolve_ffmpeg_tool("ffmpeg")
-        ffprobe_path, _ = video._resolve_ffmpeg_tool("ffprobe")
+        ffprobe_path, ffprobe_source = video._resolve_ffmpeg_tool("ffprobe")
 
         # 隔间 1 没进 CSV（scored 为空）⇒ 它的有效性写在 run.json 里
         got_none = analyze._build_run_json(info, _plan(None), "TST", {}, set(),
-                                           ffmpeg_path, ffmpeg_source, ffprobe_path)
+                                           ffmpeg_path, ffmpeg_source, ffprobe_path, ffprobe_source)
         assert got_none["chamber_validity"][0]["note"] is None, \
             "note=None 被写成了空串——下游分不出「没备注」和「备注是空串」"
 
         got_empty = analyze._build_run_json(info, _plan(""), "TST", {}, set(),
-                                            ffmpeg_path, ffmpeg_source, ffprobe_path)
+                                            ffmpeg_path, ffmpeg_source, ffprobe_path, ffprobe_source)
         assert got_empty["chamber_validity"][0]["note"] == ""
 
 
@@ -599,9 +599,9 @@ def test_runjson_carries_effective_rules_params() -> None:
             chambers=(cv,)), calib_indices=(0, 5), warnings=())
 
         ffmpeg_path, ffmpeg_source = video._resolve_ffmpeg_tool("ffmpeg")
-        ffprobe_path, _ = video._resolve_ffmpeg_tool("ffprobe")
+        ffprobe_path, ffprobe_source = video._resolve_ffmpeg_tool("ffprobe")
         got = analyze._build_run_json(info, plan, "TST", {}, set(),
-                                       ffmpeg_path, ffmpeg_source, ffprobe_path)
+                                       ffmpeg_path, ffmpeg_source, ffprobe_path, ffprobe_source)
     assert "rules" in got, "run.json 缺少 rules（θ_mob 等 FROZEN 判定参数）"
 
     frozen = RU.TstRulesParams()

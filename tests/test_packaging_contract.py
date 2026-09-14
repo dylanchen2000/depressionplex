@@ -337,14 +337,14 @@ def test_run_json_decoder_block():
 
         # 获取 ffmpeg 信息（模拟调用方的职责）
         ffmpeg_path, ffmpeg_source = video._resolve_ffmpeg_tool("ffmpeg")
-        ffprobe_path, _ = video._resolve_ffmpeg_tool("ffprobe")
+        ffprobe_path, ffprobe_source = video._resolve_ffmpeg_tool("ffprobe")
 
         # 模拟 _get_ffmpeg_version 返回 None（取不到）
         with patch("depressionplex.cli.analyze._get_ffmpeg_version") as mock_version:
             mock_version.return_value = None
 
             result = analyze._build_run_json(info, plan, "TST", {}, set(),
-                                             ffmpeg_path, ffmpeg_source, ffprobe_path)
+                                             ffmpeg_path, ffmpeg_source, ffprobe_path, ffprobe_source)
 
             # 断言 decoder 块存在
             assert "decoder" in result, "run.json 里找不到 decoder 块"
@@ -1072,16 +1072,22 @@ def test_no_relative_import_in_any_pyinstaller_entry():
 
 
 def test_only_one_utf8_shim():
-    """守卫 C4：编码 shim 只许在 _stdio.py 里，不许到处写 TextIOWrapper（C4 合并）。
+    """守卫 C4：编码 shim 只许在两个 _stdio.py/stdio.py 里，行为必须一致（C4 纠正）。
 
-    Windows 编码问题已收束到 depressionplex/cli/_stdio.py::force_utf8()，
-    其他任何地方都不许再自己处理 stdout/stderr 的 encoding。
+    外壳与引擎是进程边界（架构 §3.4），跨边界的重复实现是对的，不是技术债。
+    但两边行为必须一致：都无条件执行、都用 reconfigure(encoding="utf-8")。
     """
-    # 扫描所有 .py 文件（排除 _stdio.py 本身）
+    # 允许的两个文件（一边一个）
+    allowed_files = {
+        ROOT / "depressionplex" / "cli" / "_stdio.py",  # 引擎进程
+        ROOT / "desktop" / "app" / "utils" / "stdio.py",  # 外壳进程
+    }
+
+    # 1. 扫描所有 .py 文件，检查 TextIOWrapper / reconfigure(encoding= 只出现在这两个文件
     violations = []
     for py_file in ROOT.rglob("*.py"):
-        # 跳过 _stdio.py（那是唯一允许有 TextIOWrapper 的地方）
-        if py_file.name == "_stdio.py":
+        # 跳过允许的两个文件
+        if py_file in allowed_files:
             continue
 
         # 跳过 __pycache__ 和 .venv
@@ -1089,12 +1095,50 @@ def test_only_one_utf8_shim():
             continue
 
         content = py_file.read_text(encoding="utf-8")
-        # 查找 TextIOWrapper（不区分大小写，因为可能有 io.TextIOWrapper 或 from io import TextIOWrapper）
-        if "TextIOWrapper" in content:
-            # 找到行号
-            for i, line in enumerate(content.splitlines(), start=1):
-                if "TextIOWrapper" in line:
-                    violations.append(f"{py_file.relative_to(ROOT)}:{i} 不许自己写 TextIOWrapper，必须调用 _stdio.force_utf8()")
+        # 查找 TextIOWrapper 或 reconfigure(encoding=
+        for i, line in enumerate(content.splitlines(), start=1):
+            if "TextIOWrapper" in line or "reconfigure(encoding=" in line:
+                violations.append(
+                    f"{py_file.relative_to(ROOT)}:{i} 不许自己处理编码，"
+                    f"必须调用 force_utf8()（编码 shim 只许在两个 stdio 文件里）"
+                )
 
     assert not violations, \
-        "编码 shim 只许在 _stdio.py 里，不许到处拷贝：\n" + "\n".join(f"  - {v}" for v in violations)
+        "编码 shim 只许在两个 stdio 文件里：\n" + "\n".join(f"  - {v}" for v in violations)
+
+    # 2. 断言两个文件都存在
+    for f in allowed_files:
+        assert f.exists(), f"缺少进程边界一侧的 stdio 文件：{f.relative_to(ROOT)}"
+
+    # 3. 断言两边行为一致：都有 force_utf8()，都用 reconfigure(encoding="utf-8")
+    for stdio_file in allowed_files:
+        content = stdio_file.read_text(encoding="utf-8")
+        tree = ast.parse(content, filename=str(stdio_file))
+
+        # 找到 force_utf8() 函数
+        force_utf8_func = None
+        for node in tree.body:
+            if isinstance(node, ast.FunctionDef) and node.name == "force_utf8":
+                force_utf8_func = node
+                break
+
+        assert force_utf8_func is not None, \
+            f"{stdio_file.relative_to(ROOT)} 缺少 force_utf8() 函数"
+
+        # 检查函数体是否无条件执行（不许包在 if sys.platform == "win32" 里）
+        # 不许有任何 if 语句在最外层
+        for node in force_utf8_func.body:
+            if isinstance(node, ast.If):
+                # 检查是否是 sys.platform 判断
+                if isinstance(node.test, ast.Compare):
+                    left_code = ast.unparse(node.test.left) if hasattr(ast, 'unparse') else str(node.test.left)
+                    if "platform" in left_code:
+                        raise AssertionError(
+                            f"{stdio_file.relative_to(ROOT)}::force_utf8() "
+                            f"不许包在 if sys.platform 里（必须无条件执行，两边策略一致）"
+                        )
+
+        # 检查是否使用 reconfigure(encoding="utf-8")
+        func_code = ast.unparse(force_utf8_func) if hasattr(ast, 'unparse') else content
+        assert 'reconfigure' in func_code and 'encoding' in func_code and 'utf-8' in func_code, \
+            f"{stdio_file.relative_to(ROOT)}::force_utf8() 必须使用 reconfigure(encoding='utf-8')"
