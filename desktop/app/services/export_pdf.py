@@ -8,7 +8,8 @@
   输出「用哪个或拒绝」），Qt 只负责问系统；这样没有 PySide6 的沙箱
   也能测这个纯函数（派工单 §3 第 11 条）。
 - 渲染层**只摆不算**：不含 +/-/*/÷/round()。
-- **不引入第三方 PDF 库**：QPdfWriter 是 PySide6 自带的。
+- **不引入第三方 PDF 库**：使用 QPdfWriter + QTextDocument（均在 PySide6.QtGui 里，
+  无 QtPrintSupport 插件依赖，也不牵 CUPS）。
 """
 
 from __future__ import annotations
@@ -234,8 +235,7 @@ def render_pdf(report: Report, out_path: Path) -> None:
     font_family = _select_font_with_qt()  # 缺字体时直接抛异常
 
     from PySide6.QtCore import QMarginsF, QSizeF
-    from PySide6.QtGui import QPageSize, QTextDocument
-    from PySide6.QtPrintSupport import QPrinter
+    from PySide6.QtGui import QPageSize, QPdfWriter, QTextDocument
 
     html = _build_html(report)
     # 把 FONT_PLACEHOLDER 替换成实际字体
@@ -243,11 +243,10 @@ def render_pdf(report: Report, out_path: Path) -> None:
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    printer = QPrinter(QPrinter.PrinterMode.HighResolution)
-    printer.setOutputFormat(QPrinter.OutputFormat.PdfFormat)
-    printer.setOutputFileName(str(out_path))
-    printer.setPageSize(QPageSize(QPageSize.PageSizeId.A4))
+    # QPdfWriter 在 QtGui 里，无插件依赖，离屏渲染稳定（无 QtPrintSupport / CUPS）
+    writer = QPdfWriter(str(out_path))
+    writer.setPageSize(QPageSize(QPageSize.PageSizeId.A4))
 
     doc = QTextDocument()
     doc.setHtml(html)
-    doc.print_(printer)
+    doc.print_(writer)

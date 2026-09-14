@@ -26,6 +26,12 @@ import tempfile
 import zipfile
 from pathlib import Path
 
+# ---------------------------------------------------------------------------
+# NOTE: 端到端守卫（守卫 12）用 analyze.CSV_FIELDS + analyze._row() +
+# analyze._build_run_json() 写引擎产出文件，与 test_results_model.py 的
+# test_end_to_end_with_real_engine_output 走的是同一条路（B4 已认可此模式）。
+# ---------------------------------------------------------------------------
+
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "tests"))
@@ -228,62 +234,75 @@ def test_declaration_numbers_from_json_not_hardcoded() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 守卫 3：验证读数与文档一致
+# 守卫 3：验证读数与文档一致（从 JSON 自己的 __sources 长出来，无手抄字面量）
 # ---------------------------------------------------------------------------
 
 def test_validation_readings_match_documents() -> None:
-    """正则从 ISSUES.md / SOP 里抓数字，与 JSON 比对。"""
-    readings = _load_validation_readings()
+    """每个读数必须在 __sources 里有来源，来源文件必须存在，值必须出现在该文件里。
 
-    # ISSUES.md 里有：+1.74、35.15、5/26、19.33、66.79
-    issues_path = ROOT / "docs" / "ISSUES.md"
-    assert issues_path.exists(), f"docs/ISSUES.md 不存在：{issues_path}"
-    issues_text = issues_path.read_text(encoding="utf-8")
+    名册从 JSON 的 __sources 自动长出来：
+    - 缺来源 → 红（不许有未溯源的读数）
+    - 来源文件不存在 → 红（不许 if exists() 静默跳过）
+    - 值的字符串形式不在文件里 → 红
 
-    def require_in(text: str, pattern: str, name: str) -> None:
-        if not re.search(pattern, text):
-            raise AssertionError(
-                f"文档里找不到 {name}（pattern={pattern!r}），"
-                "可能文档已更新但 JSON 没跟上"
+    行号写在来源字符串里只当人读的注释，不参与匹配（行号一定会漂）。
+    """
+    with VALIDATION_READINGS_PATH.open("r", encoding="utf-8") as f:
+        raw = json.load(f)
+
+    sources: dict[str, str] = raw.get("__sources", {})
+    readings = {k: v for k, v in raw.items() if not k.startswith("__")}
+
+    errors: list[str] = []
+
+    for key, val in readings.items():
+        # 1. 必须有来源
+        if key not in sources:
+            errors.append(f"读数 {key!r} 在 __sources 里没有来源条目（缺来源即红）")
+            continue
+
+        source_str = sources[key]
+        # 取来源字符串里的文件名（第一个空格前的部分）。
+        # 来源字符串格式示例：
+        #   "docs/ISSUES.md DP-055"
+        #   "docs/SPEC_v1.md:211"          ← 行号写在冒号后面，只当注释，不参与匹配
+        #   "docs/SOP_v1.5.md §十一 行367"
+        # 先取第一个空格前的片段，再去掉末尾的 ":行号" 部分（行号是整数）。
+        raw_file_part = source_str.split()[0] if source_str.strip() else ""
+        if not raw_file_part:
+            errors.append(f"读数 {key!r} 的 __sources 条目 {source_str!r} 没有文件名")
+            continue
+        # 去掉 ":整数" 行号后缀（行号一定会漂，不参与匹配）
+        import re as _re
+        file_part = _re.sub(r":\d+$", "", raw_file_part)
+
+        doc_path = ROOT / file_part
+        # 2. 来源文件必须存在（不许 if exists() 跳过）
+        if not doc_path.exists():
+            errors.append(
+                f"读数 {key!r} 的来源文件 {file_part!r} 不存在\n"
+                f"  来源字符串：{source_str!r}\n"
+                f"  完整路径：{doc_path}"
+            )
+            continue
+
+        doc_text = doc_path.read_text(encoding="utf-8")
+        val_str = str(val).lstrip("+-")  # 去掉正负号，文档里可能写 +1.74 也可能只有 1.74
+        val_bare = str(val)              # 原值（含符号）
+
+        # 3. 值必须出现在文档里（原值或去掉正负号的形式之一）
+        if val_str not in doc_text and val_bare not in doc_text:
+            errors.append(
+                f"读数 {key!r} = {val!r} 在文档 {file_part!r} 里找不到\n"
+                f"  查了：{val_bare!r} 和 {val_str!r}\n"
+                f"  来源字符串：{source_str!r}"
             )
 
-    # own_bias_s: +1.74
-    require_in(issues_text, r"\+1\.74", "own_bias_s (+1.74) in ISSUES.md")
-    assert readings["own_bias_s"] == "+1.74", (
-        f"own_bias_s={readings['own_bias_s']!r} 与 ISSUES.md 的 +1.74 不符"
-    )
-
-    # own_mae_s: 35.15
-    require_in(issues_text, r"35\.15", "own_mae_s (35.15) in ISSUES.md")
-    assert str(readings["own_mae_s"]) == "35.15", (
-        f"own_mae_s={readings['own_mae_s']!r} 与 ISSUES.md 的 35.15 不符"
-    )
-
-    # own_pass_n / own_n_paired: 5/26
-    require_in(issues_text, r"5/26", "own_pass_n/own_n_paired (5/26) in ISSUES.md")
-    assert readings["own_pass_n"] == 5, f"own_pass_n={readings['own_pass_n']!r}"
-    assert readings["own_n_paired"] == 26, f"own_n_paired={readings['own_n_paired']!r}"
-
-    # rater_median_s: 19.33
-    require_in(issues_text, r"19\.33", "rater_median_s (19.33) in ISSUES.md")
-    assert str(readings["rater_median_s"]) == "19.33", (
-        f"rater_median_s={readings['rater_median_s']!r}"
-    )
-
-    # rater_max_s: 66.79
-    require_in(issues_text, r"66\.79", "rater_max_s (66.79) in ISSUES.md")
-    assert str(readings["rater_max_s"]) == "66.79", (
-        f"rater_max_s={readings['rater_max_s']!r}"
-    )
-
-    # SOP: 35.15, own_pass_n, rater values
-    sop_path = ROOT / "docs" / "SOP_悬尾实验人工评分_v1.5.md"
-    if sop_path.exists():
-        sop_text = sop_path.read_text(encoding="utf-8")
-        require_in(sop_text, r"35\.15", "own_mae_s (35.15) in SOP")
-        require_in(sop_text, r"5\s*/\s*26", "own_pass_n/own_n_paired in SOP")
-        require_in(sop_text, r"19\.33", "rater_median_s (19.33) in SOP")
-        require_in(sop_text, r"66\.79", "rater_max_s (66.79) in SOP")
+    if errors:
+        raise AssertionError(
+            f"validation_readings.json 有 {len(errors)} 处与来源文档不符：\n"
+            + "\n".join(f"  [{i+1}] {e}" for i, e in enumerate(errors))
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -626,13 +645,16 @@ def test_pdf_select_font_case_insensitive() -> None:
 # ---------------------------------------------------------------------------
 
 def test_end_to_end_with_real_engine_output() -> None:
-    """真跑引擎产出 CSV + run.json，用真产物导出 xlsx 与审计包，回读断言。"""
-    # 复用 test_results_model.py 的端到端测试所用的路子
-    # 直接用 test_runner._run 产出真实数据
+    """真跑引擎产出 CSV + run.json，用真产物导出 xlsx 与审计包，回读断言。
+
+    走引擎公开路径：
+    - `depressionplex.cli.analyze.CSV_FIELDS` + `_row()` 写 CSV（与 CLI 写出的字节完全一致）
+    - `depressionplex.cli.analyze._build_run_json()` 写 run.json（与 CLI 写出的格式一致）
+    这与 test_results_model.test_end_to_end_with_real_engine_output 用的是同一条路。
+    """
     from test_runner import KINDS4, _run, _frame, FPS, N_FRAMES
     from depressionplex import video as V
     from depressionplex.cli import analyze as A
-    import dataclasses
 
     plan, reports, skipped = _run(KINDS4)
     assert reports, f"引擎没有产出任何结果，skipped={skipped}"
@@ -651,39 +673,18 @@ def test_end_to_end_with_real_engine_output() -> None:
         tmp = Path(tmpdir)
         video_path = Path("/tmp/合成.mp4")
 
-        # 写 CSV 和 run.json
+        # 写 CSV：与 test_results_model.test_end_to_end 相同的路
         csv_path = tmp / "合成.csv"
+        with csv_path.open("w", newline="", encoding="utf-8") as f:
+            w_csv = csv.DictWriter(f, fieldnames=A.CSV_FIELDS)
+            w_csv.writeheader()
+            for ch in sorted(reports):
+                w_csv.writerow(A._row(reports[ch]))
+
+        # 写 run.json：用引擎的 _build_run_json（与 test_results_model 一致）
         run_json_path = tmp / "合成_run.json"
-
-        rows = [A._row(r) for r in reports.values()]
-        A._write_csv(csv_path, rows)
-
-        # 构造 run.json（与 test_results_model.test_end_to_end 一致）
-        from depressionplex.assay_core.rules import DEFAULT_RULES
-        chambers_list = [{"index": ch.index} for ch in plan.chambers]
-        not_scored_list = [
-            {"chamber": s.chamber, "reason": s.reason}
-            for s in (skipped or [])
-        ]
-        run_json_data = {
-            "schema_version": "1",
-            "tool_version": "test",
-            "assay": "TST",
-            "scoring_window_s": list(DEFAULT_RULES.scoring_window_s),
-            "rules": {"theta_mob": DEFAULT_RULES.theta_mob},
-            "video": {
-                "name": str(info.path.name),
-                "fps": info.fps,
-                "n_frames": info.n_frames,
-                "frame_count_source": info.frame_count_source,
-            },
-            "calib_indices": [],
-            "chambers": chambers_list,
-            "plan_warnings": [],
-            "chamber_validity": [],
-            "not_scored": not_scored_list,
-        }
-        run_json_path.write_text(json.dumps(run_json_data), encoding="utf-8")
+        run_data = A._build_run_json(info, plan, "TST", skipped, set(reports))
+        run_json_path.write_text(json.dumps(run_data, ensure_ascii=False), encoding="utf-8")
 
         exp = _make_exp(tmp, video_path)
 
@@ -703,7 +704,7 @@ def test_end_to_end_with_real_engine_output() -> None:
             },
         )
 
-        # 导出 xlsx
+        # 导出 xlsx，回读断言
         from desktop.app.services.export_xlsx import render_xlsx
         import openpyxl
         xlsx_path = tmp / "out.xlsx"
@@ -711,13 +712,14 @@ def test_end_to_end_with_real_engine_output() -> None:
 
         wb = openpyxl.load_workbook(str(xlsx_path))
         ws = wb.active
-        # 声明第一行在 xlsx 里
         first_decl_line = report.declaration.splitlines()[0].strip()
-        all_vals = {str(v or "") for row in ws.iter_rows(values_only=True) for v in row if v is not None}
+        all_vals = " ".join(
+            str(v or "") for row in ws.iter_rows(values_only=True) for v in row if v is not None
+        )
         assert first_decl_line in all_vals, "xlsx 里找不到声明第一行"
         wb.close()
 
-        # 导出审计包
+        # 导出审计包，回读断言
         from desktop.app.services.export_audit import render_audit_zip
         audit_path = tmp / "audit.zip"
         render_audit_zip(report, audit_path)
@@ -730,3 +732,78 @@ def test_end_to_end_with_real_engine_output() -> None:
             assert decl_in_zip == report.declaration, (
                 "审计包里的声明与报告层不同"
             )
+
+
+# ---------------------------------------------------------------------------
+# 守卫 13：坏 run.json 上下文字段 → report 印「未知」，不印 0 或确定值（B6）
+# ---------------------------------------------------------------------------
+
+def test_bad_context_fields_print_as_unknown() -> None:
+    """B4 rebase 后：run.json 里 theta_mob / fps / n_frames / scoring_window_s / 等
+    类型错误时，B4 模型层将其降级为 None；report 层必须印「未知」，
+    不许印 0、空白或任何确定的数字。
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        video_path = tmp / "v.mp4"
+        video_path.touch()
+        exp = _make_exp(tmp, video_path)
+
+        # 写一个 theta_mob 是字符串（类型错误）的 run.json
+        bad_run = {
+            "schema_version": "1",
+            "tool_version": "0.1.0",
+            "assay": "TST",
+            "scoring_window_s": "不是列表",     # 错误类型
+            "rules": {"theta_mob": "很大"},      # 错误类型（字符串）
+            "video": {
+                "name": "v.mp4",
+                "fps": "abc",                    # 错误类型
+                "n_frames": [],                  # 错误类型
+                "frame_count_source": "packets",
+            },
+            "calib_indices": [],
+            "chambers": [{"index": 1}],
+            "plan_warnings": [],
+            "chamber_validity": [],
+            "not_scored": [],
+        }
+        (tmp / "v_run.json").write_text(json.dumps(bad_run), encoding="utf-8")
+        # 写一个正常 CSV（否则 load_results 会因为无 CSV 而全部 alarm）
+        _make_csv(tmp / "v.csv", [1])
+
+        results = load_results(exp, 0)
+
+        report = build_report(
+            results=results,
+            calib_mode=Mode.RESEARCH.value,
+            calib_badge=Badge.YELLOW.value,
+            calib_batch=None,
+            g7_threshold=G7_MIN_R,
+            g8_threshold_s=G8_MAX_ABS_BIAS_S,
+        )
+
+        # 断言：context_rows 里 theta_mob 行的值是「未知」
+        theta_rows = [r for r in report.context_rows if "θ_mob" in r.key and "标定来源" not in r.key]
+        assert theta_rows, "上下文表里应有 θ_mob 行"
+        theta_val = theta_rows[0].value
+        assert theta_val == "未知", (
+            f"theta_mob 坏值时应印「未知」，实际是 {theta_val!r}"
+        )
+        # 不许是 0 或 0.0
+        assert theta_val not in ("0", "0.0", ""), (
+            f"theta_mob 不许印成 0 或空：{theta_val!r}"
+        )
+
+        # 断言：计分窗口行的值是「未知」
+        window_rows = [r for r in report.context_rows if "计分窗口" in r.key]
+        assert window_rows, "上下文表里应有计分窗口行"
+        window_val = window_rows[0].value
+        assert window_val == "未知", (
+            f"scoring_window_s 坏值时应印「未知」，实际是 {window_val!r}"
+        )
+
+        # 断言：声明里的 theta_mob 也是「未知」（不印假话）
+        assert "未知" in report.declaration, (
+            "声明里 theta_mob 坏值时应出现「未知」"
+        )

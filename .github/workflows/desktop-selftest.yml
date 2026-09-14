@@ -28,6 +28,8 @@ jobs:
           sudo apt-get install -y libegl1 libxkbcommon0 libdbus-1-3
       - name: Install PySide6
         run: pip install PySide6==6.7.3
+      - name: Install openpyxl (export render step)
+        run: pip install openpyxl==3.1.5
       - name: Test PySide6 offscreen startup
         run: |
           python -c "
@@ -46,3 +48,90 @@ jobs:
       - name: Report desktop status
         if: hashFiles('desktop/main.py') == ''
         run: echo "desktop/ 尚不存在，已跳过自检（B1 未交付）"
+      - name: Export render smoke test (PDF + xlsx offscreen)
+        run: |
+          python -c "
+          import sys, json, csv, tempfile
+          from pathlib import Path
+
+          sys.path.insert(0, '.')
+          sys.path.insert(0, 'tests')
+
+          # 构造最小 Report（不起 QApplication，只测导出层）
+          from desktop.app.services.calibration import Mode, Badge, G7_MIN_R, G8_MAX_ABS_BIAS_S
+          from desktop.app.models.results import ResultsTable, ResultsRow, load_results
+          from desktop.app.models.report import build_report
+          from desktop.app.services.export_xlsx import render_xlsx
+          from desktop.app.services.export_pdf import render_pdf, FontUnavailableError
+
+          with tempfile.TemporaryDirectory() as tmpdir:
+              tmp = Path(tmpdir)
+              video = tmp / 'v.mp4'
+              video.touch()
+              exp = {
+                  'schema_version': '1', 'created_at': '2026-09-14T00:00:00+00:00',
+                  'operator': None, 'note': None, 'assay': 'TST',
+                  'n_chambers': 1, 'calib_frames': 12, 'body_area_prior': None,
+                  'output_dir': str(tmp),
+                  'videos': [{'path': str(video), 'trial_prefix': None}],
+              }
+              run_data = {
+                  'schema_version': '1', 'tool_version': '0.1.0', 'assay': 'TST',
+                  'scoring_window_s': [0, 360], 'rules': {'theta_mob': 0.0175},
+                  'video': {'name': 'v.mp4', 'fps': 30.0, 'n_frames': 10800,
+                            'frame_count_source': 'packets'},
+                  'calib_indices': [], 'chambers': [{'index': 1}],
+                  'plan_warnings': [], 'chamber_validity': [], 'not_scored': [],
+              }
+              (tmp / 'v_run.json').write_text(json.dumps(run_data), encoding='utf-8')
+              from desktop.app.models.results import CSV_FIELDS_EXPECTED
+              with (tmp / 'v.csv').open('w', newline='', encoding='utf-8') as f:
+                  w = csv.DictWriter(f, fieldnames=list(CSV_FIELDS_EXPECTED))
+                  w.writeheader()
+                  w.writerow({
+                      'trial_id': 'v-ch1', 'assay': 'TST', 'fps': '30.0',
+                      'recording_frames': '10800', 'window_frames': '10800',
+                      'scorable_frames': '10000', 'unknown_frames_window': '0',
+                      'validity_status': 'valid', 'occupied_fraction': '0.95',
+                      'scored': 'True', 'immobility_s': '120.5',
+                      'immobility_raw_s': '119.0', 'mobility_s': '239.5',
+                      'mobility_bouts': '3', 'first_mobility_onset_s': '5.0',
+                      'gate_messages': '',
+                  })
+              results = load_results(exp, 0)
+              report = build_report(
+                  results=results, calib_mode=Mode.RESEARCH.value,
+                  calib_badge=Badge.YELLOW.value, calib_batch=None,
+                  g7_threshold=G7_MIN_R, g8_threshold_s=G8_MAX_ABS_BIAS_S,
+              )
+
+              # xlsx
+              xlsx_path = tmp / 'out.xlsx'
+              render_xlsx(report, xlsx_path)
+              assert xlsx_path.exists() and xlsx_path.stat().st_size > 0, 'xlsx 为空'
+              import openpyxl
+              wb = openpyxl.load_workbook(str(xlsx_path))
+              ws = wb.active
+              all_vals = ' '.join(str(v or '') for row in ws.iter_rows(values_only=True) for v in row)
+              decl_first_line = report.declaration.splitlines()[0].strip()
+              assert decl_first_line in all_vals, f'xlsx 里找不到声明第一行: {decl_first_line!r}'
+              wb.close()
+              print(f'xlsx OK: {xlsx_path.stat().st_size} bytes')
+
+              # PDF
+              pdf_path = tmp / 'out.pdf'
+              from PySide6.QtWidgets import QApplication
+              app = QApplication.instance() or QApplication(sys.argv)
+              try:
+                  render_pdf(report, pdf_path)
+              except FontUnavailableError as e:
+                  print(f'WARNING: PDF 字体不可用（CI 字体库），跳过 PDF 断言: {e}')
+              else:
+                  assert pdf_path.exists() and pdf_path.stat().st_size > 0, 'PDF 为空'
+                  header = pdf_path.read_bytes()[:4]
+                  assert header == b'%PDF', f'PDF 头字节不对: {header!r}'
+                  print(f'PDF OK: {pdf_path.stat().st_size} bytes, header={header}')
+              app.quit()
+              print('Export render smoke test PASSED')
+          "
+
