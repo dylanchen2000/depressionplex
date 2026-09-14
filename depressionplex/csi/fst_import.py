@@ -71,7 +71,9 @@ SET_MAGIC = b"FSS3"
 
 #: `.SET` 表头是变长的：偏移 4 是孔位数，紧跟 n_tanks 个 12 字节三元组，
 #: 之后所有字段都相对 `base = 8 + 12 * n_tanks` 定位。见 parse_set 的 docstring。
-SET_MAX_TANKS = 4
+#: 面板与随包样例只出现过 1 和 4 孔。**只用来在报错里提示，不作判据**（DP-106）：
+#: 孔位数在 `.SET` 里是裸 int32，CSI 没写上限，判据是长度 + 4 个哨兵对。
+SET_OBSERVED_TANKS = (1, 4)
 SET_MOTION_REL = 51        # 13 个 Motion 数相对 base 的偏移
 SET_SENTINEL_REL = 123     # 第 1 个哨兵对相对 base 的偏移
 SET_SENTINEL_STRIDE = 276  # 哨兵对之间的间距
@@ -507,10 +509,14 @@ def parse_set(path) -> dict:
     def f32(off: int) -> float:
         return struct.unpack_from("<f", data, off)[0]
 
+    # 上界不由「我们见过几孔」给（DP-106）：`.SET` 表头里孔位数就是一个裸 int32，
+    # CSI 自己没写上限。把 4 当硬上界会让 6 孔的 CSI 装机在我们这里变成"坏文件"。
+    # 真正的判据在下面两条，都比范围强：① 长度够不够放到第 4 个哨兵对；
+    # ② 4 个哨兵对必须逐个落在 base 推出来的偏移上（跨两份文件验证过的强不变量）。
     n_tanks = i32(4)
-    if not 1 <= n_tanks <= SET_MAX_TANKS:
+    if n_tanks < 1:
         raise CsiParseError(
-            f"{path.name}: 孔位数 {n_tanks} 不在 1..{SET_MAX_TANKS}，拒绝按它算 base"
+            f"{path.name}: 孔位数 {n_tanks} < 1，拒绝按它算 base"
         )
     base = 8 + 12 * n_tanks
 
@@ -518,6 +524,8 @@ def parse_set(path) -> dict:
     if len(data) < need:
         raise CsiParseError(
             f"{path.name}: n_tanks={n_tanks} 需要至少 {need} 字节，实际只有 {len(data)}"
+            f"（面板与随包样例只见过 {SET_OBSERVED_TANKS} 孔，但那是观测上界不是格式上界；"
+            f"这里拒的是长度不够，不是孔位数太大）"
         )
 
     # 结构校验：4 个哨兵对必须都在预期位置。这是唯一跨两份文件都验证过的强不变量，

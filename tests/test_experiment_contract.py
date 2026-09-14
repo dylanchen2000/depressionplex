@@ -430,3 +430,32 @@ def test_partial_write_leaves_no_file():
         # 清理干净之后必须能重试成功
         p = experiment.write_experiment_json(plan)
         assert p.exists() and json.loads(p.read_text(encoding="utf-8"))["assay"] == "TST"
+
+
+def test_n_chambers_has_no_upper_bound_in_contract():
+    """守卫 11（DP-106）：契约层对隔间数**只有下界**，没有上界。
+
+    道俊 2026-09-13 定调「chambers 根据 CSI 是否设置」。CSI 两种标定/结果文件
+    都没写上限（`.SET` 孔位数是裸 `int32`，`.CLB` 是 `0x43+count` 一字节或裸 `u32`），
+    所以从 GUI 到契约到 `--chambers` 这一整条链上都不许出现「最多 4」。
+
+    GUI 的 spinbox 上限 100（`pages/new_experiment.py`）是**输入控件的手感**，
+    不是科学上界——它拦的是手滑打出 100000，不是「这台机器不可能有 6 槽」。
+    真正决定切几个隔间的是 `segment.find_chambers` 实测，契约里这个数只是期望值。
+
+    下界要留着：0 个隔间的实验计划写出去，队列会拿它去跑一段谁也没法解释的录像。
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        video = tmp / "v.mp4"
+        video.write_bytes(b"\x00")
+        for n in (1, 4, 6, 8, 16):
+            plan = _minimal_plan(tmp / "out", video)
+            plan.n_chambers = n
+            assert experiment.validate_experiment_plan(plan) is None, \
+                f"{n} 个隔间被契约层拒了——观测上界不是格式上界（DP-106）"
+        for bad in (0, -1):
+            plan = _minimal_plan(tmp / "out", video)
+            plan.n_chambers = bad
+            err = experiment.validate_experiment_plan(plan)
+            assert err and "≥ 1" in err, f"隔间数 {bad} 竟然过了校验：{err!r}"

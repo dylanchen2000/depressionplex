@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import ast
 import dataclasses
 from pathlib import Path
 
@@ -99,3 +100,51 @@ def test_assay_choices_are_the_two_paradigms() -> None:
 def test_missing_video_exits_one_not_zero() -> None:
     """素材不存在 ⇒ 退出码 1。静默返回 0 会让批处理脚本以为这一段跑过了。"""
     assert A.main(["/tmp/绝对不存在的素材-dp053.mp4", "--assay", "TST"]) == 1
+
+
+def test_chambers_has_no_upper_bound() -> None:
+    """`--chambers` **故意没有上界**（DP-106，道俊 2026-09-13「chambers 根据 CSI 是否设置」）。
+
+    CSI 自己两种文件都没写上限：`.SET` 的孔位数是裸 `int32`（只用来算 `base`），
+    `.CLB` 当前格式是 `0x43 + arena_count` 一个字节、旧格式是裸 `u32`
+    （见 `depressionplex/csi/clb.py` 与 `csi/fst_import.py` 的 DP-106 注释）。
+    我们比 CSI 还严 = 6 孔、8 孔的装机在我们这里变成「参数非法」。
+
+    这里还有一层：`--chambers` 传到 `runner.build_plan` 只当**期望值**用——
+    隔间列区间由 `segment.find_chambers` 实测给出，数目不符只出
+    `chamber_count_mismatch` 警告并**按实测的继续**（`runner.py:110`）。
+    所以给它加上界既拒了合法硬件，又管不住真正决定切法的那一端。
+
+    断言用退出码而不是「没抛异常」：`--chambers 8` 必须一路走到「素材不存在」
+    才失败（返回 1）。谁把 `choices=[1,2,3,4]` 加回去，argparse 会先 `SystemExit(2)`，
+    这条立刻红；谁在 `main` 里加 `if args.chambers > 4: return 2`，断言也红。
+    """
+    rc = A.main(["/tmp/绝对不存在的素材-dp106.mp4", "--assay", "TST", "--chambers", "8"])
+    assert rc == 1, (f"--chambers 8 的退出码是 {rc}，期望 1（= 一路走到「素材不存在」才失败）。"
+                     "不是 1 就说明链上有人给隔间数加了上界（DP-106）")
+
+
+def test_no_cli_hardcodes_a_chamber_ceiling() -> None:
+    """静态守：两个 CLI 的 `--chambers` 都不许带 `choices`（DP-106）。
+
+    为什么要静态查一遍：`cli/probe_frames.py` 也有 `--chambers`，但它一上来就读
+    图片文件，没法像 `analyze` 那样用「素材不存在」当哨兵跑一遍。查 AST 的
+    `add_argument` 关键字，比 grep 字符串稳——`choices` 写成变量也照样抓到。
+    """
+    root = Path(__file__).resolve().parents[1] / "depressionplex" / "cli"
+    seen = 0
+    for mod in ("analyze.py", "probe_frames.py"):
+        tree = ast.parse((root / mod).read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            if not (isinstance(node.func, ast.Attribute) and node.func.attr == "add_argument"):
+                continue
+            if not (node.args and isinstance(node.args[0], ast.Constant)
+                    and node.args[0].value == "--chambers"):
+                continue
+            seen += 1
+            kw = {k.arg for k in node.keywords}
+            assert "choices" not in kw, \
+                f"{mod}:{node.lineno} 给 --chambers 加了 choices，把观测上界当成了格式上界（DP-106）"
+    assert seen == 2, f"只找到 {seen} 处 --chambers 定义，期望 2（analyze + probe_frames）"

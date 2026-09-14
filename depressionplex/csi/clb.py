@@ -45,30 +45,52 @@ CLB_CURRENT_MARKER = b"\n\n"
 CLB_HEADER_CURRENT = 3
 CLB_HEADER_LEGACY = 4
 
-#: 槽位数的合法范围。软件面板最多 4 槽（`SET_MAX_TANKS` 同）。
-CLB_MAX_ARENAS = 4
+#: 槽位数的上界**由格式自己给**，不由「我们见过几槽」给（DP-106，道俊 2026-09-13
+#: 定调「chambers 根据 CSI 是否设置」）。CSI 的两种 `.CLB` 头都没有写上限：
+#: 当前格式是 `0x43 + arena_count` 一个字节，结构上到 `0xFF` 为止；旧格式是裸 `u32`。
+#: 所以这里只保留**结构上界**，真正的判据是 `b"\n\n"` 标记 + 长度精确闭合
+#: （`头 + count × 76 == 文件长度`）。原来写死的 4 是「随包样例只有 1 和 4」，
+#: 那是观测上界不是格式上界，比 CSI 自己还严 ⇒ 6 槽的 CSI 装机会被我们当坏文件拒掉。
+CLB_MAX_ARENAS_CURRENT = 0xFF - CLB_CURRENT_FIRST_BASE  # 188
+
+#: 面板与手册里只出现过 1 和 4 槽（`arena1..4`）。**只用来在报错里提示，不作判据。**
+CLB_OBSERVED_ARENAS = (1, 4)
 
 
 class ClbParseError(Exception):
     """`.CLB` 结构假设被打破。**宁可大声失败，也不许猜着往下解析。**"""
 
 
+def _legacy_max_arenas(n_bytes: int) -> int:
+    """旧格式（4 字节头）在这个文件长度下最多能装几槽。装不下一槽就是 0。"""
+    return max(0, (n_bytes - CLB_HEADER_LEGACY) // CLB_BYTES_PER_ARENA)
+
+
 def _read_header(data: bytes, name: str) -> tuple[str, int, int]:
-    """认头，返回 (格式名, arena_count, 头长度)。两种头都认不出就抛。"""
+    """认头，返回 (格式名, arena_count, 头长度)。两种头都认不出就抛。
+
+    上界是结构上界（见 `CLB_MAX_ARENAS_CURRENT`），不是「见过的槽数」。
+    真正把两种头分开的是 `b"\\n\\n"` 标记与调用方的长度闭合检查：
+    当前格式 1 槽的文件读成旧格式时 u32 = 0x0A0A44 + x·2²⁴，长度绝不可能闭合；
+    旧格式 1 槽的文件读成当前格式时 `data[0] = 0x01 < 0x43`，count 为负直接落空。
+    """
     if len(data) >= CLB_HEADER_CURRENT and data[1:3] == CLB_CURRENT_MARKER:
         count = data[0] - CLB_CURRENT_FIRST_BASE
-        if 1 <= count <= CLB_MAX_ARENAS:
+        if 1 <= count <= CLB_MAX_ARENAS_CURRENT:
             return "current", count, CLB_HEADER_CURRENT
 
     if len(data) >= CLB_HEADER_LEGACY:
         count = struct.unpack_from("<I", data, 0)[0]
-        if 1 <= count <= CLB_MAX_ARENAS:
+        if 1 <= count <= _legacy_max_arenas(len(data)):
             return "legacy", count, CLB_HEADER_LEGACY
 
     raise ClbParseError(
         f"{name}: 两种 .CLB 头都不认（首 4 字节 {data[:4]!r}）。"
-        f"当前格式要求 data[0]-0x43 落在 1..{CLB_MAX_ARENAS} 且 data[1:3]==b'\\n\\n'；"
-        f"旧格式要求 u32 槽位数落在 1..{CLB_MAX_ARENAS}。"
+        f"当前格式要求 data[0]-0x43 落在 1..{CLB_MAX_ARENAS_CURRENT} 且 data[1:3]==b'\\n\\n'；"
+        f"旧格式要求 u32 槽位数落在 1..{_legacy_max_arenas(len(data))}"
+        f"（按 {len(data)} 字节的文件长度算出来的结构上界）。"
+        f"随包样例只见过 {CLB_OBSERVED_ARENAS} 槽，但那是观测上界，不是格式上界——"
+        f"不拿它拒文件。"
         f"159 字节的 `Standard.CLB` 是另一种**文本**身体/笼位标定（逆向报告 §7.3），"
         f"不适用本结构，不许套进来。"
     )
@@ -84,7 +106,7 @@ def parse_clb_struct(path) -> dict:
           "sha256": 文件哈希,
           "header": "current" | "legacy",
           "header_bytes": 3 | 4,
-          "arena_count": 1..4,
+          "arena_count": ≥1（上界由格式与文件长度给，不由「见过几槽」给，见 DP-106）,
           "arenas": [{"index": 1..n, "words": [19 个 int32]}, ...],
         }
 

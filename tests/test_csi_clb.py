@@ -108,12 +108,60 @@ def test_length_must_close_exactly() -> None:
         _expect(ClbParseError, parse_clb_struct, _write(raw[:-1], d, "short.CLB"))
 
 
-def test_arena_count_out_of_range_rejected() -> None:
-    """旧格式头里槽位数为 0 或 5 时不许当真（0 会解出 0 槽，5 越界）。"""
+def test_arena_count_zero_or_non_closing_rejected() -> None:
+    """槽位数为 0 不许当真；头说的槽数与文件长度不闭合也不许当真。
+
+    **2026-09-13（DP-106）改了这条的靶子。** 原来它顺带断言"5 槽越界要拒"——
+    那个"越界"来自我们写死的 `CLB_MAX_ARENAS = 4`，而 4 是**随包样例只有 1 和 4**
+    这个观测事实，不是格式事实：CSI 当前格式的槽数是 `0x43 + count` 一个字节，
+    旧格式是裸 `u32`，**两种头都没有写上限**。拿观测上界拒文件 = 比 CSI 自己还严
+    ⇒ 6 槽的 CSI 装机在我们这里会变成"坏文件"。现在只拒两样：0 槽、长度不闭合。
+    """
     with tempfile.TemporaryDirectory() as d:
-        for count in (0, 5):
-            data = struct.pack("<I", count) + b"\x00" * (max(count, 1) * CLB_BYTES_PER_ARENA)
-            _expect(ClbParseError, parse_clb_struct, _write(data, d, f"n{count}.CLB"))
+        # 0 槽：解出 0 槽等于"解析成功但什么都没有"
+        zero = struct.pack("<I", 0) + b"\x00" * CLB_BYTES_PER_ARENA
+        _expect(ClbParseError, parse_clb_struct, _write(zero, d, "n0.CLB"))
+        # 头说 5 槽、身体只有 4 槽 ⇒ 长度不闭合（这才是真正的判据）
+        lying = struct.pack("<I", 5) + b"\x00" * (4 * CLB_BYTES_PER_ARENA)
+        _expect(ClbParseError, parse_clb_struct, _write(lying, d, "lie.CLB"))
+        # 反过来也拒：身体 5 槽、头说 4 槽
+        lying2 = struct.pack("<I", 4) + b"\x00" * (5 * CLB_BYTES_PER_ARENA)
+        _expect(ClbParseError, parse_clb_struct, _write(lying2, d, "lie2.CLB"))
+
+
+def test_more_than_four_arenas_accepted() -> None:
+    """**槽位数上界由格式给，不由"我们见过几槽"给**（DP-106，道俊 2026-09-13 定调）。
+
+    两种头各造一份 6 槽文件，都必须解得出来，且解析无损。
+    这条测试的作用是：谁再把 `1..4` 写回去，它立刻变红。
+    """
+    with tempfile.TemporaryDirectory() as d:
+        for header, head_bytes in (("current", 3), ("legacy", 4)):
+            data = _synth(header, 6)
+            assert len(data) == head_bytes + 6 * CLB_BYTES_PER_ARENA
+            s = parse_clb_struct(_write(data, d, f"{header}6.CLB"))
+            assert s["header"] == header
+            assert s["arena_count"] == 6
+            assert [a["index"] for a in s["arenas"]] == [1, 2, 3, 4, 5, 6]
+            assert serialize_clb_struct(s) == data, "6 槽也必须无损"
+
+
+def test_observed_arena_counts_are_not_a_guard() -> None:
+    """`CLB_OBSERVED_ARENAS` 只许出现在报错文案里，**不许出现在任何比较里**。
+
+    查的是 AST 的 `Compare` 节点，不是字符串——查字符串的守卫会被
+    `if count in CLB_OBSERVED_ARENAS:` 之外的任何写法绕过，等于装饰。
+    """
+    src = (REPO / "depressionplex" / "csi" / "clb.py").read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Compare):
+            for sub in [node.left, *node.comparators]:
+                for name in ast.walk(sub):
+                    if isinstance(name, ast.Name) and name.id == "CLB_OBSERVED_ARENAS":
+                        raise AssertionError(
+                            f"第 {name.lineno} 行把观测上界当判据用了——"
+                            "见过几槽不是格式上限（DP-106）")
 
 
 def test_text_standard_clb_is_rejected_not_misparsed() -> None:

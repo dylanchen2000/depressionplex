@@ -25,6 +25,9 @@ from depressionplex.csi.fst_import import (
     CSI_TANK_TO_CHAMBER,
     RECORDING_ALIASES,
     SET_MAGIC,
+    SET_N_SENTINELS,
+    SET_SENTINEL_REL,
+    SET_SENTINEL_STRIDE,
     CsiEvent,
     CsiParseError,
     CsiTank,
@@ -466,7 +469,12 @@ def test_set_broken_sentinel_raises() -> None:
 
 
 def test_set_bad_tank_count_raises() -> None:
-    """孔位数越界要拦住：0 和 99 都不许拿来算 base。"""
+    """孔位数不合法要拦住：0 / −1 拒在"< 1"，99 拒在**长度不够**。
+
+    **2026-09-13（DP-106）改了 99 那一项的理由**：原来它被 `n_tanks ≤ 4` 拦住，
+    现在拦它的是"1611 字节的文件放不下 base=1196 推出来的第 4 个哨兵对"。
+    换句话说，拒的是文件本身不自洽，不是"孔位数比我们见过的多"。
+    """
     good = (FIX / "10mg 2周.SET").read_bytes()
     for bad in (0, -1, 99):
         data = bytearray(good)
@@ -475,6 +483,49 @@ def test_set_bad_tank_count_raises() -> None:
             p = Path(d) / f"nt{bad}.SET"
             p.write_bytes(bytes(data))
             _expect_raise(parse_set, p)
+
+
+def _synth_set(n_tanks: int) -> bytes:
+    """按 `parse_set` 的布局造一份最小 `.SET`：只填 magic、孔位数、4 个哨兵对。
+
+    这个合成器**必须先在真夹具上验过**才能用来断言 6 孔（见下面的测试第一步），
+    否则它证明的只是"我按自己的想象造的文件能被我自己的解析器读"。
+    """
+    base = 8 + 12 * n_tanks
+    need = base + SET_SENTINEL_REL + SET_SENTINEL_STRIDE * (SET_N_SENTINELS - 1) + 8
+    data = bytearray(need)
+    data[0:4] = SET_MAGIC
+    data[4:8] = struct.pack("<i", n_tanks)
+    for k in range(SET_N_SENTINELS):
+        off = base + SET_SENTINEL_REL + SET_SENTINEL_STRIDE * k
+        data[off:off + 4] = struct.pack("<f", -1.0)
+        data[off + 4:off + 8] = struct.pack("<i", -1)
+    return bytes(data)
+
+
+def test_more_than_four_tanks_accepted() -> None:
+    """**孔位数上界由格式给，不由"我们见过几孔"给**（DP-106，道俊 2026-09-13 定调）。
+
+    `.SET` 表头里孔位数就是偏移 4 的一个 int32，CSI 自己没写上限；把 4 当硬上界
+    会让 6 孔的 CSI 装机在我们这里变成"坏文件"。真正的判据是长度 + 4 个哨兵对，
+    两条都比范围强，而且都另有测试守着（`test_set_broken_sentinel_raises`）。
+
+    谁把 `≤ 4` 写回去，这条立刻变红。
+    """
+    # 第一步：合成器先对着真夹具校准——同样的 n_tanks 必须推出同样的 base
+    for name, n in (("10mg 2周.SET", 4), ("正常1-4对照更改.SET", 1)):
+        real = parse_set(FIX / name)
+        assert real["n_tanks"] == n
+        assert real["base"] == 8 + 12 * n, (name, real["base"])
+    # 第二步：6 孔、8 孔都必须解得出来，且 base 与孔位三元组个数都跟着孔位数走
+    with tempfile.TemporaryDirectory() as d:
+        for n in (6, 8):
+            p = Path(d) / f"n{n}.SET"
+            p.write_bytes(_synth_set(n))
+            s = parse_set(p)
+            assert s["n_tanks"] == n, (n, s["n_tanks"])
+            assert s["base"] == 8 + 12 * n, (n, s["base"])
+            assert len(s["tank_triples"]) == n, (n, len(s["tank_triples"]))
 
 
 # ---------------------------------------------------------------------------
