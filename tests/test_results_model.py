@@ -66,16 +66,7 @@ def test_csv_header_mismatch_rejected():
 
         # 准备一个合法的 run.json
         run_json = tmp / "v_run.json"
-        run_json.write_text(json.dumps({
-            "schema_version": "1",
-            "tool_version": "0.1.0",
-            "assay": "TST",
-            "scoring_window_s": [0, 360],
-            "rules": {"theta_mob": 0.0175},
-            "video": {"name": "v.mp4", "fps": 30.0, "n_frames": 100},
-            "not_scored": [],
-            "chamber_validity": [],
-        }), encoding="utf-8")
+        run_json.write_text(json.dumps(_make_run_json([1])), encoding="utf-8")
 
         csv_path = tmp / "v.csv"
 
@@ -154,16 +145,7 @@ def test_blank_values_not_turned_into_zero():
 
         # 写一个合法的 run.json
         run_json = tmp / "v_run.json"
-        run_json.write_text(json.dumps({
-            "schema_version": "1",
-            "tool_version": "0.1.0",
-            "assay": "TST",
-            "scoring_window_s": [0, 360],
-            "rules": {"theta_mob": 0.0175},
-            "video": {"name": "v.mp4", "fps": 30.0, "n_frames": 100},
-            "not_scored": [],
-            "chamber_validity": [],
-        }), encoding="utf-8")
+        run_json.write_text(json.dumps(_make_run_json([1])), encoding="utf-8")
 
         # 写一个 CSV，immobility_s 是空字符串
         csv_path = tmp / "v.csv"
@@ -221,17 +203,12 @@ def test_alarm_rows_must_not_disappear():
 
         # 写 run.json，包含未产出数字的隔间
         run_json = tmp / "v_run.json"
-        run_json.write_text(json.dumps({
-            "schema_version": "1",
-            "tool_version": "0.1.0",
-            "assay": "TST",
-            "scoring_window_s": [0, 360],
-            "rules": {"theta_mob": 0.0175},
-            "video": {"name": "v.mp4", "fps": 30.0, "n_frames": 100},
-            "not_scored": [
+        run_json.write_text(json.dumps(_make_run_json(
+            chambers=[1, 2, 3, 4],
+            not_scored=[
                 {"chamber": 2, "reason": "面积判据不通过"},
             ],
-            "chamber_validity": [
+            chamber_validity=[
                 {
                     "chamber": 4,
                     "status": "excluded",
@@ -240,7 +217,7 @@ def test_alarm_rows_must_not_disappear():
                     "note": "不可分割帧过多",
                 },
             ],
-        }), encoding="utf-8")
+        )), encoding="utf-8")
 
         # 写 CSV，只有 ch1 和 ch3
         csv_path = tmp / "v.csv"
@@ -347,19 +324,13 @@ def test_missing_files_behavior():
 
         # 情况3：run.json 在、CSV 不在
         csv_path.unlink()
-        run_json_path.write_text(json.dumps({
-            "schema_version": "1",
-            "tool_version": "0.1.0",
-            "assay": "TST",
-            "scoring_window_s": [0, 360],
-            "rules": {"theta_mob": 0.0175},
-            "video": {"name": "v.mp4", "fps": 30.0, "n_frames": 100},
-            "not_scored": [
+        run_json_path.write_text(json.dumps(_make_run_json(
+            chambers=[1, 2],
+            not_scored=[
                 {"chamber": 1, "reason": "解码失败"},
                 {"chamber": 2, "reason": "解码失败"},
             ],
-            "chamber_validity": [],
-        }), encoding="utf-8")
+        )), encoding="utf-8")
 
         table = results.load_results(exp, 0)
         assert table.csv_missing is True
@@ -509,3 +480,518 @@ def test_end_to_end_with_real_engine_output():
         assert table.tool_version is not None
         assert table.theta_mob is not None
         assert table.theta_mob == 0.0175  # FROZEN provisional
+
+
+# ========================================================================
+# 复核后新增的8条守卫（F1-F8）
+# ========================================================================
+
+
+def _make_run_json(chambers: list[int], not_scored: list[dict] | None = None,
+                   chamber_validity: list[dict] | None = None) -> dict:
+    """创建一个合法的 run.json 对象（包含所有必写键）。"""
+    return {
+        "schema_version": "1",
+        "tool_version": "0.1.0",
+        "assay": "TST",
+        "scoring_window_s": [0, 360],
+        "rules": {"theta_mob": 0.0175},
+        "video": {
+            "name": "test.mp4",
+            "fps": 30.0,
+            "n_frames": 10800,
+            "frame_count_source": "packets",
+        },
+        "calib_indices": [0, 100, 200],
+        "chambers": [{"index": ch} for ch in chambers],
+        "plan_warnings": [],
+        "chamber_validity": chamber_validity or [],
+        "not_scored": not_scored or [],
+    }
+
+
+def test_f1_chamber_roster_from_runjson():
+    """守卫 F1：名册来自 run.json chambers[].index。
+
+    run.json 名册 4 个、CSV 只有 ch1/ch3、两个报警源都为空
+    ⇒ 断言 4 行、ch2/ch4 是 alarm 且 reason 里点出「名册里有、产出里没有」。
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        exp = _make_exp(tmp, tmp / "v.mp4")
+
+        # 写 run.json，名册 4 个，报警源都为空
+        run_json = tmp / "v_run.json"
+        run_json.write_text(json.dumps(_make_run_json(
+            chambers=[1, 2, 3, 4],
+            not_scored=[],
+            chamber_validity=[],
+        )), encoding="utf-8")
+
+        # 写 CSV，只有 ch1 和 ch3
+        csv_path = tmp / "v.csv"
+        with csv_path.open("w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=results.CSV_FIELDS_EXPECTED)
+            writer.writeheader()
+            for ch in [1, 3]:
+                writer.writerow({
+                    "trial_id": f"v-ch{ch}",
+                    "assay": "TST",
+                    "fps": "30.0",
+                    "recording_frames": "10800",
+                    "window_frames": "10800",
+                    "scorable_frames": "10000",
+                    "unknown_frames_window": "800",
+                    "validity_status": "valid",
+                    "occupied_fraction": "0.98",
+                    "scored": "True",
+                    "immobility_s": "100.0",
+                    "immobility_raw_s": "100.0",
+                    "mobility_s": "260.0",
+                    "mobility_bouts": "50",
+                    "first_mobility_onset_s": "1.0",
+                    "gate_messages": "",
+                })
+
+        table = results.load_results(exp, 0)
+
+        # 断言：必须有 4 行
+        assert len(table.rows) == 4, f"期望 4 行（名册），实际 {len(table.rows)} 行"
+
+        # 按 chamber 分组
+        chambers_dict = {r.chamber: r for r in table.rows}
+
+        # ch1 和 ch3 是 scored 行
+        assert 1 in chambers_dict and chambers_dict[1].kind == "scored"
+        assert 3 in chambers_dict and chambers_dict[3].kind == "scored"
+
+        # ch2 和 ch4 是 alarm 行，且 reason 里点出「名册里有、产出里没有」
+        assert 2 in chambers_dict, "ch2 不应该消失"
+        assert chambers_dict[2].kind == "alarm"
+        assert "名册里有" in chambers_dict[2].reason
+        assert "产出" in chambers_dict[2].reason or "报警" in chambers_dict[2].reason
+
+        assert 4 in chambers_dict, "ch4 不应该消失"
+        assert chambers_dict[4].kind == "alarm"
+        assert "名册里有" in chambers_dict[4].reason
+
+
+def test_f2_no_csv_roster_only():
+    """守卫 F2：无 CSV + run.json 名册 4 个 + 报警源全空 ⇒ 4 行 alarm。
+
+    这是引擎退出码 2（一个数字都没产出）的样子，用户最需要解释。
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        exp = _make_exp(tmp, tmp / "v.mp4")
+
+        # 只写 run.json，名册 4 个，报警源都为空
+        run_json = tmp / "v_run.json"
+        run_json.write_text(json.dumps(_make_run_json(
+            chambers=[1, 2, 3, 4],
+            not_scored=[],
+            chamber_validity=[],
+        )), encoding="utf-8")
+
+        # 不写 CSV
+
+        table = results.load_results(exp, 0)
+
+        # 断言：必须有 4 行，全是 alarm
+        assert len(table.rows) == 4, f"期望 4 行，实际 {len(table.rows)} 行"
+        assert all(r.kind == "alarm" for r in table.rows), "所有行都应该是 alarm"
+
+
+def test_f3_scored_false_becomes_alarm():
+    """守卫 F3：CSV 一行 scored=False ⇒ kind="alarm" 且 reason 含 gate_messages。
+
+    同时断言这一行的 16 个字段还在。
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        exp = _make_exp(tmp, tmp / "v.mp4")
+
+        # 写 run.json
+        run_json = tmp / "v_run.json"
+        run_json.write_text(json.dumps(_make_run_json(
+            chambers=[1],
+        )), encoding="utf-8")
+
+        # 写 CSV，scored=False
+        csv_path = tmp / "v.csv"
+        with csv_path.open("w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=results.CSV_FIELDS_EXPECTED)
+            writer.writeheader()
+            writer.writerow({
+                "trial_id": "v-ch1",
+                "assay": "TST",
+                "fps": "30.0",
+                "recording_frames": "10800",
+                "window_frames": "10800",
+                "scorable_frames": "10000",
+                "unknown_frames_window": "800",
+                "validity_status": "excluded",
+                "occupied_fraction": "0.10",
+                "scored": "False",
+                "immobility_s": "",
+                "immobility_raw_s": "",
+                "mobility_s": "",
+                "mobility_bouts": "",
+                "first_mobility_onset_s": "",
+                "gate_messages": "排除态不放行计分",
+            })
+
+        table = results.load_results(exp, 0)
+
+        assert len(table.rows) == 1
+        row = table.rows[0]
+
+        # 断言：kind="alarm"
+        assert row.kind == "alarm", f"scored=False 应该变成 alarm，实际 {row.kind}"
+
+        # 断言：reason 含 gate_messages
+        assert row.reason is not None
+        assert "排除态" in row.reason or "不放行" in row.reason
+
+        # 断言：16 个字段还在
+        assert row.assay == "TST"
+        assert row.fps == "30.0"
+        assert row.scored == "False"
+        assert row.gate_messages == "排除态不放行计分"
+
+
+def test_f4_trial_prefix_single_source():
+    """守卫 F4：trial_prefix 与文件名不同，跑真引擎，断言 trial_id 前缀相同。
+
+    也测试 CSV 里出现名册外隔间时的 trial_id 前缀。
+    """
+    from test_runner import MOVE, _run
+    from depressionplex import video as V
+    from test_runner import FPS, N_FRAMES, _frame
+    from desktop.app.services.engine import trial_prefix as get_trial_prefix
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+
+        # 用真引擎跑
+        plan, reports, skipped = _run((MOVE, MOVE))
+
+        # 构造 experiment，指定 trial_prefix
+        exp = _make_exp(tmp, tmp / "synthetic.mp4", trial_prefix="TEST-PREFIX")
+
+        h, w = _frame((MOVE, MOVE), 0).shape
+        info = V.VideoInfo(
+            path=Path(tmp / "synthetic.mp4"),
+            fps=FPS,
+            n_frames=N_FRAMES,
+            width=w,
+            height=h,
+            frame_count_source="packets",
+        )
+
+        # 写 CSV
+        csv_path = tmp / "synthetic.csv"
+        with csv_path.open("w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=analyze.CSV_FIELDS)
+            writer.writeheader()
+            for ch in sorted(reports):
+                writer.writerow(analyze._row(reports[ch]))
+
+        # 写 run.json
+        run_json_path = tmp / "synthetic_run.json"
+        run_data = analyze._build_run_json(info, plan, "TST", skipped, set(reports))
+        with run_json_path.open("w", encoding="utf-8") as f:
+            json.dump(run_data, f, indent=2)
+
+        # 加载结果
+        table = results.load_results(exp, 0)
+
+        # 获取期望的前缀
+        expected_prefix = get_trial_prefix(exp, 0)
+        assert expected_prefix == "TEST-PREFIX"
+
+        # 断言：所有行的 trial_id 前缀相同
+        for row in table.rows:
+            assert row.trial_id.startswith("TEST-PREFIX-ch"), (
+                f"trial_id 前缀不对：{row.trial_id}，期望 TEST-PREFIX-chN"
+            )
+
+
+def test_f4_no_stem_literal_in_results():
+    """守卫 F4b：models/results.py 里不许出现 .stem。"""
+    results_py = ROOT / "desktop/app/models/results.py"
+    tree = ast.parse(results_py.read_text(encoding="utf-8"))
+
+    violations = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute) and node.attr == "stem":
+            violations.append(f"行 {node.lineno}: .stem")
+
+    assert not violations, (
+        f"results.py 里不许出现 .stem（前缀派生只许一份，在 engine.py）：\n"
+        + "\n".join(violations)
+    )
+
+
+def test_f5_top_level_required_keys():
+    """守卫 F5：run.json 顶层必写键，缺一个就 ResultsError。
+
+    清单从真引擎产出的 run.json 里取顶层键名生成（不许手写）。
+    """
+    from test_runner import MOVE, _run
+    from depressionplex import video as V
+    from test_runner import FPS, N_FRAMES, _frame
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+
+        # 用真引擎跑，获取真实的 run.json
+        plan, reports, skipped = _run((MOVE,))
+        h, w = _frame((MOVE,), 0).shape
+        info = V.VideoInfo(
+            path=Path(tmp / "real.mp4"),
+            fps=FPS,
+            n_frames=N_FRAMES,
+            width=w,
+            height=h,
+            frame_count_source="packets",
+        )
+
+        # 生成真实的 run.json
+        run_data = analyze._build_run_json(info, plan, "TST", skipped, set(reports))
+
+        # 提取顶层键名（排除 schema_version，因为它有单独的检查）
+        top_keys = [k for k in run_data.keys() if k != "schema_version"]
+
+        # 对每个键，删掉后测试是否抛错
+        for missing_key in top_keys:
+            exp = _make_exp(tmp, tmp / "test.mp4")
+
+            # 写 run.json，删掉一个键
+            run_json_path = tmp / "test_run.json"
+            broken_data = {k: v for k, v in run_data.items() if k != missing_key}
+            with run_json_path.open("w", encoding="utf-8") as f:
+                json.dump(broken_data, f)
+
+            # 写一个空 CSV
+            csv_path = tmp / "test.csv"
+            with csv_path.open("w", newline="", encoding="utf-8") as f:
+                writer = csv.DictWriter(f, fieldnames=results.CSV_FIELDS_EXPECTED)
+                writer.writeheader()
+
+            # 断言：必须抛 ResultsError 且错误里含键名
+            try:
+                results.load_results(exp, 0)
+                assert False, f"删掉 '{missing_key}' 应该抛 ResultsError"
+            except results.ResultsError as e:
+                assert missing_key in str(e), (
+                    f"错误信息里应该包含缺失的键名 '{missing_key}'：{e}"
+                )
+
+
+def test_f5_nested_required_keys():
+    """守卫 F5b：run.json 嵌套必写键，缺一个就 ResultsError。"""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        exp = _make_exp(tmp, tmp / "v.mp4")
+
+        # 写 CSV
+        csv_path = tmp / "v.csv"
+        with csv_path.open("w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=results.CSV_FIELDS_EXPECTED)
+            writer.writeheader()
+
+        # 测试 rules.theta_mob 缺失
+        run_json = tmp / "v_run.json"
+        data = _make_run_json([1])
+        del data["rules"]["theta_mob"]
+        run_json.write_text(json.dumps(data), encoding="utf-8")
+
+        try:
+            results.load_results(exp, 0)
+            assert False, "rules 缺 theta_mob 应该抛错"
+        except results.ResultsError as e:
+            assert "theta_mob" in str(e)
+
+        # 测试 video.fps 缺失
+        data = _make_run_json([1])
+        del data["video"]["fps"]
+        run_json.write_text(json.dumps(data), encoding="utf-8")
+
+        try:
+            results.load_results(exp, 0)
+            assert False, "video 缺 fps 应该抛错"
+        except results.ResultsError as e:
+            assert "fps" in str(e)
+
+        # 测试 not_scored[].chamber 缺失
+        data = _make_run_json([1], not_scored=[{"reason": "test"}])
+        run_json.write_text(json.dumps(data), encoding="utf-8")
+
+        try:
+            results.load_results(exp, 0)
+            assert False, "not_scored[] 缺 chamber 应该抛错"
+        except results.ResultsError as e:
+            assert "chamber" in str(e)
+
+
+def test_f6_bad_trial_id_raises():
+    """守卫 F6：认不出的 trial_id ⇒ ResultsError，错误里含原始字符串。"""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        exp = _make_exp(tmp, tmp / "v.mp4")
+
+        # 写 run.json
+        run_json = tmp / "v_run.json"
+        run_json.write_text(json.dumps(_make_run_json([1])), encoding="utf-8")
+
+        # 写 CSV，trial_id 格式错误
+        csv_path = tmp / "v.csv"
+        with csv_path.open("w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=results.CSV_FIELDS_EXPECTED)
+            writer.writeheader()
+            writer.writerow({
+                "trial_id": "被改坏的名字",  # 没有 -ch
+                "assay": "TST",
+                "fps": "30.0",
+                "recording_frames": "100",
+                "window_frames": "100",
+                "scorable_frames": "95",
+                "unknown_frames_window": "5",
+                "validity_status": "valid",
+                "occupied_fraction": "0.98",
+                "scored": "True",
+                "immobility_s": "10.0",
+                "immobility_raw_s": "10.0",
+                "mobility_s": "90.0",
+                "mobility_bouts": "10",
+                "first_mobility_onset_s": "1.0",
+                "gate_messages": "",
+            })
+
+        try:
+            results.load_results(exp, 0)
+            assert False, "坏 trial_id 应该抛 ResultsError"
+        except results.ResultsError as e:
+            assert "被改坏的名字" in str(e), "错误里应该含原始 trial_id"
+            assert "trial_id" in str(e).lower()
+
+
+def test_f7_chamber_none_for_non_chamber_alarms():
+    """守卫 F7：非隔间级的报警行 chamber=None，且任何行的 chamber ≥ 1 或 None。"""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        exp = _make_exp(tmp, tmp / "v.mp4")
+
+        # 只写 CSV，不写 run.json
+        csv_path = tmp / "v.csv"
+        with csv_path.open("w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=results.CSV_FIELDS_EXPECTED)
+            writer.writeheader()
+            writer.writerow({
+                "trial_id": "v-ch1",
+                "assay": "TST",
+                "fps": "30.0",
+                "recording_frames": "100",
+                "window_frames": "100",
+                "scorable_frames": "95",
+                "unknown_frames_window": "5",
+                "validity_status": "valid",
+                "occupied_fraction": "0.98",
+                "scored": "True",
+                "immobility_s": "10.0",
+                "immobility_raw_s": "10.0",
+                "mobility_s": "90.0",
+                "mobility_bouts": "10",
+                "first_mobility_onset_s": "1.0",
+                "gate_messages": "",
+            })
+
+        table = results.load_results(exp, 0)
+
+        # 找到 run.json 缺失的警告行
+        none_chambers = [r for r in table.rows if r.chamber is None]
+        assert len(none_chambers) >= 1, "应该有 chamber=None 的警告行"
+
+        # 断言：所有行的 chamber 要么是 None，要么 ≥ 1（不许有 0 或负数）
+        for row in table.rows:
+            if row.chamber is not None:
+                assert row.chamber >= 1, (
+                    f"chamber 必须 ≥ 1 或 None，不许是 {row.chamber}"
+                )
+
+
+def test_f8_denominators_回算():
+    """守卫 F8：拿真引擎产出回算，断言公式成立。
+
+    window_frames/fps − mobility_s ≈ immobility_s（3 位小数容差）
+    同时断言回算用到的每一列都在 DENOMINATORS 里。
+    """
+    from test_runner import MOVE, STILL, KINDS4, _run
+    from depressionplex import video as V
+    from test_runner import FPS, N_FRAMES, _frame
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+
+        # 用真引擎跑
+        plan, reports, skipped = _run(KINDS4)
+
+        exp = _make_exp(tmp, tmp / "synthetic.mp4")
+
+        h, w = _frame(KINDS4, 0).shape
+        info = V.VideoInfo(
+            path=Path(tmp / "synthetic.mp4"),
+            fps=FPS,
+            n_frames=N_FRAMES,
+            width=w,
+            height=h,
+            frame_count_source="packets",
+        )
+
+        # 写 CSV
+        csv_path = tmp / "synthetic.csv"
+        with csv_path.open("w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=analyze.CSV_FIELDS)
+            writer.writeheader()
+            for ch in sorted(reports):
+                writer.writerow(analyze._row(reports[ch]))
+
+        # 写 run.json
+        run_json_path = tmp / "synthetic_run.json"
+        run_data = analyze._build_run_json(info, plan, "TST", skipped, set(reports))
+        with run_json_path.open("w", encoding="utf-8") as f:
+            json.dump(run_data, f, indent=2)
+
+        # 加载结果
+        table = results.load_results(exp, 0)
+
+        # 找一个 scored 行来回算
+        scored_rows = [r for r in table.rows if r.kind == "scored" and r.immobility_s]
+        assert len(scored_rows) > 0, "需要至少一个有数字的 scored 行"
+
+        for row in scored_rows:
+            # 回算公式：window_frames/fps − mobility_s ≈ immobility_s
+            # 注意：这里只在测试里做回算，模型层一个运算符都没有
+
+            window_frames = float(row.window_frames)
+            fps = float(row.fps)
+            mobility_s = float(row.mobility_s) if row.mobility_s else 0.0
+            immobility_s = float(row.immobility_s)
+
+            window_s = window_frames / fps
+            calculated_immobility = window_s - mobility_s
+
+            # 3 位小数容差
+            assert abs(calculated_immobility - immobility_s) < 0.001, (
+                f"回算不符：window_frames/fps - mobility_s = "
+                f"{window_frames}/{fps} - {mobility_s} = {calculated_immobility:.3f}，"
+                f"但 immobility_s = {immobility_s}"
+            )
+
+            # 断言：回算用到的每一列都在 DENOMINATORS["immobility_s"] 里
+            used_columns = {"window_frames", "fps"}  # mobility_s 不算，它是被减数
+            denominators_set = set(results.DENOMINATORS["immobility_s"])
+            assert used_columns.issubset(denominators_set), (
+                f"回算用到的列 {used_columns} 必须都在 DENOMINATORS['immobility_s'] 里：{denominators_set}"
+            )

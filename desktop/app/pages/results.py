@@ -196,6 +196,9 @@ class ResultsPage(QWidget):
             if seconds_field in DENOMINATORS:
                 # 秒数列
                 header = seconds_field.replace("_", " ").title()
+                # first_mobility_onset_s 需要特殊标注
+                if seconds_field == "first_mobility_onset_s":
+                    header = "First Mobility Onset S (相对计分窗起点)"
                 columns.append({"field": seconds_field, "header": header, "is_denominator": False})
 
                 # 分母列（可能有多个）

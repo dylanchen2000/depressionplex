@@ -31,25 +31,26 @@ CSV_FIELDS_EXPECTED: tuple[str, ...] = (
 )
 
 #: 每个秒数列 → 它的分母列。
-#: 判断依据（引擎 cli/analyze.py 的 _row() 函数，第64行）：
-#: - immobility_s / immobility_raw_s：来自 r.immobility_mirror_pipeline_s / raw_s，
-#:   这些是在 scorable_frames_window 范围内计算的（见 trial_report.py）→ 分母 scorable_frames
-#: - mobility_s：来自 mob.seconds_pipeline，是窗口内的总秒数 → 分母 window_frames + fps
-#: - first_mobility_onset_s：来自 mob.first_onset_s，是从录像起点算的绝对时间 → 分母 fps
+#: 判断依据（depressionplex/assay_core/trial_report.py）：
+#:   L189: window_s = window_frames / fps
+#:   L191-192: mirror_pipeline = window_s - mob.seconds_pipeline
+#:             mirror_raw = window_s - mob.seconds_raw
+#:   L253-259: 引擎报告同时印「占窗口」(÷window_seconds) 与「占可评分」(÷scorable_frames/fps)
+#:   L60-61: first_onset_s 是相对窗口起点的秒数 (first_onset_frame / fps)
+#:
+#: - immobility_s / immobility_raw_s 是 window_frames/fps - mobility，
+#:   不是从 scorable_frames 算的。需要 window_frames 和 fps 才知道窗口长度，
+#:   需要 scorable_frames 来算占可评分比例（引擎两种占比都印）。
+#: - mobility_s 是直接量出来的帧数 ÷ fps，window_frames 不是它的除数，
+#:   但需要它来算占窗口比例。
+#: - first_mobility_onset_s 只除 fps，但它是相对窗口起点的，需要 window_frames
+#:   来标明窗口位置（FST 窗口从 120s 开始）。
 DENOMINATORS: dict[str, tuple[str, ...]] = {
-    "immobility_s": ("scorable_frames",),
-    "immobility_raw_s": ("scorable_frames",),
-    "mobility_s": ("window_frames", "fps"),
-    "first_mobility_onset_s": ("fps",),
+    "immobility_s": ("window_frames", "scorable_frames", "fps"),
+    "immobility_raw_s": ("window_frames", "scorable_frames", "fps"),
+    "mobility_s": ("window_frames", "scorable_frames", "fps"),
+    "first_mobility_onset_s": ("window_frames", "fps"),
 }
-
-
-def trial_id(stem: str, chamber: int) -> str:
-    """生成 trial_id（与引擎 runner.py:284 同一个形状）。
-
-    只许有一个派生器，测试会对着引擎产物核对。
-    """
-    return f"{stem}-ch{chamber}"
 
 
 @dataclass
@@ -60,7 +61,7 @@ class ResultsRow:
     scored=False / 根本没有 CSV 行的隔间：kind="alarm"，带 reason。
     """
     trial_id: str
-    chamber: int
+    chamber: int | None  # 非隔间级的报警行用 None
     kind: str  # "scored" 或 "alarm"
 
     # scored 行的字段（CSV 的 16 个字段）
@@ -115,11 +116,11 @@ def load_results(exp: dict, video_index: int) -> ResultsTable:
         ResultsTable
 
     Raises:
-        ResultsError: CSV 表头不符、run.json schema 不符、文件格式错误等
+        ResultsError: CSV 表头不符、run.json schema 不符、文件格式错误、
+                      必写键缺失、trial_id 认不出等
     """
-    # 导入 engine.output_paths 来获取文件路径
-    # 注意：不能 import depressionplex，但可以 import desktop.app.services
-    from desktop.app.services.engine import output_paths
+    # 导入 engine 来获取文件路径和前缀
+    from desktop.app.services.engine import output_paths, trial_prefix
 
     paths = output_paths(exp, video_index)
     csv_path = paths["csv"]
@@ -143,6 +144,8 @@ def load_results(exp: dict, video_index: int) -> ResultsTable:
 
     # 加载 run.json（如果存在）
     run_data: dict[str, Any] | None = None
+    chamber_roster: set[int] = set()  # 名册
+
     if run_json_exists:
         try:
             with run_json_path.open("r", encoding="utf-8") as f:
@@ -151,26 +154,72 @@ def load_results(exp: dict, video_index: int) -> ResultsTable:
             raise ResultsError(f"读取 run.json 失败：{run_json_path}\n  {e}") from e
 
         # 校验 schema_version
-        schema_version = run_data.get("schema_version")
+        if "schema_version" not in run_data:
+            raise ResultsError(
+                f"run.json 缺少必写键 'schema_version'：{run_json_path}"
+            )
+        schema_version = run_data["schema_version"]
         if schema_version != "1":
             raise ResultsError(
                 f"run.json 的 schema_version 不是 '1'：{schema_version!r}\n"
                 f"  文件：{run_json_path}"
             )
 
+        # 校验顶层必写键（F5）
+        required_top_keys = [
+            "tool_version", "assay", "scoring_window_s", "rules",
+            "video", "calib_indices", "chambers", "plan_warnings",
+            "chamber_validity", "not_scored"
+        ]
+        for key in required_top_keys:
+            if key not in run_data:
+                raise ResultsError(
+                    f"run.json 缺少必写键 '{key}'：{run_json_path}"
+                )
+
         # 提取上下文信息
-        context.tool_version = run_data.get("tool_version")
-        context.assay = run_data.get("assay")
-        context.scoring_window_s = run_data.get("scoring_window_s")
+        context.tool_version = run_data["tool_version"]
+        context.assay = run_data["assay"]
+        context.scoring_window_s = run_data["scoring_window_s"]
 
-        rules = run_data.get("rules", {})
-        context.theta_mob = rules.get("theta_mob")
+        # rules.theta_mob 必须存在
+        rules = run_data["rules"]
+        if "theta_mob" not in rules:
+            raise ResultsError(
+                f"run.json 的 rules 缺少必写键 'theta_mob'：{run_json_path}"
+            )
+        context.theta_mob = rules["theta_mob"]
 
-        video_info = run_data.get("video", {})
-        context.video_name = video_info.get("name")
-        context.video_fps = video_info.get("fps")
-        context.video_n_frames = video_info.get("n_frames")
-        context.frame_count_source = video_info.get("frame_count_source")
+        # video 必写键
+        video_info = run_data["video"]
+        video_required_keys = ["name", "fps", "n_frames", "frame_count_source"]
+        for key in video_required_keys:
+            if key not in video_info:
+                raise ResultsError(
+                    f"run.json 的 video 缺少必写键 '{key}'：{run_json_path}"
+                )
+        context.video_name = video_info["name"]
+        context.video_fps = video_info["fps"]
+        context.video_n_frames = video_info["n_frames"]
+        context.frame_count_source = video_info["frame_count_source"]
+
+        # 提取名册（F1）：chambers[].index 是唯一权威来源
+        chambers_list = run_data["chambers"]
+        for ch_obj in chambers_list:
+            if "index" not in ch_obj:
+                raise ResultsError(
+                    f"run.json 的 chambers[] 条目缺少必写键 'index'：{run_json_path}"
+                )
+            chamber_roster.add(ch_obj["index"])
+
+    else:
+        # run.json 缺失，添加一个全局警告（F7：chamber=None）
+        rows.append(ResultsRow(
+            trial_id="[上下文缺失]",
+            chamber=None,
+            kind="alarm",
+            reason="上下文缺失：run.json 文件不存在，无法显示 tool_version、theta_mob 等信息",
+        ))
 
     # 加载 CSV（如果存在）
     csv_rows: dict[int, dict[str, str]] = {}  # chamber → row
@@ -196,96 +245,181 @@ def load_results(exp: dict, video_index: int) -> ResultsTable:
                     )
 
                 # 读取所有行
-                for row_dict in reader:
+                for row_num, row_dict in enumerate(reader, start=2):  # CSV 行号从 2 开始
                     trial_id_str = row_dict.get("trial_id", "")
-                    # 从 trial_id 提取 chamber 号（格式：stem-chN）
-                    if "-ch" in trial_id_str:
-                        try:
-                            chamber = int(trial_id_str.split("-ch")[-1])
-                            csv_rows[chamber] = row_dict
-                        except (ValueError, IndexError):
-                            # trial_id 格式不对，跳过这一行
-                            pass
+
+                    # 从 trial_id 提取 chamber 号（格式：prefix-chN）
+                    # F6：认不出就 ResultsError，不许 pass
+                    if "-ch" not in trial_id_str:
+                        raise ResultsError(
+                            f"CSV 第 {row_num} 行的 trial_id 格式不对（期望 'prefix-chN'）：{trial_id_str!r}\n"
+                            f"  文件：{csv_path}"
+                        )
+                    try:
+                        chamber = int(trial_id_str.split("-ch")[-1])
+                    except (ValueError, IndexError) as e:
+                        raise ResultsError(
+                            f"CSV 第 {row_num} 行的 trial_id 无法解析 chamber 号：{trial_id_str!r}\n"
+                            f"  文件：{csv_path}\n"
+                            f"  错误：{e}"
+                        ) from e
+
+                    csv_rows[chamber] = row_dict
         except (OSError, csv.Error) as e:
             raise ResultsError(f"读取 CSV 失败：{csv_path}\n  {e}") from e
 
-    # 构造结果行
-    # 情况1：有 CSV → 从 CSV 构造 scored 行
-    for chamber, row_dict in csv_rows.items():
-        rows.append(ResultsRow(
-            trial_id=row_dict["trial_id"],
-            chamber=chamber,
-            kind="scored",
-            assay=row_dict["assay"],
-            fps=row_dict["fps"],
-            recording_frames=row_dict["recording_frames"],
-            window_frames=row_dict["window_frames"],
-            scorable_frames=row_dict["scorable_frames"],
-            unknown_frames_window=row_dict["unknown_frames_window"],
-            validity_status=row_dict["validity_status"],
-            occupied_fraction=row_dict["occupied_fraction"],
-            scored=row_dict["scored"],
-            immobility_s=row_dict["immobility_s"],
-            immobility_raw_s=row_dict["immobility_raw_s"],
-            mobility_s=row_dict["mobility_s"],
-            mobility_bouts=row_dict["mobility_bouts"],
-            first_mobility_onset_s=row_dict["first_mobility_onset_s"],
-            gate_messages=row_dict["gate_messages"],
-        ))
+    # 获取 trial_id 前缀（F4）
+    prefix = trial_prefix(exp, video_index)
 
-    # 情况2：有 run.json → 添加未产出数字的隔间（报警行）
-    if run_data is not None:
-        # 从 not_scored 添加报警行
-        not_scored_list = run_data.get("not_scored", [])
-        for item in not_scored_list:
-            chamber = item.get("chamber")
-            reason = item.get("reason", "未产出数字")
-            if chamber is not None and chamber not in csv_rows:
-                stem = Path(exp["videos"][video_index]["path"]).stem
+    # 构造结果行
+    # 先处理名册里的所有隔间（F1）
+    if chamber_roster:
+        for chamber in sorted(chamber_roster):
+            tid = f"{prefix}-ch{chamber}"
+
+            # 情况1：CSV 有这个隔间的行
+            if chamber in csv_rows:
+                row_dict = csv_rows[chamber]
+
+                # F3：检查 scored 列，如果为假，转成 alarm 行
+                scored_str = row_dict.get("scored", "")
+                is_scored = scored_str.lower() in ("true", "1")
+
+                if is_scored:
+                    # 正常 scored 行
+                    rows.append(ResultsRow(
+                        trial_id=tid,
+                        chamber=chamber,
+                        kind="scored",
+                        assay=row_dict["assay"],
+                        fps=row_dict["fps"],
+                        recording_frames=row_dict["recording_frames"],
+                        window_frames=row_dict["window_frames"],
+                        scorable_frames=row_dict["scorable_frames"],
+                        unknown_frames_window=row_dict["unknown_frames_window"],
+                        validity_status=row_dict["validity_status"],
+                        occupied_fraction=row_dict["occupied_fraction"],
+                        scored=row_dict["scored"],
+                        immobility_s=row_dict["immobility_s"],
+                        immobility_raw_s=row_dict["immobility_raw_s"],
+                        mobility_s=row_dict["mobility_s"],
+                        mobility_bouts=row_dict["mobility_bouts"],
+                        first_mobility_onset_s=row_dict["first_mobility_onset_s"],
+                        gate_messages=row_dict["gate_messages"],
+                    ))
+                else:
+                    # scored=False → alarm 行，但 16 个字段还在
+                    gate_msg = row_dict.get("gate_messages", "")
+                    reason = gate_msg if gate_msg else "CSV 标了未放行计分，但引擎没给原因"
+                    rows.append(ResultsRow(
+                        trial_id=tid,
+                        chamber=chamber,
+                        kind="alarm",
+                        assay=row_dict["assay"],
+                        fps=row_dict["fps"],
+                        recording_frames=row_dict["recording_frames"],
+                        window_frames=row_dict["window_frames"],
+                        scorable_frames=row_dict["scorable_frames"],
+                        unknown_frames_window=row_dict["unknown_frames_window"],
+                        validity_status=row_dict["validity_status"],
+                        occupied_fraction=row_dict["occupied_fraction"],
+                        scored=row_dict["scored"],
+                        immobility_s=row_dict["immobility_s"],
+                        immobility_raw_s=row_dict["immobility_raw_s"],
+                        mobility_s=row_dict["mobility_s"],
+                        mobility_bouts=row_dict["mobility_bouts"],
+                        first_mobility_onset_s=row_dict["first_mobility_onset_s"],
+                        gate_messages=row_dict["gate_messages"],
+                        reason=reason,
+                    ))
+
+            # 情况2：CSV 没有，从 run.json 的报警源查找
+            elif run_data is not None:
+                reason_parts = []
+
+                # 先查 not_scored
+                not_scored_list = run_data["not_scored"]
+                found_in_not_scored = False
+                for item in not_scored_list:
+                    if "chamber" not in item:
+                        raise ResultsError(
+                            f"run.json 的 not_scored[] 条目缺少必写键 'chamber'：{run_json_path}"
+                        )
+                    if "reason" not in item:
+                        raise ResultsError(
+                            f"run.json 的 not_scored[] 条目缺少必写键 'reason'：{run_json_path}"
+                        )
+                    if item["chamber"] == chamber:
+                        reason_parts.append(item["reason"])
+                        found_in_not_scored = True
+                        break
+
+                # 再查 chamber_validity
+                chamber_validity_list = run_data["chamber_validity"]
+                found_in_validity = False
+                for cv in chamber_validity_list:
+                    cv_required_keys = ["chamber", "status", "occupied_fraction",
+                                        "unsegmentable_fraction", "note"]
+                    for key in cv_required_keys:
+                        if key not in cv:
+                            raise ResultsError(
+                                f"run.json 的 chamber_validity[] 条目缺少必写键 '{key}'：{run_json_path}"
+                            )
+                    if cv["chamber"] == chamber:
+                        status = cv["status"]
+                        note = cv["note"]
+                        reason_parts.append(status)
+                        if note:
+                            reason_parts.append(note)
+                        found_in_validity = True
+                        break
+
+                # 如果两个报警源都没有，说明引擎在隔间层之前就停了
+                if not found_in_not_scored and not found_in_validity:
+                    reason = (
+                        f"run.json 的名册里有本隔间，但产出与报警里都没有它"
+                        f"——引擎在隔间层之前就停了或产出不完整"
+                    )
+                else:
+                    reason = " | ".join(reason_parts)
+
                 rows.append(ResultsRow(
-                    trial_id=trial_id(stem, chamber),
+                    trial_id=tid,
                     chamber=chamber,
                     kind="alarm",
                     reason=reason,
                 ))
 
-        # 从 chamber_validity 添加报警行（这些隔间也没有 CSV 行）
-        chamber_validity_list = run_data.get("chamber_validity", [])
-        for cv in chamber_validity_list:
-            chamber = cv.get("chamber")
-            status = cv.get("status", "unknown")
-            note = cv.get("note")
-            if chamber is not None and chamber not in csv_rows:
-                # 组合 status 和 note 作为 reason
-                reason_parts = [status]
-                if note:
-                    reason_parts.append(note)
-                reason = " | ".join(reason_parts)
+    # 情况3：CSV 里有名册外的隔间（F1 后半段）
+    for chamber in sorted(csv_rows.keys()):
+        if chamber not in chamber_roster:
+            tid = f"{prefix}-ch{chamber}"
+            row_dict = csv_rows[chamber]
 
-                stem = Path(exp["videos"][video_index]["path"]).stem
-                # 避免重复添加（可能已经在 not_scored 里）
-                if not any(r.chamber == chamber for r in rows):
-                    rows.append(ResultsRow(
-                        trial_id=trial_id(stem, chamber),
-                        chamber=chamber,
-                        kind="alarm",
-                        reason=reason,
-                    ))
+            # 这是异常情况，转成 alarm 行并保留所有字段
+            rows.append(ResultsRow(
+                trial_id=tid,
+                chamber=chamber,
+                kind="alarm",
+                assay=row_dict["assay"],
+                fps=row_dict["fps"],
+                recording_frames=row_dict["recording_frames"],
+                window_frames=row_dict["window_frames"],
+                scorable_frames=row_dict["scorable_frames"],
+                unknown_frames_window=row_dict["unknown_frames_window"],
+                validity_status=row_dict["validity_status"],
+                occupied_fraction=row_dict["occupied_fraction"],
+                scored=row_dict["scored"],
+                immobility_s=row_dict["immobility_s"],
+                immobility_raw_s=row_dict["immobility_raw_s"],
+                mobility_s=row_dict["mobility_s"],
+                mobility_bouts=row_dict["mobility_bouts"],
+                first_mobility_onset_s=row_dict["first_mobility_onset_s"],
+                gate_messages=row_dict["gate_messages"],
+                reason=f"CSV 里出现了名册外的隔间（run.json chambers[] 里没有 ch{chamber}）",
+            ))
 
-    # 情况3：CSV 不存在但 run.json 存在 → 所有隔间都是报警行
-    # （这已经被上面的逻辑覆盖了）
-
-    # 按 chamber 排序
-    rows.sort(key=lambda r: r.chamber)
-
-    # 如果 run.json 缺失，添加一个警告标记
-    if not run_json_exists and csv_exists:
-        # 添加一个特殊的报警行（chamber=-1表示全局警告）
-        rows.insert(0, ResultsRow(
-            trial_id="[上下文缺失]",
-            chamber=-1,
-            kind="alarm",
-            reason="上下文缺失：run.json 文件不存在，无法显示 tool_version、theta_mob 等信息",
-        ))
+    # 按 chamber 排序（None 排最前）
+    rows.sort(key=lambda r: (r.chamber is not None, r.chamber if r.chamber is not None else -1))
 
     return context
