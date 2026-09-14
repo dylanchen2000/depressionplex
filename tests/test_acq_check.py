@@ -988,16 +988,20 @@ def test_issues_md_no_duplicate_numbers() -> None:
 
 def test_gate_thresholds_match_issues_md() -> None:
     """GATE_CONTRAST_ABS / GATE_CONTRAST_RATIO / GATE_AREA_JITTER_P90 / MOVING_RESIDUAL
-    四个常量的数值必须在 docs/ISSUES.md 里逐字出现。
+    四个常量的「常量名: 值」字面对账字符串必须在 docs/ISSUES.md 里逐字出现（DP-117 行）。
 
     防的是：把门槛放松十倍（如 100→10、0.02→0.2）422 条测试全绿——
     守卫 1-3 证明「常量被读了」，这条证明「常量的值是对的」。
     两者缺一，不能形成闭环。
 
+    为什么用「名: 值」而不是 str(值)：
+    "0.2" 在 ISSUES.md 里有 11 处，纯子串匹配对 0.02→0.2 的变异不灵敏。
+    "GATE_AREA_JITTER_P90: 0.02" 只出现在 DP-117 冻结行，改值就找不到。
+
     变异（M9/M10/M15b）：
-    - GATE_CONTRAST_ABS 100.0 → 10.0 ⇒ str(10.0)="10.0" 不在 ISSUES.md ⇒ 本条红；
-    - GATE_AREA_JITTER_P90 0.02 → 0.2 ⇒ str(0.2)="0.2" 不在 ISSUES.md ⇒ 本条红；
-    - MOVING_RESIDUAL 0.02 → 0.2 ⇒ 同上 ⇒ 本条红。
+    - GATE_CONTRAST_ABS 100.0 → 10.0 ⇒ "GATE_CONTRAST_ABS: 10.0" 不在 ISSUES.md ⇒ 本条红；
+    - GATE_AREA_JITTER_P90 0.02 → 0.2 ⇒ "GATE_AREA_JITTER_P90: 0.2" 不在 ISSUES.md ⇒ 本条红；
+    - MOVING_RESIDUAL 0.02 → 0.2 ⇒ "MOVING_RESIDUAL: 0.2" 不在 ISSUES.md ⇒ 本条红。
     """
     from depressionplex.assay_core.segment import (
         GATE_CONTRAST_ABS, GATE_CONTRAST_RATIO, GATE_AREA_JITTER_P90,
@@ -1016,12 +1020,14 @@ def test_gate_thresholds_match_issues_md() -> None:
     }
     missing: list[str] = []
     for name, val in gate_constants.items():
-        if str(val) not in issues_text:
+        # 检查「常量名: 值」字面对账字符串，避免 str(val) 子串命中不相关行
+        anchor = f"{name}: {val}"
+        if anchor not in issues_text:
             missing.append(
-                f"  {name}={val!r}  str 形式 {str(val)!r} 在 docs/ISSUES.md 里找不到"
+                f"  {anchor!r}  在 docs/ISSUES.md（DP-117 行）里找不到"
             )
     assert not missing, (
         "门槛常量数值未在 ISSUES.md 台账文字中出现——"
-        "改门槛是科学决定，必须留痕：\n"
+        "改门槛是科学决定，必须同步更新 DP-117 行：\n"
         + "\n".join(missing)
     )
