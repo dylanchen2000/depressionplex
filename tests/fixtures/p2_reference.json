@@ -1,0 +1,16 @@
+{
+  "_note": "P2 硬门实测（2026-08-24）。素材不在仓里也不许进仓（大文件规矩）。沙箱和 CI 均无此素材，参考读数在本环境未复现——verify_p2_reference.py 只能在有素材的机器上跑。SHA256 当前未知，写 null。",
+  "source_video": "10mg 2周.mp4",
+  "frames_start": 600,
+  "frames_end": 607,
+  "width": 476,
+  "height": 268,
+  "fps": 25.0,
+  "total_frames": 9661,
+  "sha256": null,
+  "measured_at": "2026-08-24",
+  "contrast_abs": 208.5,
+  "contrast_ratio": 6.77,
+  "noise_floor_px": 0.43,
+  "area_jitter_p90": 0.0035
+}

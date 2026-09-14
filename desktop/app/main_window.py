@@ -9,10 +9,11 @@ from PySide6.QtWidgets import (
 
 from desktop.app.pages.placeholders import (
     WelcomePage, ResultsPage,
-    ReviewPage, ExportPage, SelfCheckPage,
+    ReviewPage, ExportPage,
 )
 from desktop.app.pages.new_experiment import NewExperimentPage
 from desktop.app.pages.queue import QueuePage
+from desktop.app.pages.self_test import AcqCheckPage
 
 # (侧栏显示名, 页面类名)。类名以字符串出现，是为了让 main.py 的自检能逐个单独构造。
 PAGE_ORDER = (
@@ -22,7 +23,7 @@ PAGE_ORDER = (
     ("结果", "ResultsPage"),
     ("复核", "ReviewPage"),
     ("导出", "ExportPage"),
-    ("自检", "SelfCheckPage"),
+    ("自检", "AcqCheckPage"),
 )
 
 #: 类名 → 类。**「哪个类是哪一页」只许在这里回答一次**（DP-101 修）：
@@ -36,7 +37,7 @@ PAGE_CLASSES = {
     "ResultsPage": ResultsPage,
     "ReviewPage": ReviewPage,
     "ExportPage": ExportPage,
-    "SelfCheckPage": SelfCheckPage,
+    "AcqCheckPage": AcqCheckPage,
 }
 
 
