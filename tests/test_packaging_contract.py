@@ -178,8 +178,9 @@ def test_ffmpeg_resolution_order():
     try:
         with mock.patch.dict("os.environ", {"DPX_FFMPEG": env_path}):
             with mock.patch("shutil.which", return_value="/usr/bin/ffmpeg"):  # PATH 也有
-                result = video._resolve_ffmpeg_tool("ffmpeg")
-                assert result == env_path, f"env 应该最优先，但返回了 {result}"
+                path, source = video._resolve_ffmpeg_tool("ffmpeg")
+                assert path == env_path, f"env 应该最优先，但返回了 {path}"
+                assert source == "env", f"source 应该是 'env'，但返回了 {source}"
     finally:
         os.unlink(env_path)
 
@@ -188,8 +189,9 @@ def test_ffmpeg_resolution_order():
         with mock.patch("sys.frozen", False, create=True):
             with mock.patch("pathlib.Path.exists", return_value=False):  # 随包不存在
                 with mock.patch("shutil.which", return_value="/usr/bin/ffmpeg"):
-                    result = video._resolve_ffmpeg_tool("ffmpeg")
-                    assert result == "/usr/bin/ffmpeg", "PATH 应该兜底"
+                    path, source = video._resolve_ffmpeg_tool("ffmpeg")
+                    assert path == "/usr/bin/ffmpeg", "PATH 应该兜底"
+                    assert source == "system", f"source 应该是 'system'，但返回了 {source}"
 
     # 场景 3：都没有 ⇒ VideoError，且报错里三处路径都在
     with mock.patch.dict("os.environ", {}, clear=True):
@@ -206,11 +208,21 @@ def test_ffmpeg_resolution_order():
 
 
 def test_only_one_ffmpeg_resolver():
-    """守卫 7：只有一个解析器（depressionplex/**/*.py 里不许再有别处直接用 "ffmpeg" / "ffprobe" 字面量）。"""
+    """守卫 7：只有一个解析器（depressionplex/**/*.py 里不许再有别处直接用 "ffmpeg" / "ffprobe" 字面量）。
+
+    只豁免 video.py 的 _resolve_ffmpeg_tool 函数本身（H11）——`_run()` 里不许用字面量。
+    """
     # 扫描 depressionplex/ 下所有 .py 文件
     for py_file in (ROOT / "depressionplex").rglob("*.py"):
         tree = ast.parse(py_file.read_text(encoding="utf-8"), filename=str(py_file))
 
+        # 收集所有函数的 AST 节点范围（用于判断某行在哪个函数里）
+        function_ranges = {}  # {func_name: (start_line, end_line)}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef):
+                function_ranges[node.name] = (node.lineno, node.end_lineno or 999999)
+
+        # 遍历所有节点，查找 subprocess 调用
         for node in ast.walk(tree):
             # 找 subprocess.run / subprocess.Popen 的调用
             if isinstance(node, ast.Call):
@@ -229,14 +241,19 @@ def test_only_one_ffmpeg_resolver():
                         for elt in first_arg.elts:
                             if isinstance(elt, ast.Constant):
                                 if elt.value in ("ffmpeg", "ffprobe"):
-                                    # 排除 video.py 里的 _resolve_ffmpeg_tool 和 _run
-                                    # 以及它们的直接调用者（probe / decode_cmd）
-                                    # 通过检查文件名和函数名来判断
+                                    # 只豁免 video.py 的 _resolve_ffmpeg_tool 函数
                                     if py_file.name == "video.py":
-                                        # video.py 里允许在解析函数和调用它的地方使用
-                                        continue
+                                        # 判断当前调用在哪个函数里
+                                        current_func = None
+                                        for func_name, (start, end) in function_ranges.items():
+                                            if start <= node.lineno <= end:
+                                                current_func = func_name
+                                                break
+                                        # 只豁免 _resolve_ffmpeg_tool 函数本身
+                                        if current_func == "_resolve_ffmpeg_tool":
+                                            continue
                                     raise AssertionError(
-                                        f"{py_file.relative_to(ROOT)} 里直接使用了 {elt.value!r} 字面量，"
+                                        f"{py_file.relative_to(ROOT)}:{node.lineno} 里直接使用了 {elt.value!r} 字面量，"
                                         f"应该调用 video._resolve_ffmpeg_tool()"
                                     )
 
@@ -314,15 +331,20 @@ def test_run_json_decoder_block():
         trial_validity=validity.TrialValidity(chambers=[])
     )
 
-    # 模拟 _resolve_ffmpeg_tool 返回固定路径
+    # 模拟 _resolve_ffmpeg_tool 返回元组 (path, source)
     with patch("depressionplex.video._resolve_ffmpeg_tool") as mock_resolve:
-        mock_resolve.side_effect = lambda tool: f"/fake/{tool}"
+        mock_resolve.side_effect = lambda tool: (f"/fake/{tool}", "env")
+
+        # 获取 ffmpeg 信息（模拟调用方的职责）
+        ffmpeg_path, ffmpeg_source = video._resolve_ffmpeg_tool("ffmpeg")
+        ffprobe_path, _ = video._resolve_ffmpeg_tool("ffprobe")
 
         # 模拟 _get_ffmpeg_version 返回 None（取不到）
         with patch("depressionplex.cli.analyze._get_ffmpeg_version") as mock_version:
             mock_version.return_value = None
 
-            result = analyze._build_run_json(info, plan, "TST", {}, set())
+            result = analyze._build_run_json(info, plan, "TST", {}, set(),
+                                             ffmpeg_path, ffmpeg_source, ffprobe_path)
 
             # 断言 decoder 块存在
             assert "decoder" in result, "run.json 里找不到 decoder 块"

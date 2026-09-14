@@ -33,11 +33,10 @@ Source: "dist\DEPRESSION-PLEX\*"; DestDir: "{app}"; Flags: ignoreversion recurse
 Source: "dist\depression-analyzer\*"; DestDir: "{app}\backend"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 ; ffmpeg 及其许可文件（随包分发，装进 backend\ffmpeg\）
-Source: "vendor\ffmpeg\ffmpeg.exe"; DestDir: "{app}\backend\ffmpeg"; Flags: ignoreversion
-Source: "vendor\ffmpeg\ffprobe.exe"; DestDir: "{app}\backend\ffmpeg"; Flags: ignoreversion
+; 用通配符匹配所有 exe 和 dll（上游版本升级时不用改 .iss）
+Source: "vendor\ffmpeg\*.exe"; DestDir: "{app}\backend\ffmpeg"; Flags: ignoreversion
+Source: "vendor\ffmpeg\*.dll"; DestDir: "{app}\backend\ffmpeg"; Flags: ignoreversion
 Source: "vendor\ffmpeg\LICENSE.txt"; DestDir: "{app}\backend\ffmpeg"; Flags: ignoreversion
-Source: "vendor\ffmpeg\COPYING.LGPLv2.1.txt"; DestDir: "{app}\backend\ffmpeg"; Flags: ignoreversion
-Source: "vendor\ffmpeg\COPYING.LGPLv3.txt"; DestDir: "{app}\backend\ffmpeg"; Flags: ignoreversion
 
 [Icons]
 ; 开始菜单快捷方式

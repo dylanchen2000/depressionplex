@@ -47,7 +47,7 @@ class VideoInfo:
         return self.n_frames / self.fps
 
 
-def _resolve_ffmpeg_tool(tool_name: str) -> str:
+def _resolve_ffmpeg_tool(tool_name: str) -> tuple[str, str]:
     """唯一的 ffmpeg 工具解析函数（架构 §0.2 裁决）。
 
     解析顺序：env → 随包 → PATH。**不许再有别处直接把 "ffmpeg" / "ffprobe" 当命令用。**
@@ -56,7 +56,9 @@ def _resolve_ffmpeg_tool(tool_name: str) -> str:
         tool_name: "ffmpeg" 或 "ffprobe"
 
     Returns:
-        可执行文件的完整路径（找到就返回，找不到抛 VideoError）
+        (path, source) 元组：
+        - path: 可执行文件的完整路径
+        - source: "env" | "bundled" | "system"（单一来源，不许在别处二次推导）
 
     Raises:
         VideoError: 三处都找不到时，列出找过的路径
@@ -65,7 +67,7 @@ def _resolve_ffmpeg_tool(tool_name: str) -> str:
     env_var = f"DPX_{tool_name.upper()}"
     env_path = os.environ.get(env_var)
     if env_path and Path(env_path).exists():
-        return env_path
+        return (env_path, "env")
 
     # 2. 随包：冻结时在 sys.executable 旁边的 ffmpeg/ 下，源码跑时在仓根 vendor/ffmpeg/
     is_frozen = getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS")
@@ -80,12 +82,12 @@ def _resolve_ffmpeg_tool(tool_name: str) -> str:
         bundled = repo_root / "vendor" / "ffmpeg" / exe_name
 
     if bundled.exists():
-        return str(bundled)
+        return (str(bundled), "bundled")
 
     # 3. 系统 PATH（兜底）
     system_path = shutil.which(tool_name)
     if system_path:
-        return system_path
+        return (system_path, "system")
 
     # 都没有 ⇒ 抛 VideoError，把找过的三处路径全列出来
     raise VideoError(
@@ -126,7 +128,7 @@ def probe(path: str | Path) -> VideoInfo:
     p = Path(path)
     if not p.exists():
         raise VideoError(f"视频不存在：{p}")
-    ffprobe = _resolve_ffmpeg_tool("ffprobe")
+    ffprobe, _ = _resolve_ffmpeg_tool("ffprobe")
     out = _run([ffprobe, "-v", "error", "-select_streams", "v:0",
                 "-show_entries",
                 "stream=avg_frame_rate,r_frame_rate,nb_frames,width,height",
@@ -173,7 +175,7 @@ def decode_cmd(info: VideoInfo, *, start_frame: int = 0,
     """
     if start_frame < 0:
         raise ValueError(f"start_frame 不能为负：{start_frame}")
-    ffmpeg = _resolve_ffmpeg_tool("ffmpeg")
+    ffmpeg, _ = _resolve_ffmpeg_tool("ffmpeg")
     cmd = [ffmpeg, "-v", "error", "-i", str(info.path)]
     if start_frame:
         cmd += ["-vf", f"select=gte(n\\,{start_frame})", "-vsync", "0"]

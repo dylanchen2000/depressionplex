@@ -164,7 +164,9 @@ def _get_ffmpeg_version(ffmpeg_path: str) -> str | None:
 
 def _build_run_json(info: video.VideoInfo, plan: runner.TrialPlan,
                     assay: str, skipped: dict[int, str],
-                    scored: Collection[int]) -> dict:
+                    scored: Collection[int],
+                    ffmpeg_path: str, ffmpeg_source: str,
+                    ffprobe_path: str) -> dict:
     """构造 run.json 数据结构（**CSV 故意不含的上下文**）。
 
     `scored` 是产出了 CSV 行的隔间号集合，必传：`chamber_validity` 只写不在 CSV 里的
@@ -173,6 +175,10 @@ def _build_run_json(info: video.VideoInfo, plan: runner.TrialPlan,
     `plan.trial_validity`，CSV 那边取的是 `TrialReport`，是**两个对象**。
     同时写就等于同一个数字有两条来路，哪天其中一条变了没人会发现（DP-054）。
     未产出数字的隔间没有 CSV 行，它的有效性只能在这里说，所以留在这里。
+
+    `ffmpeg_path`, `ffmpeg_source`, `ffprobe_path` 由调用方提供（H10）：
+    在分析完成后才调 resolver 会导致「数字算出来了但 run.json 崩了 + CSV 也没有」，
+    所以调用方必须在分析前就获取这些信息（如果工具不存在，分析开始前就失败）。
     """
     # numpy 类型需要转成 Python int/float
     def to_native(val):
@@ -181,28 +187,8 @@ def _build_run_json(info: video.VideoInfo, plan: runner.TrialPlan,
         return val
 
     # decoder 块：这批帧是哪个解码器解出来的（架构 §3.5，B6 审计包要印）
-    ffmpeg_path = video._resolve_ffmpeg_tool("ffmpeg")
-    ffprobe_path = video._resolve_ffmpeg_tool("ffprobe")
-
-    # 判断来源：env → bundled → path
-    if os.environ.get("DPX_FFMPEG") or os.environ.get("DPX_FFPROBE"):
-        decoder_source = "env"
-    else:
-        # 判断是否来自随包
-        is_frozen = getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS")
-        if is_frozen:
-            bundled_dir = Path(sys.executable).parent / "ffmpeg"
-        else:
-            repo_root = Path(__file__).resolve().parent.parent.parent
-            bundled_dir = repo_root / "vendor" / "ffmpeg"
-
-        # 如果 ffmpeg_path 在 bundled_dir 下，就是 bundled
-        try:
-            Path(ffmpeg_path).relative_to(bundled_dir)
-            decoder_source = "bundled"
-        except (ValueError, OSError):
-            # 不在 bundled_dir 下，就是 PATH
-            decoder_source = "path"
+    # source 由 _resolve_ffmpeg_tool 返回，不许二次推导（H9）
+    decoder_source = ffmpeg_source
 
     ffmpeg_version = _get_ffmpeg_version(ffmpeg_path)
 
@@ -320,6 +306,14 @@ def main(argv: list[str] | None = None) -> int:
                 print(json.dumps(obj, ensure_ascii=False), file=sys.stderr, flush=True)
                 last_emit[0] = now
 
+    # H10：在分析前获取 ffmpeg 信息（如果工具不存在，这里就失败，不会在分析后才崩）
+    try:
+        ffmpeg_path, ffmpeg_source = video._resolve_ffmpeg_tool("ffmpeg")
+        ffprobe_path, _ = video._resolve_ffmpeg_tool("ffprobe")
+    except video.VideoError as e:
+        print(f"[ffmpeg 工具缺失] {e}", file=sys.stderr)
+        return 1
+
     try:
         info, plan, reports, skipped = runner.analyze_video(
             args.video, assay=args.assay, n_chambers=args.chambers,
@@ -361,7 +355,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.run_json:
         # `reports` 的键就是「进了 CSV 的隔间」，传进去让 chamber_validity 避开它们
-        run_data = _build_run_json(info, plan, args.assay, skipped, set(reports))
+        run_data = _build_run_json(info, plan, args.assay, skipped, set(reports),
+                                    ffmpeg_path, ffmpeg_source, ffprobe_path)
         with args.run_json.open("w", encoding="utf-8") as fh:
             json.dump(run_data, fh, indent=2, ensure_ascii=False)
         print(f"\n上下文已写：{args.run_json}")

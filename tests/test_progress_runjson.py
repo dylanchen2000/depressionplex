@@ -33,10 +33,6 @@ import numpy as np
 from depressionplex import runner as R, video
 from depressionplex.cli import analyze
 
-# 全局 mock：沙箱里没有 ffmpeg，所以 _resolve_ffmpeg_tool 会失败。
-# 测试不需要真的解码，只需要 _build_run_json 能返回正常结构即可。
-video._resolve_ffmpeg_tool = lambda tool: f"/fake/{tool}"  # type: ignore
-
 # 复用 test_runner.py 的合成帧生成器
 H = 268
 W_CH = 95
@@ -172,11 +168,13 @@ def test_progress_exception_propagates() -> None:
 # ---- 判据 4：run.json 键与 CSV_FIELDS 交集只有 assay / fps ----------------
 
 
-def test_runjson_no_csv_overlap() -> None:
+def test_runjson_no_csv_overlap(monkeypatch) -> None:
     """run.json 的键（递归展开）与 CSV_FIELDS 的交集只允许 assay / fps。
 
     这条硬约束防止"一个数字两个序列化器 = 迟早漂移"（DP-054）。
     """
+    monkeypatch.setenv("DPX_FFMPEG", "/fake/ffmpeg")
+    monkeypatch.setenv("DPX_FFPROBE", "/fake/ffprobe")
     # 构造一个最小的 run.json 样本
     from depressionplex import video
     from depressionplex.assay_core import segment, validity
@@ -201,7 +199,10 @@ def test_runjson_no_csv_overlap() -> None:
 
     skipped = {1: "悬挂点不可估（走廊标定失败 ⇒ 悬挂点不可估（不猜））⇒ 拒绝产出数字"}
 
-    run_data = analyze._build_run_json(info, plan, "TST", skipped, set())
+    ffmpeg_path, ffmpeg_source = video._resolve_ffmpeg_tool("ffmpeg")
+    ffprobe_path, _ = video._resolve_ffmpeg_tool("ffprobe")
+    run_data = analyze._build_run_json(info, plan, "TST", skipped, set(),
+                                       ffmpeg_path, ffmpeg_source, ffprobe_path)
 
     # 递归提取所有键名
     def extract_keys(obj, prefix=""):
@@ -235,8 +236,10 @@ def test_runjson_no_csv_overlap() -> None:
 # ---- 判据 5：not_scored 包含未产出数字的隔间 -------------------------------
 
 
-def test_runjson_not_scored_present() -> None:
+def test_runjson_not_scored_present(monkeypatch) -> None:
     """存在未产出数字的隔间时，run.json 的 not_scored 里有它和原因原文。"""
+    monkeypatch.setenv("DPX_FFMPEG", "/fake/ffmpeg")
+    monkeypatch.setenv("DPX_FFPROBE", "/fake/ffprobe")
     # 直接构造一个有 skipped 的场景（模拟走廊标定失败）
     from depressionplex import video
     from depressionplex.assay_core import validity
@@ -275,7 +278,10 @@ def test_runjson_not_scored_present() -> None:
         2: "test-ch2：悬挂点不可估（走廊标定失败 ⇒ 悬挂点不可估（不猜））⇒ 拒绝产出数字",
     }
 
-    run_data = analyze._build_run_json(info, plan, "TST", skipped, set())
+    ffmpeg_path, ffmpeg_source = video._resolve_ffmpeg_tool("ffmpeg")
+    ffprobe_path, _ = video._resolve_ffmpeg_tool("ffprobe")
+    run_data = analyze._build_run_json(info, plan, "TST", skipped, set(),
+                                       ffmpeg_path, ffmpeg_source, ffprobe_path)
 
     # not_scored 必须存在且非空
     assert "not_scored" in run_data, "run.json 缺少 not_scored 键"
@@ -296,8 +302,10 @@ def test_runjson_not_scored_present() -> None:
 # ---- 补充：not_scored 为空时也要有这个键 -----------------------------------
 
 
-def test_runjson_not_scored_empty_but_present() -> None:
+def test_runjson_not_scored_empty_but_present(monkeypatch) -> None:
     """not_scored 为空时也要有这个键（写 []），不许省略。"""
+    monkeypatch.setenv("DPX_FFMPEG", "/fake/ffmpeg")
+    monkeypatch.setenv("DPX_FFPROBE", "/fake/ffprobe")
     # 全部正常隔间（MOVE 和 STILL）
     kinds = (MOVE, STILL, MOVE, STILL)
     calib = _frames(kinds, 8)
@@ -314,7 +322,10 @@ def test_runjson_not_scored_empty_but_present() -> None:
         path=Path("/fake.mp4"), fps=FPS, n_frames=len(frames),
         width=400, height=H, frame_count_source="nb_frames")
 
-    run_data = analyze._build_run_json(info, plan, "TST", skipped, set(reports))
+    ffmpeg_path, ffmpeg_source = video._resolve_ffmpeg_tool("ffmpeg")
+    ffprobe_path, _ = video._resolve_ffmpeg_tool("ffprobe")
+    run_data = analyze._build_run_json(info, plan, "TST", skipped, set(reports),
+                                       ffmpeg_path, ffmpeg_source, ffprobe_path)
 
     # not_scored 必须存在
     assert "not_scored" in run_data, \
@@ -325,7 +336,7 @@ def test_runjson_not_scored_empty_but_present() -> None:
 # ---- 判据 4 补强：进了 CSV 的隔间不许在 run.json 里再写一遍有效性 ----------
 
 
-def test_runjson_omits_validity_of_scored_chambers() -> None:
+def test_runjson_omits_validity_of_scored_chambers(monkeypatch) -> None:
     """产出了 CSV 行的隔间，不许出现在 run.json 的 chamber_validity 里。
 
     只比最外层键名（判据 4 的原写法）抓不到这条：CSV 那列叫 `validity_status`，
@@ -333,6 +344,8 @@ def test_runjson_omits_validity_of_scored_chambers() -> None:
     ——CSV 取 `TrialReport`，run.json 取 `plan.trial_validity`，是两个对象。
     所以这里按隔间号比，不按键名比。
     """
+    monkeypatch.setenv("DPX_FFMPEG", "/fake/ffmpeg")
+    monkeypatch.setenv("DPX_FFPROBE", "/fake/ffprobe")
     kinds = (MOVE, STILL, MOVE, STILL)
     calib = _frames(kinds, 8)
     frames = _frames(kinds, 20)
@@ -347,7 +360,10 @@ def test_runjson_omits_validity_of_scored_chambers() -> None:
         width=400, height=H, frame_count_source="nb_frames")
 
     scored = {int(k) for k in reports}
-    run_data = analyze._build_run_json(info, plan, "TST", skipped, scored)
+    ffmpeg_path, ffmpeg_source = video._resolve_ffmpeg_tool("ffmpeg")
+    ffprobe_path, _ = video._resolve_ffmpeg_tool("ffprobe")
+    run_data = analyze._build_run_json(info, plan, "TST", skipped, scored,
+                                       ffmpeg_path, ffmpeg_source, ffprobe_path)
 
     listed = {item["chamber"] for item in run_data["chamber_validity"]}
     dup = listed & scored
@@ -474,7 +490,7 @@ def test_progress_total_filled_in_by_analyze_video() -> None:
 # ---- 补充：序列化不许把「量出来是 0」写成 null -----------------------------
 
 
-def test_runjson_keeps_zero_bl_est_distinct_from_none() -> None:
+def test_runjson_keeps_zero_bl_est_distinct_from_none(monkeypatch) -> None:
     """`bl_est` 为 0.0 时 run.json 必须写 0.0，不许写 null。
 
     `if bl_est else None`（原写法）把「量出来是 0」和「量不出来」抹成同一件事。
@@ -482,6 +498,8 @@ def test_runjson_keeps_zero_bl_est_distinct_from_none() -> None:
     归一化，所以真数据里到不了 0.0——这条守的是序列化器本身不许自作归一化，
     免得哪天生产者改了口径（比如允许 0 表示"贴着地板"），信息在这一层被吃掉。
     """
+    monkeypatch.setenv("DPX_FFMPEG", "/fake/ffmpeg")
+    monkeypatch.setenv("DPX_FFPROBE", "/fake/ffprobe")
     from depressionplex import video
     from depressionplex.assay_core import segment, validity
 
@@ -502,16 +520,23 @@ def test_runjson_keeps_zero_bl_est_distinct_from_none() -> None:
         return R.TrialPlan(chambers=(ch,), trial_validity=validity.TrialValidity(
             chambers=(cv,)), calib_indices=(0, 5), warnings=())
 
-    zero = analyze._build_run_json(info, _plan(0.0), "TST", {}, set())
+    ffmpeg_path, ffmpeg_source = video._resolve_ffmpeg_tool("ffmpeg")
+    ffprobe_path, _ = video._resolve_ffmpeg_tool("ffprobe")
+
+    zero = analyze._build_run_json(info, _plan(0.0), "TST", {}, set(),
+                                    ffmpeg_path, ffmpeg_source, ffprobe_path)
     assert zero["chambers"][0]["corridor"]["bl_est"] == 0.0, \
         "bl_est=0.0 被写成了 null——「量出来是 0」和「量不出来」不是一件事"
 
-    none = analyze._build_run_json(info, _plan(None), "TST", {}, set())
+    none = analyze._build_run_json(info, _plan(None), "TST", {}, set(),
+                                    ffmpeg_path, ffmpeg_source, ffprobe_path)
     assert none["chambers"][0]["corridor"]["bl_est"] is None
 
 
-def test_runjson_keeps_note_none_distinct_from_empty() -> None:
+def test_runjson_keeps_note_none_distinct_from_empty(monkeypatch) -> None:
     """`note` 为 None（没话说）不许被写成 ""（有话说但是空串）。"""
+    monkeypatch.setenv("DPX_FFMPEG", "/fake/ffmpeg")
+    monkeypatch.setenv("DPX_FFPROBE", "/fake/ffprobe")
     from depressionplex import video
     from depressionplex.assay_core import validity
 
@@ -529,19 +554,24 @@ def test_runjson_keeps_note_none_distinct_from_empty() -> None:
         return R.TrialPlan(chambers=(ch,), trial_validity=validity.TrialValidity(
             chambers=(cv,)), calib_indices=(0, 5), warnings=())
 
+    ffmpeg_path, ffmpeg_source = video._resolve_ffmpeg_tool("ffmpeg")
+    ffprobe_path, _ = video._resolve_ffmpeg_tool("ffprobe")
+
     # 隔间 1 没进 CSV（scored 为空）⇒ 它的有效性写在 run.json 里
-    got_none = analyze._build_run_json(info, _plan(None), "TST", {}, set())
+    got_none = analyze._build_run_json(info, _plan(None), "TST", {}, set(),
+                                       ffmpeg_path, ffmpeg_source, ffprobe_path)
     assert got_none["chamber_validity"][0]["note"] is None, \
         "note=None 被写成了空串——下游分不出「没备注」和「备注是空串」"
 
-    got_empty = analyze._build_run_json(info, _plan(""), "TST", {}, set())
+    got_empty = analyze._build_run_json(info, _plan(""), "TST", {}, set(),
+                                        ffmpeg_path, ffmpeg_source, ffprobe_path)
     assert got_empty["chamber_validity"][0]["note"] == ""
 
 
 # ---- 补充：run.json 必须带实际生效的 FROZEN 判定参数（§3.5 点名 θ_mob）-----
 
 
-def test_runjson_carries_effective_rules_params() -> None:
+def test_runjson_carries_effective_rules_params(monkeypatch) -> None:
     """run.json 必须带 θ_mob 等实际生效的判定参数，且**现读 dataclass**。
 
     为什么必须有：一份 immobility 秒数离开本机之后，"凭什么这么算"全靠这几个数
@@ -551,6 +581,8 @@ def test_runjson_carries_effective_rules_params() -> None:
     改了 `TstRulesParams` 而忘了改这里，run.json 会**理直气壮地记错**
     （比 KeyError 危险得多，因为它看起来完全正常）。
     """
+    monkeypatch.setenv("DPX_FFMPEG", "/fake/ffmpeg")
+    monkeypatch.setenv("DPX_FFPROBE", "/fake/ffprobe")
     from depressionplex import video
     from depressionplex.assay_core import rules as RU, validity
 
@@ -566,7 +598,10 @@ def test_runjson_carries_effective_rules_params() -> None:
     plan = R.TrialPlan(chambers=(ch,), trial_validity=validity.TrialValidity(
         chambers=(cv,)), calib_indices=(0, 5), warnings=())
 
-    got = analyze._build_run_json(info, plan, "TST", {}, set())
+    ffmpeg_path, ffmpeg_source = video._resolve_ffmpeg_tool("ffmpeg")
+    ffprobe_path, _ = video._resolve_ffmpeg_tool("ffprobe")
+    got = analyze._build_run_json(info, plan, "TST", {}, set(),
+                                   ffmpeg_path, ffmpeg_source, ffprobe_path)
     assert "rules" in got, "run.json 缺少 rules（θ_mob 等 FROZEN 判定参数）"
 
     frozen = RU.TstRulesParams()
