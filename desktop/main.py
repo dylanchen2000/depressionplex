@@ -13,16 +13,9 @@ import time
 import PySide6
 from PySide6.QtWidgets import QApplication
 
+from depressionplex.cli._stdio import force_utf8
 from desktop.app.main_window import PAGE_CLASSES, MainWindow, PAGE_ORDER
 from desktop.app.utils.paths import resource_path, user_data_dir
-
-# Windows 控制台默认不是 UTF-8，中文页名会抛 UnicodeEncodeError 而不是打印乱码
-# ——那会让自检以「崩溃」而不是「不通过」的形式失败，归因时容易找错方向。
-if sys.platform == "win32":
-    import io
-
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
-    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 
 STYLESHEET = "app/styles/dark.qss"
 
@@ -43,6 +36,7 @@ def self_test() -> int:
     靠 spec 的 `datas` 带进去的，漏了它产品能启动但一身默认灰皮，
     而「能启动」正是最容易被当成通过的那种失败（B10 改 spec 时最容易踩）。
     """
+    force_utf8()
     t0 = time.perf_counter()
     app = QApplication(sys.argv)
     problems: list[str] = []
@@ -92,6 +86,7 @@ def self_test() -> int:
 
 
 def main() -> int:
+    force_utf8()
     if "--self-test" in sys.argv[1:]:
         return self_test()
 

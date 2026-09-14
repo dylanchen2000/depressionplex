@@ -1,7 +1,10 @@
 # -*- mode: python ; coding: utf-8 -*-
 """分析后端 (depressionplex/cli 子命令分发器) 的 PyInstaller spec。
 
-入口是 depressionplex/cli/__init__.py::main()，它分发到各个子命令（analyze / acq-check 等）。
+入口是 analyzer_entry.py（专职薄壳），它调用 depressionplex.cli.main()。
+不许用 __init__.py 当入口：PyInstaller 会把入口当 __main__ 执行，__package__ 为空，
+里面的 `from . import X` 在冻结后必然 ImportError（DP-108 run 34826444142 实测）。
+
 架构 §3.4 三重封堵第三重：`excludes=["PySide6"]`。
 后端不需要 PySide6，装出来体积才不会翻倍。
 """
@@ -14,7 +17,7 @@ from pathlib import Path
 repo_root = Path(".").resolve()
 
 a = Analysis(
-    ["../depressionplex/cli/__init__.py"],
+    ["analyzer_entry.py"],
     pathex=[str(repo_root)],
     binaries=[],
     datas=[],

@@ -898,3 +898,203 @@ def test_cli_dispatcher_help_and_exit_codes():
     assert rc == 2, f"未知子命令应返回 2（用法错误），实际 {rc}"
     assert "未知子命令" in stderr or "nonexistent-subcommand" in stderr, \
         "未知子命令应打印错误到 stderr"
+
+
+def test_analyzer_spec_entry_is_not_package_init():
+    """守卫 C2.1：后端 spec 的入口不许是 __init__.py（run 34826444142 根因）。
+
+    PyInstaller 把入口脚本当 __main__ 执行，__package__ 为空：
+    - 里面的 `from . import X` 在冻结后必然 ImportError
+    - 同一份代码会以 __main__ 和包名两个名字各载一次，模块级状态出现两份
+    """
+    spec_file = ROOT / "packaging" / "build_analyzer_windows.spec"
+    tree = ast.parse(spec_file.read_text(encoding="utf-8"), filename=str(spec_file))
+
+    # 找到 Analysis(...) 调用
+    entry_path = None
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            if isinstance(node.func, ast.Name) and node.func.id == "Analysis":
+                # 第一个位置参数应该是列表字面量
+                if node.args and isinstance(node.args[0], ast.List):
+                    if node.args[0].elts and isinstance(node.args[0].elts[0], ast.Constant):
+                        entry_path = node.args[0].elts[0].value
+                        break
+
+    assert entry_path is not None, "build_analyzer_windows.spec 里找不到 Analysis(...) 的入口路径"
+
+    # 1. 不许以 __init__.py 结尾
+    assert not entry_path.endswith("__init__.py"), \
+        f"后端 spec 入口是 {entry_path!r}，不许用 __init__.py：" \
+        f"PyInstaller 会把它当 __main__ 执行（__package__ 为空），" \
+        f"里面的 `from . import X` 在冻结后必然 ImportError（run 34826444142 实测）"
+
+    # 2. 指向的文件必须真实存在（路径按 spec 所在目录解析）
+    entry_full_path = (spec_file.parent / entry_path).resolve()
+    assert entry_full_path.exists(), \
+        f"spec 入口指向的文件不存在：{entry_path} （解析为 {entry_full_path}）"
+
+
+def test_analyzer_entry_is_thin():
+    """守卫 C2.2：PyInstaller 入口脚本只许有 import 和 sys.exit(main())。
+
+    不许有任何业务逻辑、不许有任何 print：入口脚本会以 __main__ 加载，
+    任何有状态的操作都会被执行两次（__main__ + 作为包的真实入口）。
+    """
+    entry_file = ROOT / "packaging" / "analyzer_entry.py"
+    tree = ast.parse(entry_file.read_text(encoding="utf-8"), filename=str(entry_file))
+
+    # 允许的顶层语句类型（按 AST 节点检查）
+    allowed = {ast.Import, ast.ImportFrom, ast.If, ast.Expr}
+
+    violations = []
+    for node in tree.body:
+        # 跳过 docstring
+        if isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant):
+            continue
+
+        # import / from ... import 语句
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            continue
+
+        # if __name__ == "__main__": 守卫
+        if isinstance(node, ast.If):
+            # 必须是 __name__ == "__main__" 形式的比较
+            test = node.test
+            if (isinstance(test, ast.Compare) and
+                isinstance(test.left, ast.Name) and test.left.id == "__name__" and
+                len(test.ops) == 1 and isinstance(test.ops[0], ast.Eq) and
+                len(test.comparators) == 1 and
+                isinstance(test.comparators[0], ast.Constant) and
+                test.comparators[0].value == "__main__"):
+
+                # 里面只许有一句：sys.exit(main())
+                if len(node.body) != 1:
+                    violations.append(f"if __name__ == '__main__' 里应该只有一句 sys.exit(main())，实际有 {len(node.body)} 句")
+                    continue
+
+                stmt = node.body[0]
+                # 必须是 Expr(Call(Attribute(Name('sys'), 'exit'), [Call(Name('main'), [])]))
+                if not (isinstance(stmt, ast.Expr) and
+                        isinstance(stmt.value, ast.Call) and
+                        isinstance(stmt.value.func, ast.Attribute) and
+                        isinstance(stmt.value.func.value, ast.Name) and
+                        stmt.value.func.value.id == "sys" and
+                        stmt.value.func.attr == "exit" and
+                        len(stmt.value.args) == 1 and
+                        isinstance(stmt.value.args[0], ast.Call) and
+                        isinstance(stmt.value.args[0].func, ast.Name) and
+                        stmt.value.args[0].func.id == "main"):
+                    violations.append("if __name__ == '__main__' 里必须是 sys.exit(main())，不许有其他逻辑")
+                continue
+            else:
+                violations.append("入口脚本只许有 if __name__ == '__main__' 守卫，不许有其他 if")
+                continue
+
+        # 其他任何语句都是违规的
+        violations.append(f"入口脚本不许有 {type(node).__name__} 语句（行 {node.lineno}）")
+
+    assert not violations, \
+        f"analyzer_entry.py 只许有 import 和 sys.exit(main())，违规：\n" + "\n".join(f"  - {v}" for v in violations)
+
+
+def test_cli_main_first_statement_is_force_utf8():
+    """守卫 C2.3：CLI 分发器的 main() 第一句必须是 force_utf8()（run 34823763958 根因）。
+
+    不许把 force_utf8() 后移：Windows console 默认 cp936/cp1252，
+    任何中文 print 放在 force_utf8() 之前都会 UnicodeEncodeError。
+    """
+    cli_init = ROOT / "depressionplex" / "cli" / "__init__.py"
+    tree = ast.parse(cli_init.read_text(encoding="utf-8"), filename=str(cli_init))
+
+    # 找到 main() 函数
+    main_func = None
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == "main":
+            main_func = node
+            break
+
+    assert main_func is not None, "cli/__init__.py 里找不到 main() 函数"
+
+    # 跳过 docstring，找到第一条真实语句
+    body = main_func.body
+    idx = 0
+    if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant):
+        idx = 1  # 跳过 docstring
+
+    assert idx < len(body), "main() 函数体是空的（除了 docstring）"
+
+    first_stmt = body[idx]
+
+    # 必须是 Expr(Call(Attribute(..., 'force_utf8'), []))
+    # 调用形式：_stdio.force_utf8() 或 force_utf8()
+    is_force_utf8 = False
+    if isinstance(first_stmt, ast.Expr) and isinstance(first_stmt.value, ast.Call):
+        func = first_stmt.value.func
+        if isinstance(func, ast.Attribute) and func.attr == "force_utf8":
+            is_force_utf8 = True
+        elif isinstance(func, ast.Name) and func.id == "force_utf8":
+            is_force_utf8 = True
+
+    assert is_force_utf8, \
+        f"cli/__init__.py::main() 第一条语句必须是 _stdio.force_utf8()，" \
+        f"实际是 {ast.unparse(first_stmt)!r}（行 {first_stmt.lineno}）。" \
+        f"Windows console 默认 cp936/cp1252，任何中文 print 放在 force_utf8() 之前都会 UnicodeEncodeError" \
+        f"（run 34823763958 实测）"
+
+
+def test_no_relative_import_in_any_pyinstaller_entry():
+    """守卫 C2.4：所有 PyInstaller 入口脚本不许有相对导入（run 34826444142 根因）。
+
+    PyInstaller 把入口脚本当 __main__ 执行，__package__ 为空，
+    任何 `from . import X` 或 `from .. import X` 都会 ImportError。
+    """
+    # 扫描 packaging/ 下所有以 _entry.py 结尾的文件
+    entry_files = list((ROOT / "packaging").glob("*_entry.py"))
+    assert entry_files, "packaging/ 下找不到任何 *_entry.py 文件"
+
+    violations = []
+    for entry_file in entry_files:
+        tree = ast.parse(entry_file.read_text(encoding="utf-8"), filename=str(entry_file))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                # level > 0 表示相对导入（from . import / from .. import）
+                if node.level > 0:
+                    violations.append(
+                        f"{entry_file.name}:{node.lineno} 有相对导入 "
+                        f"'from {'.' * node.level}{node.module or ''} import ...'，"
+                        f"PyInstaller 会把入口脚本当 __main__ 执行（__package__ 为空），"
+                        f"相对导入在冻结后必然 ImportError（run 34826444142 实测）"
+                    )
+
+    assert not violations, \
+        "PyInstaller 入口脚本不许有相对导入：\n" + "\n".join(f"  - {v}" for v in violations)
+
+
+def test_only_one_utf8_shim():
+    """守卫 C4：编码 shim 只许在 _stdio.py 里，不许到处写 TextIOWrapper（C4 合并）。
+
+    Windows 编码问题已收束到 depressionplex/cli/_stdio.py::force_utf8()，
+    其他任何地方都不许再自己处理 stdout/stderr 的 encoding。
+    """
+    # 扫描所有 .py 文件（排除 _stdio.py 本身）
+    violations = []
+    for py_file in ROOT.rglob("*.py"):
+        # 跳过 _stdio.py（那是唯一允许有 TextIOWrapper 的地方）
+        if py_file.name == "_stdio.py":
+            continue
+
+        # 跳过 __pycache__ 和 .venv
+        if "__pycache__" in py_file.parts or ".venv" in py_file.parts:
+            continue
+
+        content = py_file.read_text(encoding="utf-8")
+        # 查找 TextIOWrapper（不区分大小写，因为可能有 io.TextIOWrapper 或 from io import TextIOWrapper）
+        if "TextIOWrapper" in content:
+            # 找到行号
+            for i, line in enumerate(content.splitlines(), start=1):
+                if "TextIOWrapper" in line:
+                    violations.append(f"{py_file.relative_to(ROOT)}:{i} 不许自己写 TextIOWrapper，必须调用 _stdio.force_utf8()")
+
+    assert not violations, \
+        "编码 shim 只许在 _stdio.py 里，不许到处拷贝：\n" + "\n".join(f"  - {v}" for v in violations)
