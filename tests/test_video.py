@@ -10,6 +10,9 @@ from pathlib import Path
 
 from depressionplex import video as V
 
+# 全局 mock：沙箱里没有 ffmpeg，decode_cmd 会尝试解析。测试不需要真的解码。
+V._resolve_ffmpeg_tool = lambda tool: f"/fake/{tool}"  # type: ignore
+
 
 def _info(**kw) -> V.VideoInfo:
     d = dict(path=Path("/tmp/x.mp4"), fps=25.0, n_frames=9000, width=400,

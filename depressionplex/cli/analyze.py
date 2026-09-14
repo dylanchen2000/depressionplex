@@ -20,6 +20,8 @@ import csv
 import dataclasses
 import importlib.metadata
 import json
+import os
+import subprocess
 import sys
 import time
 from collections.abc import Collection
@@ -136,6 +138,30 @@ def _get_tool_version() -> str:
         return "unknown"
 
 
+def _get_ffmpeg_version(ffmpeg_path: str) -> str | None:
+    """取 ffmpeg -version 第一行。取不到返回 None 并往 stderr 写一行原因。
+
+    照 `_get_tool_version()` 的先例：stdout 要逐位稳定，不许碰；
+    退化必须往 stderr 说一行，**不许写空串冒充**。
+    """
+    try:
+        p = subprocess.run([ffmpeg_path, "-version"],
+                           capture_output=True, text=True, timeout=5)
+        if p.returncode == 0 and p.stdout:
+            first_line = p.stdout.splitlines()[0] if p.stdout.splitlines() else ""
+            if first_line:
+                return first_line
+        print(f"[警告] ffmpeg -version 未返回有效输出（退出码 {p.returncode}）",
+              file=sys.stderr)
+    except FileNotFoundError:
+        print(f"[警告] ffmpeg 可执行文件不存在：{ffmpeg_path}", file=sys.stderr)
+    except subprocess.TimeoutExpired:
+        print(f"[警告] ffmpeg -version 超时（5 秒）", file=sys.stderr)
+    except Exception as e:
+        print(f"[警告] 取 ffmpeg 版本失败：{e}", file=sys.stderr)
+    return None
+
+
 def _build_run_json(info: video.VideoInfo, plan: runner.TrialPlan,
                     assay: str, skipped: dict[int, str],
                     scored: Collection[int]) -> dict:
@@ -153,6 +179,32 @@ def _build_run_json(info: video.VideoInfo, plan: runner.TrialPlan,
         if hasattr(val, "item"):  # numpy scalar
             return val.item()
         return val
+
+    # decoder 块：这批帧是哪个解码器解出来的（架构 §3.5，B6 审计包要印）
+    ffmpeg_path = video._resolve_ffmpeg_tool("ffmpeg")
+    ffprobe_path = video._resolve_ffmpeg_tool("ffprobe")
+
+    # 判断来源：env → bundled → path
+    if os.environ.get("DPX_FFMPEG") or os.environ.get("DPX_FFPROBE"):
+        decoder_source = "env"
+    else:
+        # 判断是否来自随包
+        is_frozen = getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS")
+        if is_frozen:
+            bundled_dir = Path(sys.executable).parent / "ffmpeg"
+        else:
+            repo_root = Path(__file__).resolve().parent.parent.parent
+            bundled_dir = repo_root / "vendor" / "ffmpeg"
+
+        # 如果 ffmpeg_path 在 bundled_dir 下，就是 bundled
+        try:
+            Path(ffmpeg_path).relative_to(bundled_dir)
+            decoder_source = "bundled"
+        except (ValueError, OSError):
+            # 不在 bundled_dir 下，就是 PATH
+            decoder_source = "path"
+
+    ffmpeg_version = _get_ffmpeg_version(ffmpeg_path)
 
     scoring_window_s = list(trial_report.ASSAY_WINDOWS[assay])
 
@@ -206,6 +258,13 @@ def _build_run_json(info: video.VideoInfo, plan: runner.TrialPlan,
         # **从 dataclass 现读，不许在这里抄一份字面量**——抄了就是第二个真值，
         # 而这些数字是「这批秒数凭什么这么算」的全部依据（B6 的报告要印 θ_mob）。
         "rules": dataclasses.asdict(rules.TstRulesParams()),
+        # decoder 块：审计包必须能回答「这批帧是哪个解码器解出来的」（B6 要印）
+        "decoder": {
+            "ffmpeg_path": ffmpeg_path,
+            "ffprobe_path": ffprobe_path,
+            "source": decoder_source,  # "env" | "bundled" | "path"
+            "ffmpeg_version": ffmpeg_version,  # None（取不到）| str（第一行）
+        },
         "video": {
             "path": str(info.path.resolve()),
             "name": info.path.name,

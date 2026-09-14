@@ -26,11 +26,16 @@ import dataclasses
 import json
 import sys
 from pathlib import Path
+from unittest import mock
 
 import numpy as np
 
-from depressionplex import runner as R
+from depressionplex import runner as R, video
 from depressionplex.cli import analyze
+
+# 全局 mock：沙箱里没有 ffmpeg，所以 _resolve_ffmpeg_tool 会失败。
+# 测试不需要真的解码，只需要 _build_run_json 能返回正常结构即可。
+video._resolve_ffmpeg_tool = lambda tool: f"/fake/{tool}"  # type: ignore
 
 # 复用 test_runner.py 的合成帧生成器
 H = 268
