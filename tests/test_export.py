@@ -259,3 +259,60 @@ def test_research_literal_not_hardcoded_in_export_suffixes() -> None:
                         f"export.py:{node.lineno} 里出现字面量 {bad!r}，"
                         "应通过 Mode.xxx.value 格式化到 {{mode}} 模板里"
                     )
+
+
+# ---------------------------------------------------------------------------
+# C13'：evaluate_calibration 不许出现在 services/ 或 pages/ 下（DP-111 单一判定点）
+# ---------------------------------------------------------------------------
+
+def test_evaluate_calibration_only_in_main_window() -> None:
+    """services/ 和 pages/ 下不许调用或 import evaluate_calibration（DP-111 单一判定点）。
+
+    标定判定只在主窗口启动时做一次（main_window.py:63，DP-111）。
+    各页从 window().calibration_status 取结论，导出层接受 CalibrationStatus 入参。
+    两个调用点之间文件可以被换掉，屏幕和导出会基于不同的标定文件各说一句话。
+
+    用 AST 扫代码调用/import（不扫注释），calibration.py 本身豁免。
+    """
+    _FORBIDDEN_DIRS = [
+        ROOT / "desktop" / "app" / "services",
+        ROOT / "desktop" / "app" / "pages",
+    ]
+    violations: list[str] = []
+    for d in _FORBIDDEN_DIRS:
+        for py_file in sorted(d.glob("*.py")):
+            if py_file.name == "calibration.py":
+                continue  # 定义文件本身豁免
+            source = py_file.read_text(encoding="utf-8")
+            try:
+                tree = ast.parse(source)
+            except SyntaxError:
+                continue
+            for node in ast.walk(tree):
+                # 函数调用：evaluate_calibration(...)
+                if (isinstance(node, ast.Call) and
+                        isinstance(node.func, ast.Name) and
+                        node.func.id == "evaluate_calibration"):
+                    violations.append(
+                        f"{py_file.relative_to(ROOT)}:{node.lineno} call"
+                    )
+                # import 引入：from ... import evaluate_calibration
+                elif isinstance(node, ast.ImportFrom):
+                    for alias in node.names:
+                        if alias.name == "evaluate_calibration":
+                            violations.append(
+                                f"{py_file.relative_to(ROOT)}:{node.lineno} import"
+                            )
+                # 普通 import 或 import-as（保险）
+                elif (isinstance(node, ast.Import)):
+                    for alias in node.names:
+                        if "evaluate_calibration" in alias.name:
+                            violations.append(
+                                f"{py_file.relative_to(ROOT)}:{node.lineno} import"
+                            )
+    assert not violations, (
+        f"以下位置调用/import 了 evaluate_calibration，违反 DP-111 单一判定点：\n"
+        + "\n".join(f"  {v}" for v in violations)
+        + "\n判定只在 desktop/app/main_window.py 启动时做一次；"
+        "各页问 window().calibration_status，导出层接受 CalibrationStatus 入参。"
+    )

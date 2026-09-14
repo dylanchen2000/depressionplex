@@ -26,9 +26,8 @@ from PySide6.QtWidgets import (
 
 from desktop.app.models.results import load_results, ResultsTable, ResultsRow, DENOMINATORS
 
-# M2 研究版不随包标定文件；M3 计量版在此接入 paths.calibration_json()。
-# 守卫会检查 export_* 调用的第三个实参不得出现字面量 None（DP-118）。
-_CALIB_PATH_FOR_M2: Path | None = None
+# 判定标定状态只在主窗口启动时做一次（main_window.py:63，DP-111）。
+# 这里用 self.window().calibration_status 拿结论，不许再调 evaluate_calibration。
 
 
 class ResultsPage(QWidget):
@@ -257,12 +256,12 @@ class ResultsPage(QWidget):
 
         import tempfile
         import shutil
-        from desktop.app.services.calibration import evaluate_calibration
         from desktop.app.services.export import export_paths, export_xlsx, export_audit
         from desktop.app.services.export import export_pdf as _export_pdf
         from desktop.app.services.export_pdf import FontUnavailableError
 
-        calib_status = evaluate_calibration(_CALIB_PATH_FOR_M2)
+        # 标定判定只在主窗口启动时做一次（DP-111），这里直接取结论。
+        calib_status = self.window().calibration_status
         e_paths = export_paths(
             self._current_exp, self._current_video_index, calib_status.mode
         )
@@ -287,7 +286,7 @@ class ResultsPage(QWidget):
             # xlsx
             try:
                 export_xlsx(self._current_exp, self._current_video_index,
-                            _CALIB_PATH_FOR_M2, tmp_xlsx)
+                            calib_status, tmp_xlsx)
                 successes.append("xlsx")
             except Exception as e:
                 failures.append(f"xlsx 导出失败：这是软件内部错误，请把这段话发给我们: {e}")
@@ -295,7 +294,7 @@ class ResultsPage(QWidget):
             # 审计包
             try:
                 export_audit(self._current_exp, self._current_video_index,
-                             _CALIB_PATH_FOR_M2, tmp_audit)
+                             calib_status, tmp_audit)
                 successes.append("审计包")
             except Exception as e:
                 failures.append(f"审计包导出失败：这是软件内部错误，请把这段话发给我们: {e}")
@@ -303,7 +302,7 @@ class ResultsPage(QWidget):
             # PDF
             try:
                 _export_pdf(self._current_exp, self._current_video_index,
-                            _CALIB_PATH_FOR_M2, tmp_pdf)
+                            calib_status, tmp_pdf)
                 successes.append("PDF")
             except FontUnavailableError:
                 failures.append("PDF 未导出：请检查中文字体安装")

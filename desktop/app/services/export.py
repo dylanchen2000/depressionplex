@@ -15,8 +15,8 @@ from desktop.app.models.results import load_results
 from desktop.app.services.calibration import (
     G7_MIN_R,
     G8_MAX_ABS_BIAS_S,
+    CalibrationStatus,
     Mode,
-    evaluate_calibration,
 )
 from desktop.app.services.engine import output_paths as engine_output_paths
 
@@ -47,10 +47,13 @@ def export_paths(exp: dict, video_index: int, mode: Mode) -> dict[str, Path]:
     }
 
 
-def _prepare_report(exp: dict, video_index: int, calib_path: Path | None) -> Report:
-    """内部辅助：加载结果 + 标定状态 + 构造 Report 对象。"""
+def _prepare_report(exp: dict, video_index: int, calib_status: CalibrationStatus) -> Report:
+    """内部辅助：加载结果 + 已判定的标定状态 + 构造 Report 对象。
+
+    调用方必须提供已经判好的 CalibrationStatus（来自主窗口启动时的唯一判定点，
+    DP-111），导出层不再调 evaluate_calibration——判定只在主窗口启动时发生一次。
+    """
     results = load_results(exp, video_index)
-    calib_status = evaluate_calibration(calib_path)
     calib = calib_status.calibration
     batch = calib.batch if calib else None
 
@@ -71,7 +74,7 @@ def _prepare_report(exp: dict, video_index: int, calib_path: Path | None) -> Rep
 def export_xlsx(
     exp: dict,
     video_index: int,
-    calib_path: Path | None,
+    calib_status: CalibrationStatus,
     out_path: Path,
 ) -> None:
     """导出 xlsx 报告。
@@ -79,18 +82,18 @@ def export_xlsx(
     Args:
         exp: experiment.json 内容
         video_index: 视频段索引
-        calib_path: calibration.json 路径（None = 研究版）
+        calib_status: 主窗口启动时已判定的标定状态（DP-111 单一判定点）
         out_path: 输出文件路径（应当由 export_paths() 给出）
     """
     from desktop.app.services.export_xlsx import render_xlsx
-    report = _prepare_report(exp, video_index, calib_path)
+    report = _prepare_report(exp, video_index, calib_status)
     render_xlsx(report, out_path)
 
 
 def export_pdf(
     exp: dict,
     video_index: int,
-    calib_path: Path | None,
+    calib_status: CalibrationStatus,
     out_path: Path,
 ) -> None:
     """导出 PDF 报告（需要 PySide6，沙箱里 CI 验证）。
@@ -99,17 +102,17 @@ def export_pdf(
         RuntimeError: 本机缺中文字体时拒绝生成（§0.5），弹提示后不生成 .pdf。
     """
     from desktop.app.services.export_pdf import render_pdf
-    report = _prepare_report(exp, video_index, calib_path)
+    report = _prepare_report(exp, video_index, calib_status)
     render_pdf(report, out_path)
 
 
 def export_audit(
     exp: dict,
     video_index: int,
-    calib_path: Path | None,
+    calib_status: CalibrationStatus,
     out_path: Path,
 ) -> None:
     """导出审计包（zip，标准库实现，沙箱可验）。"""
     from desktop.app.services.export_audit import render_audit_zip
-    report = _prepare_report(exp, video_index, calib_path)
+    report = _prepare_report(exp, video_index, calib_status)
     render_audit_zip(report, out_path)

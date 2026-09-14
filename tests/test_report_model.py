@@ -65,6 +65,7 @@ _DECLARATION_REQUIRED_PHRASES: list[str] = [
     "研究版",
     "没有计量资质",
     "不得",
+    "作为计量结果",       # badge.py NO_METROLOGY_LINE 也含此句（C0 钉住双处合规声明）
     "逐秒时间对齐门",
     "未定",
     "单个试次的秒数不要单独作为结论依据",
@@ -184,6 +185,55 @@ def test_declaration_key_phrases_are_pinned() -> None:
         assert not missing, (
             f"声明文本缺少以下必须短语（改了这些字必须同时改测试）：\n"
             + "\n".join(f"  - {p!r}" for p in missing)
+        )
+
+
+def test_compliance_phrases_consistent_with_badge() -> None:
+    """badge.py NO_METROLOGY_LINE 和声明文本必须都含相同的核心合规短语（C0 追加）。
+
+    这两处都说「没有计量资质/不得作为计量结果」，受众不同，文本各自维护（B8 明确
+    说了不强行合并），但改任何一处而不改另一处就是合规说辞出现分叉——必须红。
+
+    badge.py 由 B8（DP-111）引入，尚未合入时 skip。
+    """
+    badge_path = ROOT / "desktop" / "app" / "models" / "badge.py"
+    if not badge_path.exists():
+        # B8 先合，B6 后合；本测试在 B8 合入后才有意义
+        import sys
+        print("SKIP: badge.py 尚未合入（B8 先合），test_compliance_phrases_consistent_with_badge 跳过", file=sys.stderr)
+        return
+
+    badge_src = badge_path.read_text(encoding="utf-8")
+    # 提取 NO_METROLOGY_LINE 的值（AST，不 import 以避免 PySide6 依赖链）
+    import ast as _ast
+    tree = _ast.parse(badge_src)
+    no_metrology_line: str | None = None
+    for node in _ast.walk(tree):
+        if isinstance(node, _ast.Assign):
+            for t in node.targets:
+                if isinstance(t, _ast.Name) and t.id == "NO_METROLOGY_LINE":
+                    if isinstance(node.value, _ast.Constant):
+                        no_metrology_line = node.value.value
+    assert no_metrology_line is not None, (
+        "badge.py 存在但找不到 NO_METROLOGY_LINE 赋值——守卫写法需要更新"
+    )
+
+    decl = render_declaration(
+        g7_threshold=G7_MIN_R,
+        g8_threshold_s=G8_MAX_ABS_BIAS_S,
+        theta_mob=0.0175,
+        mode="research",
+    )
+
+    _COMPLIANCE_PHRASES = ["没有计量资质", "作为计量结果"]
+    for phrase in _COMPLIANCE_PHRASES:
+        assert phrase in no_metrology_line, (
+            f"badge.py NO_METROLOGY_LINE 缺少合规短语 {phrase!r}，"
+            "改了 badge.py 必须同时确认 declaration 也说同样的事"
+        )
+        assert phrase in decl, (
+            f"声明文本缺少合规短语 {phrase!r}，"
+            "改了 declaration 必须同时确认 badge.py NO_METROLOGY_LINE 也说同样的事"
         )
 
 
