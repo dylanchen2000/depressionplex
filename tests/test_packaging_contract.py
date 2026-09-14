@@ -507,8 +507,9 @@ def test_cli_encoding_reconfigure_single_source():
     violations = []
 
     # 1. 检查每个 CLI main() 的第一条可执行语句必须是 _stdio.force_utf8()
+    # （包括 __init__.py 的分发器，它有两条打中文的路径：--help 和未知子命令）
     for py_file in cli_dir.glob("*.py"):
-        if py_file.name in ("__init__.py", "_stdio.py"):
+        if py_file.name == "_stdio.py":
             continue
 
         src = py_file.read_text(encoding="utf-8")

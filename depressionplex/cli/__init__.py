@@ -11,6 +11,8 @@
 
 import sys
 
+from . import _stdio
+
 # 子命令名册（显式字典，不许隐式发现）
 # 每个键必须对应 depressionplex/cli/ 下一个有 main() 的模块
 SUBCOMMANDS = {
@@ -28,6 +30,9 @@ def main() -> int:
     - 2: 用法错误（未知子命令）
     - 其他：由子命令的 main() 决定
     """
+    # A1: 必须是第一句（在任何 print 之前），两条路径都打中文（stdout/stderr）
+    _stdio.force_utf8()
+
     # --help / -h / 无参数：打印用法到 stdout，rc 0
     # （客户双击 exe 不该看到错误，加了子命令忘了更新用法也能从 --help 发现）
     if len(sys.argv) < 2 or sys.argv[1] in ("--help", "-h"):
