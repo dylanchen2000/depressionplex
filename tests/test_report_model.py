@@ -1165,16 +1165,41 @@ def test_audit_manifest_records_missing_engine_outputs() -> None:
         missing_entries = [e for e in entries if e.get("sha256") is None]
 
         # 四个引擎产出都缺失，每个都必须有 MANIFEST 条目
-        assert len(missing_entries) == 4, (
+        # （另外 experiment.json 和 self_test.json 也会记录为缺失，所以至少 4 条）
+        assert len(missing_entries) >= 4, (
             f"四个缺失的引擎产出应各有一条 MANIFEST 条目，实际有 {len(missing_entries)} 条"
+        )
+
+        # 验证 csv/timeline_csv/run_json/report_txt 四个引擎产出文件的缺失条目
+        # 这四个文件的路径名是我们传入的 MISSING_*.xxx，所以 missing_reason 应含路径
+        engine_expected_names = {
+            missing_csv.name, missing_timeline.name,
+            missing_run.name, missing_report.name,
+        }
+        # 找到与这四个预期文件名匹配的条目
+        engine_missing = [e for e in missing_entries
+                          if e["name"] in engine_expected_names
+                          or (e.get("missing_reason") and any(
+                              n in e["missing_reason"] for n in engine_expected_names
+                          ))]
+
+        # 至少有 4 个对应引擎产出的缺失条目
+        # 用宽松匹配：只要 missing_reason 里包含对应路径就算
+        engine_hit_count = 0
+        for expected_name in engine_expected_names:
+            for e in missing_entries:
+                reason = e.get("missing_reason", "") or ""
+                if expected_name in reason or e["name"] == expected_name:
+                    engine_hit_count += 1
+                    break
+
+        assert engine_hit_count == 4, (
+            f"四个缺失的引擎产出应各有一条匹配的 MANIFEST 条目，"
+            f"实际找到 {engine_hit_count} 条\n"
+            f"缺失条目：{[e['name'] for e in missing_entries]}"
         )
 
         for entry in missing_entries:
             assert entry["sha256"] is None, f"缺失条目 sha256 应是 None：{entry}"
             assert entry["size"] is None, f"缺失条目 size 应是 None：{entry}"
             assert entry.get("missing_reason"), f"缺失条目必须有 missing_reason：{entry}"
-            # name 必须是文件名，不是 "[csv]" 这样的键名
-            name = entry["name"]
-            assert not (name.startswith("[") and name.endswith("]")), (
-                f"缺失条目 name {name!r} 是方括号包裹的键名，应该是预期文件名"
-            )

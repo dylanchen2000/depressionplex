@@ -17,7 +17,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Sequence
 
-from desktop.app.models.report import Report
+from desktop.app.models.report import Report, DENOMINATORS
 
 # ---------------------------------------------------------------------------
 # 字体决策（纯函数，沙箱可测，不 import Qt）
