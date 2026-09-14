@@ -29,6 +29,7 @@ from pathlib import Path
 
 from .. import runner, video
 from ..assay_core import rules, timeline, trial_report
+from . import _stdio
 
 
 def _plan_text(info: video.VideoInfo, plan: runner.TrialPlan) -> str:
@@ -270,12 +271,7 @@ def _build_run_json(info: video.VideoInfo, plan: runner.TrialPlan,
 
 
 def main(argv: list[str] | None = None) -> int:
-    # Windows 上 stdout/stderr 默认编码是 cp1252（英文 locale）或 cp936（中文 locale），
-    # 中文报告文本会 UnicodeEncodeError 或被外壳（按 UTF-8 读管道）解成乱码。
-    # **这个进程拥有自己的 stdout**，在入口处 reconfigure 一次，全程生效。
-    sys.stdout.reconfigure(encoding="utf-8")  # type: ignore[attr-defined]
-    sys.stderr.reconfigure(encoding="utf-8")  # type: ignore[attr-defined]
-
+    _stdio.force_utf8()
     ap = argparse.ArgumentParser(description="录像 → trial 级 immobility 数字")
     ap.add_argument("video", type=Path)
     ap.add_argument("--assay", required=True, choices=sorted(trial_report.ASSAY_WINDOWS),

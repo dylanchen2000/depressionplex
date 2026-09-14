@@ -26,6 +26,7 @@ from ..assay_core import rad as R
 from ..assay_core import segment as S
 from ..assay_core import silhouette as sil
 from ..assay_core import validity as V
+from . import _stdio
 
 AREA_JITTER_GATE = 0.02  # 2% BL²
 CONTRAST_ABS_GATE = 100.0
@@ -39,8 +40,7 @@ def load_gray(path: Path) -> np.ndarray:
 
 
 def main(argv: list[str] | None = None) -> int:
-    sys.stdout.reconfigure(encoding="utf-8")  # type: ignore[attr-defined]
-    sys.stderr.reconfigure(encoding="utf-8")  # type: ignore[attr-defined]
+    _stdio.force_utf8()
 
     ap = argparse.ArgumentParser()
     ap.add_argument("frames", nargs="+", type=Path)

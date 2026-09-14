@@ -11,8 +11,6 @@ jobs:
   build:
     runs-on: windows-latest
     timeout-minutes: 60  # Windows 构建较慢,给足余量
-    env:
-      PYTHONUTF8: 1  # Windows runner 默认 cp1252/cp936，中文 print 会 UnicodeEncodeError
     steps:
       - uses: actions/checkout@v4
 
@@ -55,6 +53,21 @@ jobs:
         run: |
           $version = "${{ steps.get_version.outputs.VERSION }}"
           & "C:\Program Files (x86)\Inno Setup 6\iscc.exe" /DAppVersion=$version installer.iss
+
+      - name: Smoke test - ffmpeg
+        run: |
+          vendor\ffmpeg\ffmpeg.exe -version
+          vendor\ffmpeg\ffprobe.exe -version
+
+      - name: Smoke test - backend exe
+        run: |
+          packaging\dist\depression-analyzer\depression-analyzer.exe --help
+
+      - name: Smoke test - GUI exe (offscreen)
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          packaging\dist\DEPRESSION-PLEX\DEPRESSION-PLEX.exe --self-test
 
       - name: Record build environment
         run: |

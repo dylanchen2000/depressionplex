@@ -39,6 +39,12 @@ def sha256_file(path: Path) -> str:
 
 
 def main() -> int:
+    # Windows 编码归一化（packaging 不许 import depressionplex，所以内联三行）
+    for stream in (sys.stdout, sys.stderr):
+        fn = getattr(stream, "reconfigure", None)
+        if fn is not None:
+            fn(encoding="utf-8")
+
     print(f"下载 LGPL 版 ffmpeg from {FFMPEG_URL}")
 
     # 下载到临时文件

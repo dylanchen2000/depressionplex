@@ -29,13 +29,13 @@ from pathlib import Path
 
 from ..assay_core import timeline
 from ..human_agreement import load_audit_json, union_holds
+from . import _stdio
 
 ROOT = Path(__file__).resolve().parents[2]
 
 
 def main(argv: list[str] | None = None) -> int:
-    sys.stdout.reconfigure(encoding="utf-8")  # type: ignore[attr-defined]
-    sys.stderr.reconfigure(encoding="utf-8")  # type: ignore[attr-defined]
+    _stdio.force_utf8()
 
     ap = argparse.ArgumentParser(description="人工秒表按键段 → 逐段时间线")
     ap.add_argument("-d", "--data-dir", type=Path,

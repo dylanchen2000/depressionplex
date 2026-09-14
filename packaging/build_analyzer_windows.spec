@@ -1,6 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
-"""分析后端 (depressionplex/cli/analyze.py) 的 PyInstaller spec。
+"""分析后端 (depressionplex/cli 子命令分发器) 的 PyInstaller spec。
 
+入口是 depressionplex/cli/__init__.py::main()，它分发到各个子命令（analyze / acq-check 等）。
 架构 §3.4 三重封堵第三重：`excludes=["PySide6"]`。
 后端不需要 PySide6，装出来体积才不会翻倍。
 """
@@ -13,7 +14,7 @@ from pathlib import Path
 repo_root = Path(".").resolve()
 
 a = Analysis(
-    ["../depressionplex/cli/analyze.py"],
+    ["../depressionplex/cli/__init__.py"],
     pathex=[str(repo_root)],
     binaries=[],
     datas=[],
@@ -45,7 +46,7 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
+    upx=False,  # CI 无 upx；有/无 upx 产出不同二进制；UPX 压 Qt DLL 已知启动崩/杀软误报
     console=True,  # 后端是 CLI，需要控制台
     disable_windowed_traceback=False,
     argv_emulation=False,
@@ -60,7 +61,7 @@ coll = COLLECT(
     a.zipfiles,
     a.datas,
     strip=False,
-    upx=True,
+    upx=False,  # 同上：不用 UPX
     upx_exclude=[],
     name="depression-analyzer",  # 文件夹名也要与 ENGINE_STEM 一致
 )

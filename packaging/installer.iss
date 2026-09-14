@@ -22,7 +22,7 @@ UninstallDisplayIcon={app}\DEPRESSION-PLEX.exe
 DisableProgramGroupPage=yes
 
 [Languages]
-Name: "chinese"; MessagesFile: "compiler:Languages\ChineseSimplified.isl"
+Name: "chinese"; MessagesFile: "Languages\ChineseSimplified.isl"
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Files]
@@ -34,9 +34,10 @@ Source: "dist\depression-analyzer\*"; DestDir: "{app}\backend"; Flags: ignorever
 
 ; ffmpeg 及其许可文件（随包分发，装进 backend\ffmpeg\）
 ; 用通配符匹配所有 exe 和 dll（上游版本升级时不用改 .iss）
-Source: "vendor\ffmpeg\*.exe"; DestDir: "{app}\backend\ffmpeg"; Flags: ignoreversion
-Source: "vendor\ffmpeg\*.dll"; DestDir: "{app}\backend\ffmpeg"; Flags: ignoreversion
-Source: "vendor\ffmpeg\LICENSE.txt"; DestDir: "{app}\backend\ffmpeg"; Flags: ignoreversion
+; ..\vendor\ffmpeg\ 相对 .iss 目录（packaging/）→ 仓根的 vendor/ffmpeg/
+Source: "..\vendor\ffmpeg\*.exe"; DestDir: "{app}\backend\ffmpeg"; Flags: ignoreversion
+Source: "..\vendor\ffmpeg\*.dll"; DestDir: "{app}\backend\ffmpeg"; Flags: ignoreversion
+Source: "..\vendor\ffmpeg\LICENSE.txt"; DestDir: "{app}\backend\ffmpeg"; Flags: ignoreversion
 
 [Icons]
 ; 开始菜单快捷方式

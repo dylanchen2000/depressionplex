@@ -56,7 +56,7 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
+    upx=False,  # CI 无 upx；有/无 upx 产出不同二进制；UPX 压 Qt DLL 已知启动崩/杀软误报
     console=False,  # 不要控制台窗口
     disable_windowed_traceback=False,
     argv_emulation=False,
@@ -71,7 +71,7 @@ coll = COLLECT(
     a.zipfiles,
     a.datas,
     strip=False,
-    upx=True,
+    upx=False,  # 同上：不用 UPX
     upx_exclude=[],
     name="DEPRESSION-PLEX",
 )

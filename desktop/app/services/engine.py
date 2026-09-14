@@ -105,7 +105,7 @@ def engine_command() -> list[str]:
         return [str(engine_path)]
 
     else:
-        # 源码运行：python -m depressionplex.cli.analyze，cwd 必须是仓根
+        # 源码运行：python -m depressionplex.cli <子命令> [参数...]，cwd 必须是仓根
         # 仓根 = desktop/ 的上一级（desktop/app/services/engine.py 在 desktop/ 下三层）
         repo_root = Path(__file__).resolve().parent.parent.parent.parent
 
@@ -117,7 +117,7 @@ def engine_command() -> list[str]:
                 f"预期仓根为 {repo_root}。"
             )
 
-        return [sys.executable, "-m", "depressionplex.cli.analyze"]
+        return [sys.executable, "-m", "depressionplex.cli"]
 
 
 def get_cwd() -> Path | None:
@@ -159,6 +159,7 @@ def build_argv(exp: dict, video_index: int) -> list[str]:
     # 拼装参数。键名一律照契约取，**不许 `.get(键, 默认值)`**：
     # 契约校验已经保证键都在，再写默认值只会在键名拼错时把错误盖住。
     argv = engine_command()
+    argv.append("analyze")  # 子命令：analyze（冻结与源码模式 argv 形状一致）
     argv.append(str(video_path.resolve()))
     argv.extend(["--assay", exp["assay"]])
     argv.extend(["--chambers", str(exp["n_chambers"])])

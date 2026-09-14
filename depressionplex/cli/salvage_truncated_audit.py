@@ -138,8 +138,7 @@ def salvage(path: Path) -> tuple[list[dict], dict]:
 
 
 def main() -> int:
-    sys.stdout.reconfigure(encoding="utf-8")  # type: ignore[attr-defined]
-    sys.stderr.reconfigure(encoding="utf-8")  # type: ignore[attr-defined]
+    _stdio.force_utf8()
 
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("input", type=Path)

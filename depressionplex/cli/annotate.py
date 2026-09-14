@@ -28,6 +28,7 @@ from pathlib import Path
 import numpy as np
 
 from ..assay_core import primitives as P
+from . import _stdio
 from ..assay_core import bouts
 
 SCHEMA = 1
@@ -227,9 +228,7 @@ def cmd_agree(args: argparse.Namespace) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    sys.stdout.reconfigure(encoding="utf-8")  # type: ignore[attr-defined]
-    sys.stderr.reconfigure(encoding="utf-8")  # type: ignore[attr-defined]
-
+    _stdio.force_utf8()
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="cmd", required=True)
 

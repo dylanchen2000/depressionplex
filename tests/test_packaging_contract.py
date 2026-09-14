@@ -461,16 +461,25 @@ def test_bin_extraction_no_hardcoded_dll_list():
 
 
 def test_cli_encoding_reconfigure_single_source():
-    """守卫：每个 CLI 入口的 main() 都 reconfigure stdout/stderr 为 UTF-8。
+    """守卫：Windows 编码归一化的唯一来源是 depressionplex/cli/_stdio.py::force_utf8()。
 
     Windows 客户机（cp1252/cp936）上引擎的中文报告会 UnicodeEncodeError 或乱码。
-    每个 CLI 入口必须在 main() 最前面做一次 reconfigure，且不许有第二处。
+    **单一来源原则**：
+    1. 每个 CLI main() 的第一条可执行语句必须是 _stdio.force_utf8() 调用
+    2. depressionplex/ 和 packaging/ 里除 _stdio.py 外不许出现 .reconfigure(
+    3. packaging/fetch_ffmpeg.py 必须用内联的防御式 reconfigure（它 import 不到 depressionplex）
+    4. 外壳（desktop/main.py）的 TextIOWrapper 是唯一例外（errors="replace" 是刻意的，
+       自检宁可打出乱码页名也不许崩；而引擎要的是真报错。外壳不许 import 引擎，所以
+       两边不可能共用代码）
+
+    全仓只许两处编码设置：_stdio.py + desktop/main.py。
     """
     cli_dir = ROOT / "depressionplex" / "cli"
     violations = []
 
+    # 1. 检查每个 CLI main() 的第一条可执行语句必须是 _stdio.force_utf8()
     for py_file in cli_dir.glob("*.py"):
-        if py_file.name == "__init__.py":
+        if py_file.name in ("__init__.py", "_stdio.py"):
             continue
 
         src = py_file.read_text(encoding="utf-8")
@@ -484,24 +493,72 @@ def test_cli_encoding_reconfigure_single_source():
             continue
 
         for main_func in main_funcs:
-            # 检查 main 函数的第一条或前几条语句是否有 reconfigure
-            has_reconfigure = False
-            for stmt in main_func.body[:5]:  # 只检查前 5 条语句（注释、docstring 可能占位）
-                if isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call):
-                    call = stmt.value
-                    if (isinstance(call.func, ast.Attribute) and
-                        call.func.attr == "reconfigure" and
-                        isinstance(call.func.value, ast.Attribute) and
-                        call.func.value.attr in ("stdout", "stderr")):
-                        has_reconfigure = True
-                        break
+            # 第一条可执行语句必须是 _stdio.force_utf8() 或 force_utf8()
+            # （跳过 docstring）
+            first_stmt = None
+            for stmt in main_func.body:
+                if isinstance(stmt, ast.Expr) and isinstance(stmt.value, (ast.Str, ast.Constant)):
+                    continue  # docstring
+                first_stmt = stmt
+                break
 
-            if not has_reconfigure:
-                violations.append(f"{py_file.name}::main() 缺少 stdout/stderr.reconfigure()")
+            if first_stmt is None:
+                violations.append(f"{py_file.name}::main() 函数体为空")
+                continue
+
+            # 检查第一条可执行语句是否为 _stdio.force_utf8() 或 force_utf8()
+            is_force_utf8_call = False
+            if isinstance(first_stmt, ast.Expr) and isinstance(first_stmt.value, ast.Call):
+                call = first_stmt.value
+                # _stdio.force_utf8()
+                if (isinstance(call.func, ast.Attribute) and
+                    call.func.attr == "force_utf8" and
+                    isinstance(call.func.value, ast.Name) and
+                    call.func.value.id == "_stdio"):
+                    is_force_utf8_call = True
+                # force_utf8()（from . import _stdio 后直接调用的形式）
+                elif (isinstance(call.func, ast.Name) and
+                      call.func.id == "force_utf8"):
+                    is_force_utf8_call = True
+
+            if not is_force_utf8_call:
+                violations.append(
+                    f"{py_file.name}::main() 第一条可执行语句不是 _stdio.force_utf8()。"
+                    f"实际第一条：{ast.unparse(first_stmt) if first_stmt else 'None'}"
+                )
+
+    # 2. 检查 depressionplex/ 和 packaging/ 里除白名单外不许出现 .reconfigure(
+    # 白名单：depressionplex/cli/_stdio.py（定义处）、packaging/fetch_ffmpeg.py（import 不到时内联）
+    whitelist = {
+        ROOT / "depressionplex" / "cli" / "_stdio.py",
+        ROOT / "packaging" / "fetch_ffmpeg.py",
+    }
+
+    for base_dir in [ROOT / "depressionplex", ROOT / "packaging"]:
+        for py_file in base_dir.rglob("*.py"):
+            if py_file in whitelist:
+                continue
+
+            src = py_file.read_text(encoding="utf-8")
+            if ".reconfigure(" in src:
+                violations.append(
+                    f"{py_file.relative_to(ROOT)} 里出现 .reconfigure( —— "
+                    f"全仓只许 _stdio.py 和 fetch_ffmpeg.py（内联）使用"
+                )
+
+    # 3. 检查 packaging/fetch_ffmpeg.py 里必须有防御式 reconfigure
+    fetch_ffmpeg_path = ROOT / "packaging" / "fetch_ffmpeg.py"
+    fetch_src = fetch_ffmpeg_path.read_text(encoding="utf-8")
+    # 必须包含 getattr(stream, "reconfigure", None) 的防御式调用
+    if 'getattr(stream, "reconfigure", None)' not in fetch_src and \
+       "getattr(stream, 'reconfigure', None)" not in fetch_src:
+        violations.append(
+            "packaging/fetch_ffmpeg.py::main() 缺少防御式 reconfigure "
+            "（它 import 不到 depressionplex，必须内联）"
+        )
 
     assert not violations, (
-        "这些 CLI 入口的 main() 没有 reconfigure stdout/stderr 为 UTF-8：\n"
-        + "\n".join(violations)
+        "Windows 编码归一化违反单一来源原则：\n" + "\n".join(violations)
     )
 
 
@@ -534,3 +591,154 @@ def test_workflow_deps_match_arch_spec():
         f"build-windows.yml 的 numpy 版本必须是 {arch_numpy}（与架构文件一致）"
     assert f"PySide6=={arch_pyside6}" in workflow_text, \
         f"build-windows.yml 的 PySide6 版本必须是 {arch_pyside6}（与架构文件一致）"
+
+
+def test_iss_language_files_exist_in_repo():
+    """守卫：[Languages] 段的 MessagesFile 必须是仓内文件或 compiler:Default.isl。
+
+    简体中文不在 Inno Setup 官方安装包中，必须随仓分发。
+    compiler: 指的是构建机上装了什么，那是我们控制不了的——控制不了的东西不许
+    出现在发布路径上。唯一例外：compiler:Default.isl（英文，Inno 必带）。
+    """
+    iss_file = ROOT / "packaging" / "installer.iss"
+    iss_text = iss_file.read_text(encoding="utf-8")
+
+    # 解析 [Languages] 段
+    in_languages = False
+    violations = []
+
+    for line in iss_text.splitlines():
+        line_stripped = line.strip()
+
+        # 检测段的开始和结束
+        if line_stripped.startswith("[Languages]"):
+            in_languages = True
+            continue
+        elif line_stripped.startswith("[") and in_languages:
+            break  # 进入下一个段，停止解析
+
+        if not in_languages or not line_stripped or line_stripped.startswith(";"):
+            continue
+
+        # 解析 MessagesFile
+        if "MessagesFile" in line:
+            # 提取 MessagesFile 的值（在引号内）
+            match = re.search(r'MessagesFile:\s*"([^"]+)"', line)
+            if not match:
+                continue
+
+            msg_file = match.group(1)
+
+            if msg_file.startswith("compiler:"):
+                # compiler: 开头的只许是 compiler:Default.isl
+                if msg_file != "compiler:Default.isl":
+                    violations.append(
+                        f"MessagesFile 使用了非 Default.isl 的 compiler: 路径：{msg_file}。"
+                        f"构建机上的文件我们控制不了，不许依赖。"
+                    )
+            else:
+                # 不是 compiler: 开头的，必须是仓内存在的文件
+                # 相对路径按 .iss 所在目录解析（.iss 是 Windows 格式，需转换路径分隔符）
+                msg_file_unix = msg_file.replace("\\", "/")
+                msg_file_path = (iss_file.parent / msg_file_unix).resolve()
+                if not msg_file_path.exists():
+                    violations.append(
+                        f"MessagesFile 指向的文件不存在：{msg_file} "
+                        f"（解析为 {msg_file_path}）"
+                    )
+
+    assert not violations, (
+        ".iss [Languages] 段的 MessagesFile 违规：\n" + "\n".join(violations)
+    )
+
+
+def test_cli_subcommand_registry():
+    """守卫：depressionplex/cli/__init__.py 的 SUBCOMMANDS 名册必须准确。
+
+    分发器是冻结构建的后端 exe 入口，子命令名册必须准确：
+    1. 名册里的每个子命令，depressionplex/cli/ 下必须有对应的模块且有 main() 函数
+    2. 外壳（desktop/）用到的子命令名必须在名册里（镜像 + 对账，外壳不许 import 引擎）
+    """
+    # 1. 读取分发器的 SUBCOMMANDS 名册
+    cli_init = ROOT / "depressionplex" / "cli" / "__init__.py"
+    init_src = cli_init.read_text(encoding="utf-8")
+    tree = ast.parse(init_src, filename=str(cli_init))
+
+    subcommands_dict = None
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name) and target.id == "SUBCOMMANDS":
+                    # 提取字典的键（子命令名）
+                    if isinstance(node.value, ast.Dict):
+                        subcommands_dict = {}
+                        for key in node.value.keys:
+                            if isinstance(key, ast.Constant):
+                                subcommands_dict[key.value] = None
+                    break
+
+    assert subcommands_dict is not None, \
+        "depressionplex/cli/__init__.py 里找不到 SUBCOMMANDS 字典"
+
+    violations = []
+
+    # 2. 每个子命令名必须对应一个有 main() 的模块
+    for subcmd in subcommands_dict:
+        # 子命令名转模块名：analyze -> analyze.py
+        module_file = ROOT / "depressionplex" / "cli" / f"{subcmd.replace('-', '_')}.py"
+
+        # 特殊处理：acq-check -> acq_check.py（连字符转下划线）
+        if not module_file.exists():
+            module_file = ROOT / "depressionplex" / "cli" / f"{subcmd.replace('-', '_')}.py"
+
+        if not module_file.exists():
+            violations.append(
+                f"SUBCOMMANDS 里的子命令 '{subcmd}' 没有对应的模块文件：{module_file.name}"
+            )
+            continue
+
+        # 检查模块是否有 main() 函数
+        mod_src = module_file.read_text(encoding="utf-8")
+        mod_tree = ast.parse(mod_src, filename=str(module_file))
+        has_main = any(
+            isinstance(node, ast.FunctionDef) and node.name == "main"
+            for node in ast.walk(mod_tree)
+        )
+
+        if not has_main:
+            violations.append(
+                f"SUBCOMMANDS 里的子命令 '{subcmd}' 对应的模块 {module_file.name} "
+                f"缺少 main() 函数"
+            )
+
+    # 3. 外壳侧用到的子命令名必须在名册里（镜像 + 对账）
+    # 扫描 desktop/app/services/engine.py 的 argv.append("<子命令>") 调用
+    engine_file = ROOT / "desktop" / "app" / "services" / "engine.py"
+    engine_src = engine_file.read_text(encoding="utf-8")
+    engine_tree = ast.parse(engine_src, filename=str(engine_file))
+
+    used_subcommands = set()
+    for node in ast.walk(engine_tree):
+        # 找 argv.append("<literal>") 形式的调用
+        if isinstance(node, ast.Expr) and isinstance(node.value, ast.Call):
+            call = node.value
+            if (isinstance(call.func, ast.Attribute) and
+                call.func.attr == "append" and
+                isinstance(call.func.value, ast.Name) and
+                call.func.value.id == "argv"):
+                # 提取 append 的参数
+                if call.args and isinstance(call.args[0], ast.Constant):
+                    arg_value = call.args[0].value
+                    if isinstance(arg_value, str) and not arg_value.startswith("-"):
+                        # 可能是子命令（不以 - 开头的字符串字面量）
+                        used_subcommands.add(arg_value)
+
+    for used_cmd in used_subcommands:
+        if used_cmd not in subcommands_dict:
+            violations.append(
+                f"外壳（engine.py）用到的子命令 '{used_cmd}' 不在分发器的 SUBCOMMANDS 名册里"
+            )
+
+    assert not violations, (
+        "CLI 子命令名册校验失败：\n" + "\n".join(violations)
+    )

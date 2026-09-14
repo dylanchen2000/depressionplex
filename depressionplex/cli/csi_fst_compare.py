@@ -35,6 +35,7 @@ from ..csi.fst_import import (
     load_csi_dir,
 )
 from ..human_agreement import load_audit_json
+from . import _stdio
 
 ROOT = Path(__file__).resolve().parents[2]   # depressionplex/cli/x.py → 仓库根
 
@@ -161,8 +162,7 @@ def markdown_summary(rows: list[dict]) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
-    sys.stdout.reconfigure(encoding="utf-8")  # type: ignore[attr-defined]
-    sys.stderr.reconfigure(encoding="utf-8")  # type: ignore[attr-defined]
+    _stdio.force_utf8()
 
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
