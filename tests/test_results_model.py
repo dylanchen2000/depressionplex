@@ -995,3 +995,380 @@ def test_f8_denominators_回算():
             assert used_columns.issubset(denominators_set), (
                 f"回算用到的列 {used_columns} 必须都在 DENOMINATORS['immobility_s'] 里：{denominators_set}"
             )
+
+
+# ========================================================================
+# 第二轮复核新增守卫（G1–G6）
+# ========================================================================
+
+
+def test_g1_roster_unknown_when_no_runjson():
+    """守卫 G1：run.json 缺失时，CSV scored 行保持 kind='scored'，reason=None。
+
+    不许把「名册未知」当成「名册为空」——后者会给每一行挂「名册外」的假话。
+    全表必须没有任何 reason 含「名册」二字。
+    同时断言存在一条 chamber=None 的上下文缺失 alarm。
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        exp = _make_exp(tmp, tmp / "v.mp4")
+
+        # 只写 CSV，不写 run.json
+        csv_path = tmp / "v.csv"
+        with csv_path.open("w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=results.CSV_FIELDS_EXPECTED)
+            writer.writeheader()
+            for ch in [1, 3]:
+                writer.writerow({
+                    "trial_id": f"v-ch{ch}",
+                    "assay": "TST",
+                    "fps": "30.0",
+                    "recording_frames": "10800",
+                    "window_frames": "10800",
+                    "scorable_frames": "10000",
+                    "unknown_frames_window": "800",
+                    "validity_status": "valid",
+                    "occupied_fraction": "0.98",
+                    "scored": "True",
+                    "immobility_s": "100.0",
+                    "immobility_raw_s": "100.0",
+                    "mobility_s": "260.0",
+                    "mobility_bouts": "50",
+                    "first_mobility_onset_s": "1.0",
+                    "gate_messages": "",
+                })
+
+        table = results.load_results(exp, 0)
+
+        # 共 3 行：ch=None 的上下文缺失 alarm + ch1 scored + ch3 scored
+        assert len(table.rows) == 3, f"期望 3 行，实际 {len(table.rows)} 行"
+
+        # 必须有一条 chamber=None 的上下文缺失 alarm
+        none_rows = [r for r in table.rows if r.chamber is None]
+        assert len(none_rows) == 1, "必须有一条 chamber=None 的上下文缺失 alarm"
+        assert none_rows[0].kind == "alarm"
+        assert "上下文缺失" in (none_rows[0].reason or "")
+
+        # CSV scored 行必须保持 kind='scored'，reason=None
+        ch_rows = {r.chamber: r for r in table.rows if r.chamber is not None}
+        assert ch_rows[1].kind == "scored", f"ch1 应该是 scored，实际 {ch_rows[1].kind}"
+        assert ch_rows[1].reason is None, f"ch1 reason 应该是 None，实际 {ch_rows[1].reason!r}"
+        assert ch_rows[3].kind == "scored", f"ch3 应该是 scored，实际 {ch_rows[3].kind}"
+        assert ch_rows[3].reason is None, f"ch3 reason 应该是 None，实际 {ch_rows[3].reason!r}"
+
+        # 全表不许有任何 reason 含「名册」二字（G1 的核心要求）
+        for row in table.rows:
+            if row.reason is not None:
+                assert "名册" not in row.reason, (
+                    f"run.json 缺失时不许出现「名册」相关 reason，"
+                    f"但 ch={row.chamber} 的 reason={row.reason!r}"
+                )
+
+
+def _make_scored_csv_row(tmp: Path, chambers: list[int]) -> None:
+    """辅助：写一份合法的多隔间 CSV。"""
+    csv_path = tmp / "v.csv"
+    with csv_path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=results.CSV_FIELDS_EXPECTED)
+        writer.writeheader()
+        for ch in chambers:
+            writer.writerow({
+                "trial_id": f"v-ch{ch}",
+                "assay": "TST",
+                "fps": "30.0",
+                "recording_frames": "10800",
+                "window_frames": "10800",
+                "scorable_frames": "10000",
+                "unknown_frames_window": "800",
+                "validity_status": "valid",
+                "occupied_fraction": "0.98",
+                "scored": "True",
+                "immobility_s": "100.0",
+                "immobility_raw_s": "100.0",
+                "mobility_s": "260.0",
+                "mobility_bouts": "50",
+                "first_mobility_onset_s": "1.0",
+                "gate_messages": "",
+            })
+
+
+def test_g2_truncated_csv_row_raises():
+    """守卫 G2：CSV 行被截短 ⇒ ResultsError，错误里含行号。
+
+    DictReader 把缺失的尾部列填 None（restval）。
+    以前会在 .lower() 时炸成 AttributeError；现在必须提前检测 None 值并抛 ResultsError。
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        exp = _make_exp(tmp, tmp / "v.mp4")
+
+        run_json = tmp / "v_run.json"
+        run_json.write_text(json.dumps(_make_run_json([1])), encoding="utf-8")
+
+        # 写截短行（只有前 3 个值，后 13 个缺失）
+        csv_path = tmp / "v.csv"
+        with csv_path.open("w", newline="", encoding="utf-8") as f:
+            f.write(",".join(results.CSV_FIELDS_EXPECTED) + "\n")
+            f.write("v-ch1,TST,30.0\n")  # 只有 3 列，后面缺失
+
+        try:
+            results.load_results(exp, 0)
+            assert False, "截短行应该抛 ResultsError"
+        except results.ResultsError as e:
+            err_str = str(e)
+            # 必须包含行号（第 2 行，因为第 1 行是表头）
+            assert "2" in err_str, f"错误里应该含行号，实际：{err_str}"
+            # 必须包含"截短"或相关说明
+            assert "截短" in err_str or "缺少" in err_str or "None" in err_str.lower() or "列" in err_str, (
+                f"错误描述不够清楚：{err_str}"
+            )
+
+
+def test_g3_extra_long_csv_row_raises():
+    """守卫 G3：CSV 行比表头多值 ⇒ ResultsError，错误里含行号。
+
+    DictReader 把多余的值放在 None 键下；以前静默丢掉，现在必须抛错。
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        exp = _make_exp(tmp, tmp / "v.mp4")
+
+        run_json = tmp / "v_run.json"
+        run_json.write_text(json.dumps(_make_run_json([1])), encoding="utf-8")
+
+        # 写超长行（17 个值，表头只有 16 列）
+        csv_path = tmp / "v.csv"
+        with csv_path.open("w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow(results.CSV_FIELDS_EXPECTED)
+            # 合法的 16 个值 + 1 个多出来的值
+            row = [
+                "v-ch1", "TST", "30.0", "10800", "10800",
+                "10000", "800", "valid", "0.98", "True",
+                "100.0", "100.0", "260.0", "50", "1.0",
+                "",           # gate_messages（合法）
+                "extra_val",  # 第 17 个，多余的
+            ]
+            writer.writerow(row)
+
+        try:
+            results.load_results(exp, 0)
+            assert False, "超长行应该抛 ResultsError"
+        except results.ResultsError as e:
+            err_str = str(e)
+            assert "2" in err_str, f"错误里应该含行号，实际：{err_str}"
+            assert "多余" in err_str or "多于" in err_str or "超" in err_str or "extra" in err_str.lower(), (
+                f"错误描述不够清楚：{err_str}"
+            )
+
+
+def test_g2_g3_reverse_guard_empty_string_valid():
+    """反向守卫：空串字段不许被 G2/G3 检查误判为坏行。
+
+    引擎未放行的行 immobility_s="" 是合法的，只有 None（列真的缺失）才是坏行。
+    拿 F3 那份 immobility_s="" 的夹具再跑一次，断言仍能正常读出。
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        exp = _make_exp(tmp, tmp / "v.mp4")
+
+        run_json = tmp / "v_run.json"
+        run_json.write_text(json.dumps(_make_run_json([1])), encoding="utf-8")
+
+        # 与 test_f3_scored_false_becomes_alarm 完全一样的夹具
+        csv_path = tmp / "v.csv"
+        with csv_path.open("w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=results.CSV_FIELDS_EXPECTED)
+            writer.writeheader()
+            writer.writerow({
+                "trial_id": "v-ch1",
+                "assay": "TST",
+                "fps": "30.0",
+                "recording_frames": "10800",
+                "window_frames": "10800",
+                "scorable_frames": "10000",
+                "unknown_frames_window": "800",
+                "validity_status": "excluded",
+                "occupied_fraction": "0.10",
+                "scored": "False",
+                "immobility_s": "",       # 空串，合法
+                "immobility_raw_s": "",   # 空串，合法
+                "mobility_s": "",
+                "mobility_bouts": "",
+                "first_mobility_onset_s": "",
+                "gate_messages": "排除态不放行计分",
+            })
+
+        # 必须能正常读出，不能因为空串而报 G2 错误
+        table = results.load_results(exp, 0)
+        assert len(table.rows) == 1
+        row = table.rows[0]
+        assert row.kind == "alarm"
+        assert row.immobility_s == ""   # 空串原样保留
+
+
+def test_g4_duplicate_chamber_raises():
+    """守卫 G4：CSV 里同一个隔间出现两行 ⇒ ResultsError，错误里含两个行号。
+
+    以前前一行会被静默覆盖，数字被悄悄顶掉，用户不可能发现。
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        exp = _make_exp(tmp, tmp / "v.mp4")
+
+        run_json = tmp / "v_run.json"
+        run_json.write_text(json.dumps(_make_run_json([1])), encoding="utf-8")
+
+        # 写 CSV，ch1 出现两行，第二行 immobility_s 故意不同
+        csv_path = tmp / "v.csv"
+        with csv_path.open("w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=results.CSV_FIELDS_EXPECTED)
+            writer.writeheader()
+            # 第一行（行号 2）
+            writer.writerow({
+                "trial_id": "v-ch1",
+                "assay": "TST",
+                "fps": "30.0",
+                "recording_frames": "10800",
+                "window_frames": "10800",
+                "scorable_frames": "10000",
+                "unknown_frames_window": "800",
+                "validity_status": "valid",
+                "occupied_fraction": "0.98",
+                "scored": "True",
+                "immobility_s": "100.0",
+                "immobility_raw_s": "100.0",
+                "mobility_s": "260.0",
+                "mobility_bouts": "50",
+                "first_mobility_onset_s": "1.0",
+                "gate_messages": "",
+            })
+            # 第二行（行号 3）—— 同一个 ch1
+            writer.writerow({
+                "trial_id": "v-ch1",
+                "assay": "TST",
+                "fps": "30.0",
+                "recording_frames": "10800",
+                "window_frames": "10800",
+                "scorable_frames": "10000",
+                "unknown_frames_window": "800",
+                "validity_status": "valid",
+                "occupied_fraction": "0.98",
+                "scored": "True",
+                "immobility_s": "9.9",    # 故意不同
+                "immobility_raw_s": "9.9",
+                "mobility_s": "350.1",
+                "mobility_bouts": "50",
+                "first_mobility_onset_s": "1.0",
+                "gate_messages": "",
+            })
+
+        try:
+            results.load_results(exp, 0)
+            assert False, "重复隔间应该抛 ResultsError"
+        except results.ResultsError as e:
+            err_str = str(e)
+            # 错误里必须含两个行号（2 和 3）
+            assert "2" in err_str and "3" in err_str, (
+                f"错误里应该含两个行号（2 和 3），实际：{err_str}"
+            )
+            # 错误里必须提到 ch1
+            assert "ch1" in err_str or "chamber" in err_str.lower(), (
+                f"错误里应该提到重复的 chamber，实际：{err_str}"
+            )
+
+
+def test_g5_invalid_scored_value_raises():
+    """守卫 G5：scored="yes" ⇒ ResultsError；非 True/False 一律拒。
+
+    以前 "yes" 会被当成 False 处理，同时给出假理由「CSV 标了未放行计分，但引擎没给原因」。
+    引擎写 scored 列用的是 Python bool（→ True/False），没有第三种合法取值。
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        exp = _make_exp(tmp, tmp / "v.mp4")
+
+        run_json = tmp / "v_run.json"
+        run_json.write_text(json.dumps(_make_run_json([1])), encoding="utf-8")
+
+        csv_path = tmp / "v.csv"
+        with csv_path.open("w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=results.CSV_FIELDS_EXPECTED)
+            writer.writeheader()
+            writer.writerow({
+                "trial_id": "v-ch1",
+                "assay": "TST",
+                "fps": "30.0",
+                "recording_frames": "10800",
+                "window_frames": "10800",
+                "scorable_frames": "10000",
+                "unknown_frames_window": "800",
+                "validity_status": "valid",
+                "occupied_fraction": "0.98",
+                "scored": "yes",    # 不合法
+                "immobility_s": "100.0",
+                "immobility_raw_s": "100.0",
+                "mobility_s": "260.0",
+                "mobility_bouts": "50",
+                "first_mobility_onset_s": "1.0",
+                "gate_messages": "",
+            })
+
+        try:
+            results.load_results(exp, 0)
+            assert False, "scored='yes' 应该抛 ResultsError"
+        except results.ResultsError as e:
+            err_str = str(e)
+            assert "scored" in err_str.lower() or "yes" in err_str, (
+                f"错误里应该提到 scored 值或原始值，实际：{err_str}"
+            )
+
+
+def test_g5_valid_scored_variants_accepted():
+    """守卫 G5 反向：True/False/true/false 四种写法都能正常读出。
+
+    引擎写 True/False，但大小写变体也必须接受（防止引擎实现变化）。
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        exp = _make_exp(tmp, tmp / "v.mp4")
+
+        run_json = tmp / "v_run.json"
+        run_json.write_text(json.dumps(_make_run_json([1, 2, 3, 4])), encoding="utf-8")
+
+        csv_path = tmp / "v.csv"
+        with csv_path.open("w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=results.CSV_FIELDS_EXPECTED)
+            writer.writeheader()
+            # 四种合法写法：True, False, true, false
+            for ch, scored_val in [(1, "True"), (2, "False"), (3, "true"), (4, "false")]:
+                writer.writerow({
+                    "trial_id": f"v-ch{ch}",
+                    "assay": "TST",
+                    "fps": "30.0",
+                    "recording_frames": "10800",
+                    "window_frames": "10800",
+                    "scorable_frames": "10000",
+                    "unknown_frames_window": "800",
+                    "validity_status": "valid",
+                    "occupied_fraction": "0.98",
+                    "scored": scored_val,
+                    "immobility_s": "100.0" if scored_val.lower() == "true" else "",
+                    "immobility_raw_s": "100.0" if scored_val.lower() == "true" else "",
+                    "mobility_s": "260.0" if scored_val.lower() == "true" else "",
+                    "mobility_bouts": "50" if scored_val.lower() == "true" else "",
+                    "first_mobility_onset_s": "1.0" if scored_val.lower() == "true" else "",
+                    "gate_messages": "" if scored_val.lower() == "true" else "排除",
+                })
+
+        # 必须能正常读出，不抛错
+        table = results.load_results(exp, 0)
+        assert len(table.rows) == 4
+
+        ch_rows = {r.chamber: r for r in table.rows}
+        # ch1 和 ch3 是 scored=True 的行
+        assert ch_rows[1].kind == "scored"
+        assert ch_rows[3].kind == "scored"
+        # ch2 和 ch4 是 scored=False 的 alarm 行
+        assert ch_rows[2].kind == "alarm"
+        assert ch_rows[4].kind == "alarm"
