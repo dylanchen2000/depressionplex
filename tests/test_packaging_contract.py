@@ -362,21 +362,32 @@ def test_run_json_decoder_block():
 
 
 def test_license_files_in_packaging():
-    """守卫 10：许可文件必须进包（.iss 与 fetch_ffmpeg.py 里都要出现）。"""
+    """守卫 10：许可文件必须进包（.iss 里用通配，fetch_ffmpeg 里真提取）。
+
+    BtbN 的 lgpl-shared 包里只有 LICENSE.txt 一个许可文件（架构师实测）。
+    .iss 用通配符（`*.exe` / `*.dll` / `LICENSE.txt`），守卫只检查通配规则存在。
+    fetch_ffmpeg.py 的提取规则必须覆盖：bin/ 全体（除 ffplay.exe）+ LICENSE.txt。
+    """
     iss_path = ROOT / "packaging" / "installer.iss"
     iss_text = iss_path.read_text(encoding="utf-8")
 
     fetch_py = ROOT / "packaging" / "fetch_ffmpeg.py"
     fetch_text = fetch_py.read_text(encoding="utf-8")
 
-    # ffmpeg LGPL 许可文件名
-    license_files = ["LICENSE", "COPYING.LGPLv2.1", "COPYING.LGPLv3"]
+    # .iss 必须用通配符匹配所有 exe / dll，且必须含 LICENSE.txt
+    assert r"vendor\ffmpeg\*.exe" in iss_text, \
+        "installer.iss 里找不到 vendor\\ffmpeg\\*.exe 通配规则"
+    assert r"vendor\ffmpeg\*.dll" in iss_text, \
+        "installer.iss 里找不到 vendor\\ffmpeg\\*.dll 通配规则"
+    assert "LICENSE.txt" in iss_text, \
+        "installer.iss 里找不到 LICENSE.txt"
 
-    for lic in license_files:
-        # .iss 里必须出现
-        assert lic in iss_text, \
-            f"installer.iss 里找不到许可文件 {lic}"
+    # fetch_ffmpeg.py 必须提取 LICENSE.txt
+    assert "LICENSE.txt" in fetch_text, \
+        "fetch_ffmpeg.py 里找不到 LICENSE.txt"
 
-        # fetch_ffmpeg.py 里必须出现（在 EXTRACT_PATTERNS 里）
-        assert lic in fetch_text, \
-            f"fetch_ffmpeg.py 里找不到许可文件 {lic}"
+    # fetch_ffmpeg.py 的提取规则注释必须提到 bin/ 和跳过 ffplay
+    assert "bin/" in fetch_text, \
+        "fetch_ffmpeg.py 里找不到 bin/ 提取规则"
+    assert "ffplay" in fetch_text.lower(), \
+        "fetch_ffmpeg.py 里找不到跳过 ffplay 的说明"

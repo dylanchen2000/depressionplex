@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from unittest import mock
 
 from depressionplex import video as V
 
@@ -34,37 +35,63 @@ def test_duration_from_measured_frames() -> None:
     assert abs(_info(fps=25.0, n_frames=9000).duration_s - 360.0) < 1e-9
 
 
-def test_decode_cmd_seeks_by_frame_not_time(monkeypatch) -> None:
+def test_decode_cmd_seeks_by_frame_not_time() -> None:
     """按帧号定位。`-ss` 会落到最近关键帧，误差几帧——而窗口边界
     （TST 全程 / FST 后 4 min）错几帧就是口径事故。"""
-    monkeypatch.setenv("DPX_FFMPEG", "/fake/ffmpeg")
-    cmd = V.decode_cmd(_info(), start_frame=3000, n_frames=100)
-    assert "-ss" not in cmd, "不许按时间跳转"
-    assert any(c.startswith("select=gte(n") and "3000" in c for c in cmd), cmd
-    assert "-vsync" in cmd and cmd[cmd.index("-vsync") + 1] == "0"
-    assert cmd[cmd.index("-frames:v") + 1] == "100"
-    # 灰度裸流：解码器直接给单通道，省一次 RGB→gray 转换，也免得色彩矩阵差异
-    # 让同一段素材在两台机器上解出不同的灰度值。
-    assert cmd[-5:] == ["-f", "rawvideo", "-pix_fmt", "gray", "-"]
-
-
-def test_decode_cmd_no_filter_when_starting_at_zero(monkeypatch) -> None:
-    """从头解就别插 filter：select 链会让 ffmpeg 走一遍额外的滤镜图。"""
-    monkeypatch.setenv("DPX_FFMPEG", "/fake/ffmpeg")
-    cmd = V.decode_cmd(_info())
-    assert "-vf" not in cmd
-    assert "-frames:v" not in cmd
-
-
-def test_decode_cmd_rejects_nonsense(monkeypatch) -> None:
-    monkeypatch.setenv("DPX_FFMPEG", "/fake/ffmpeg")
-    for kw in ({"start_frame": -1}, {"n_frames": 0}, {"n_frames": -5}):
-        try:
-            V.decode_cmd(_info(), **kw)           # type: ignore[arg-type]
-        except ValueError:
-            pass
+    # 手动设置并还原环境变量（本仓没有 pytest，不能用 monkeypatch fixture）
+    old_env = os.environ.get("DPX_FFMPEG")
+    try:
+        os.environ["DPX_FFMPEG"] = "/fake/ffmpeg"
+        # Mock Path.exists 让 /fake/ffmpeg 看起来存在
+        with mock.patch("pathlib.Path.exists", return_value=True):
+            cmd = V.decode_cmd(_info(), start_frame=3000, n_frames=100)
+            assert "-ss" not in cmd, "不许按时间跳转"
+            assert any(c.startswith("select=gte(n") and "3000" in c for c in cmd), cmd
+            assert "-vsync" in cmd and cmd[cmd.index("-vsync") + 1] == "0"
+            assert cmd[cmd.index("-frames:v") + 1] == "100"
+            # 灰度裸流：解码器直接给单通道，省一次 RGB→gray 转换，也免得色彩矩阵差异
+            # 让同一段素材在两台机器上解出不同的灰度值。
+            assert cmd[-5:] == ["-f", "rawvideo", "-pix_fmt", "gray", "-"]
+    finally:
+        if old_env is None:
+            os.environ.pop("DPX_FFMPEG", None)
         else:
-            raise AssertionError(f"{kw} 应被拒绝")
+            os.environ["DPX_FFMPEG"] = old_env
+
+
+def test_decode_cmd_no_filter_when_starting_at_zero() -> None:
+    """从头解就别插 filter：select 链会让 ffmpeg 走一遍额外的滤镜图。"""
+    old_env = os.environ.get("DPX_FFMPEG")
+    try:
+        os.environ["DPX_FFMPEG"] = "/fake/ffmpeg"
+        with mock.patch("pathlib.Path.exists", return_value=True):
+            cmd = V.decode_cmd(_info())
+            assert "-vf" not in cmd
+            assert "-frames:v" not in cmd
+    finally:
+        if old_env is None:
+            os.environ.pop("DPX_FFMPEG", None)
+        else:
+            os.environ["DPX_FFMPEG"] = old_env
+
+
+def test_decode_cmd_rejects_nonsense() -> None:
+    old_env = os.environ.get("DPX_FFMPEG")
+    try:
+        os.environ["DPX_FFMPEG"] = "/fake/ffmpeg"
+        with mock.patch("pathlib.Path.exists", return_value=True):
+            for kw in ({"start_frame": -1}, {"n_frames": 0}, {"n_frames": -5}):
+                try:
+                    V.decode_cmd(_info(), **kw)           # type: ignore[arg-type]
+                except ValueError:
+                    pass
+                else:
+                    raise AssertionError(f"{kw} 应被拒绝")
+    finally:
+        if old_env is None:
+            os.environ.pop("DPX_FFMPEG", None)
+        else:
+            os.environ["DPX_FFMPEG"] = old_env
 
 
 def test_probe_missing_file_raises_video_error() -> None:
