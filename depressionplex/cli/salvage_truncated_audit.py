@@ -138,6 +138,9 @@ def salvage(path: Path) -> tuple[list[dict], dict]:
 
 
 def main() -> int:
+    sys.stdout.reconfigure(encoding="utf-8")  # type: ignore[attr-defined]
+    sys.stderr.reconfigure(encoding="utf-8")  # type: ignore[attr-defined]
+
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("input", type=Path)
     ap.add_argument("-o", "--output", type=Path, required=True)

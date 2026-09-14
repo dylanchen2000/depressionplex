@@ -39,6 +39,9 @@ def load_gray(path: Path) -> np.ndarray:
 
 
 def main(argv: list[str] | None = None) -> int:
+    sys.stdout.reconfigure(encoding="utf-8")  # type: ignore[attr-defined]
+    sys.stderr.reconfigure(encoding="utf-8")  # type: ignore[attr-defined]
+
     ap = argparse.ArgumentParser()
     ap.add_argument("frames", nargs="+", type=Path)
     ap.add_argument("--chambers", type=int, default=4)

@@ -30,6 +30,9 @@ from .. import lovo_cv as L
 
 
 def main() -> int:
+    sys.stdout.reconfigure(encoding="utf-8")  # type: ignore[attr-defined]
+    sys.stderr.reconfigure(encoding="utf-8")  # type: ignore[attr-defined]
+
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--window", type=float, default=360.0,
                     help="试次窗口秒数（工具 360 s 硬收口口径）")

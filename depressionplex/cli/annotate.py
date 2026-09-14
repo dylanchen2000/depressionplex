@@ -227,6 +227,9 @@ def cmd_agree(args: argparse.Namespace) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    sys.stdout.reconfigure(encoding="utf-8")  # type: ignore[attr-defined]
+    sys.stderr.reconfigure(encoding="utf-8")  # type: ignore[attr-defined]
+
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="cmd", required=True)
 

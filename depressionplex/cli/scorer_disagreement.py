@@ -173,6 +173,9 @@ def _describe(vals, label: str) -> float:
 
 
 def main(argv: list[str]) -> int:
+    sys.stdout.reconfigure(encoding="utf-8")  # type: ignore[attr-defined]
+    sys.stderr.reconfigure(encoding="utf-8")  # type: ignore[attr-defined]
+
     if len(argv) != 3:
         print("用法: python3 -m depressionplex.cli.scorer_disagreement <A.json> <B.json>",
               file=sys.stderr)

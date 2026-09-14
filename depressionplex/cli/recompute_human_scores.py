@@ -24,6 +24,9 @@ ROOT = Path(__file__).resolve().parents[2]   # depressionplex/cli/x.py → 仓�
 
 
 def main() -> int:
+    sys.stdout.reconfigure(encoding="utf-8")  # type: ignore[attr-defined]
+    sys.stderr.reconfigure(encoding="utf-8")  # type: ignore[attr-defined]
+
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("-d", "--data-dir", type=Path,
                     default=ROOT / "data" / "human_scores" / "raw")

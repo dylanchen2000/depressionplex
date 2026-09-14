@@ -11,6 +11,8 @@ jobs:
   build:
     runs-on: windows-latest
     timeout-minutes: 60  # Windows 构建较慢,给足余量
+    env:
+      PYTHONUTF8: 1  # Windows runner 默认 cp1252/cp936，中文 print 会 UnicodeEncodeError
     steps:
       - uses: actions/checkout@v4
 
@@ -20,7 +22,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install PySide6==6.7.3 pyinstaller "numpy>=1.24"
+          pip install PySide6==6.7.3 pyinstaller numpy==1.26.4
 
       - name: Fetch and verify ffmpeg (LGPL)
         run: python packaging/fetch_ffmpeg.py
@@ -54,9 +56,15 @@ jobs:
           $version = "${{ steps.get_version.outputs.VERSION }}"
           & "C:\Program Files (x86)\Inno Setup 6\iscc.exe" /DAppVersion=$version installer.iss
 
+      - name: Record build environment
+        run: |
+          pip freeze > packaging/build_env.txt
+
       - name: Upload installer artifact
         uses: actions/upload-artifact@v4
         with:
           name: DEPRESSION-PLEX-Setup-${{ steps.get_version.outputs.VERSION }}
-          path: packaging/DEPRESSION-PLEX-Setup-${{ steps.get_version.outputs.VERSION }}.exe
+          path: |
+            packaging/DEPRESSION-PLEX-Setup-${{ steps.get_version.outputs.VERSION }}.exe
+            packaging/build_env.txt
           if-no-files-found: error
