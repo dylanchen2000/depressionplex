@@ -117,17 +117,27 @@ DepressionPlex 没有神经网络模型，**不许把 onnxruntime / ultralytics 
 
 ### 3.2 依赖清单（锁死，这是产品化最大的结构性优势）
 
-**权威清单在 `pyproject.toml`**（`[project.optional-dependencies].desktop` 与
-`[tool.depressionplex.desktop-imports]`）。下面这张表是它的镜像，有守卫逐字对账
-（`test_dependency_table_in_spec_matches_pyproject`）——两处分叉即红，不许靠人记（DP-114）。
+**权威清单在 `pyproject.toml`**——外壳依赖在 `[project.optional-dependencies].desktop`
+与 `[tool.depressionplex.desktop-imports]`，构建期/引擎侧的钉子在
+`[tool.depressionplex.build-pins]`。下面这张表是它们的镜像，有守卫逐字对账
+（`test_dependency_table_in_spec_matches_pyproject`）——两处分叉即红，不许靠人记（DP-114 + DP-108 A9）。
 
 ```
 PySide6==6.7.3        # 与 drugeffectscan 同版，踩过的坑不重踩；全外壳可用
 openpyxl==3.1.5       # xlsx 导出；**只许出现在 desktop/app/services/export_xlsx.py**
-numpy==1.26.4         # 引擎的依赖，不是外壳的（外壳不许 import 引擎）
+numpy==1.26.4         # 引擎的依赖，不是外壳的（外壳不许 import 引擎）；build-pins
+pyinstaller==6.22.3   # 只在构建机上；决定客户那个 exe 的 bootloader；build-pins
 # 无 onnxruntime、无 opencv、无 torch、无 scipy
 # ffmpeg：随包分发单个可执行文件，只用于解码（DP-053：ffmpeg 只许在 assay_core 之外）
 ```
+
+上表四行里，**前两行是外壳依赖**（客户机上 import 的），**后两行是 build-pins**
+（一个决定引擎算出来的数字、一个决定构建产物的字节）。分成两处不是分类癖：
+`[project].dependencies` 里那句 `numpy>=1.24` 是「引擎能跑起来的下限」，
+build-pins 里的 `1.26.4` 是「验收读数是在哪个版本上得到的」——**两个不同的事实**。
+2026-09-14 之前 numpy 只活在这张表里，而守卫把它从对账里 pop 掉了
+（理由：它不是外壳依赖），于是**它待在一张有守卫的表里，自己正好在守卫的豁免名单上，
+看着被守着，其实没有**——那次真构建就装进了 numpy 2.4.6（DP-115、DP-108 A9c）。
 
 两条已裁决、容易被写回去的：
 

@@ -179,6 +179,39 @@ def _desktop_deps() -> tuple[dict[str, str], dict[str, dict[str, str]]]:
     return declared, scopes
 
 
+def _build_pins() -> dict[str, str]:
+    """构建期/引擎侧钉子的**唯一权威位置**：`pyproject.toml` 的
+    `[tool.depressionplex.build-pins]`（DP-114 的延伸，DP-108 A9c）。
+
+    返回 `{分发名: "名==版本"}`，形状与 `_desktop_deps()` 的第一个返回值一致，
+    这样两边可以并起来一起对账。
+
+    为什么要单独开一处，而不是把它们塞进 `desktop` extra：那份清单回答的是
+    「外壳允许 import 什么」，而 numpy 与 pyinstaller 都不是外壳的依赖
+    （外壳不许 import 引擎，见规则 1）。为什么不塞进 `[project].dependencies`：
+    那里的 `numpy>=1.24` 是「引擎能跑起来的下限」，这里的 `1.26.4` 是
+    「G7/G8 那批读数是在哪个版本上得到的」——两个不同的事实。
+
+    这一处存在的直接原因：在它之前，`numpy==1.26.4` 只活在架构 §3.2 那张表里，
+    而这条守卫把 numpy 从对账里 `pop` 掉了（理由是它不是外壳依赖）。于是那个数字
+    **待在一张有守卫的表里，自己正好在守卫的豁免名单上**——看着被守着，其实没有。
+    2026-09-14 第一次真构建就装进了 numpy 2.4.6（DP-115）。
+    """
+    import tomllib
+
+    data = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    pins = data["tool"]["depressionplex"]["build-pins"]
+    assert pins, "[tool.depressionplex.build-pins] 是空的——钉子被搬走了，这不是通过"
+    out = {}
+    for name, ver in pins.items():
+        assert isinstance(ver, str) and ver and not any(
+            c in ver for c in "<>=!~*"), (
+            f"build-pins 里 `{name} = {ver!r}` 必须是裸版本号（如 \"1.26.4\"）："
+            "范围/通配等于「重建会得到另一个二进制」")
+        out[name] = f"{name}=={ver}"
+    return out
+
+
 def test_third_party_whitelist():
     """规则 2：desktop/**/*.py 的第三方 import 必须在 pyproject 的 `desktop` 清单里，
     且必须出现在允许它出现的那个文件里。
@@ -232,9 +265,13 @@ def test_dependency_table_in_spec_matches_pyproject():
     它和 pyproject 分叉一次，就会有人照着过期的那份写代码——DP-110 的 B6 就是这么撞上
     白名单守卫的（§3.2 早写着 openpyxl，守卫却只认 PySide6）。
 
-    `numpy` 不在比对范围：它是引擎的依赖，不是外壳的（外壳不许 import 引擎，见规则 1）。
+    比对范围是 **`desktop` extra ∪ `build-pins`**（DP-108 A9c）。numpy 曾经被
+    `pop` 出对账（理由：它是引擎的依赖不是外壳的），结果那一行成了全仓唯一
+    「待在有守卫的表里、却在守卫豁免名单上」的数字，2026-09-14 的真构建因此装进了
+    numpy 2.4.6。豁免一个数字，等于把它从守卫里删掉——**要么进对账，要么别写在这张表里**。
     """
     declared, _ = _desktop_deps()
+    pins = _build_pins()
     spec = (ROOT / "docs/SPEC_产品化总体架构_v1.md").read_text(encoding="utf-8")
     # 先切出 §3.2 这一节（到下一个同级标题为止），再取节内**第一个**代码块。
     # 不写成「标题紧跟代码块」：那样在标题与代码块之间加一段说明文字就会让守卫红，
@@ -244,12 +281,13 @@ def test_dependency_table_in_spec_matches_pyproject():
     block = re.search(r"```\n(.*?)```", section.group(1), re.S)
     assert block, "§3.2 里找不到依赖清单代码块——清单被删了，这不是通过"
     pinned = dict(re.findall(r"^([A-Za-z0-9_.\-]+)==([^\s#]+)", block.group(1), re.M))
-    pinned.pop("numpy", None)
     in_spec = {f"{k}=={v}" for k, v in pinned.items()}
-    assert in_spec == set(declared.values()), (
-        "架构 §3.2 的依赖表与 pyproject 的 `desktop` 清单不一致（清单只许有一份）：\n"
+    authoritative = set(declared.values()) | set(pins.values())
+    assert in_spec == authoritative, (
+        "架构 §3.2 的依赖表与 pyproject 不一致（清单只许有一份）：\n"
         f"  §3.2：      {sorted(in_spec)}\n"
-        f"  pyproject： {sorted(declared.values())}")
+        f"  desktop：   {sorted(declared.values())}\n"
+        f"  build-pins：{sorted(pins.values())}")
 
 
 def test_ci_installs_the_pinned_desktop_deps():
