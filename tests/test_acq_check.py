@@ -276,7 +276,11 @@ def test_gate_contrast_ratio_actually_used() -> None:
 
 
 def test_gate_area_jitter_actually_used() -> None:
-    """把 acq_check.GATE_AREA_JITTER_P90 临时改到 0.0，STILL 帧跑完 rc 应为 0 且 passed=False。
+    """把 acq_check.GATE_AREA_JITTER_P90 临时改到 -0.001，STILL 帧跑完 rc 应为 0 且 passed=False。
+
+    -0.001 而非 0.0：STILL 帧的抖动 p90 精确等于 0.0（帧帧相同），
+    0.0 <= 0.0 = True——门槛正好卡在分界上不能区分「常量被读到」与「恰好相等」。
+    用 -0.001 保证任何非负抖动值都会 fail，只有真的读常量才能变红。
 
     变异（M2c）：acq_check._run_acq_check 里把 GATE_AREA_JITTER_P90 改回字面量 0.02 ⇒ 本条红。
     """
@@ -285,16 +289,16 @@ def test_gate_area_jitter_actually_used() -> None:
     orig = acq_check.GATE_AREA_JITTER_P90
     frames = _make_frames((STILL, STILL, STILL, STILL), 80)
     try:
-        acq_check.GATE_AREA_JITTER_P90 = 0.0  # 门槛=0 ⇒ 任何读数都不通过
+        acq_check.GATE_AREA_JITTER_P90 = -0.001  # 门槛=-0.001 ⇒ 任何 >=0 的抖动都不通过
         rc, out = _run_main(frames)
     finally:
         acq_check.GATE_AREA_JITTER_P90 = orig
 
-    assert rc == 0, f"门槛=0 时 rc 仍应为 0（测到了读数），得到 rc={rc}"
+    assert rc == 0, f"门槛=-0.001 时 rc 仍应为 0（测到了读数），得到 rc={rc}"
     import json
     data = json.loads(out)
     assert data["gates"]["area_jitter"]["passed"] is False, (
-        "GATE_AREA_JITTER_P90=0 时 area_jitter.passed 应为 False——"
+        "GATE_AREA_JITTER_P90=-0.001 时 area_jitter.passed 应为 False——"
         "若仍为 True 说明 _run_acq_check 用了字面量而非常量"
     )
     assert acq_check.GATE_AREA_JITTER_P90 == orig, "常量未正确恢复"
