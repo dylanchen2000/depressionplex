@@ -165,6 +165,64 @@ class AcqCheckResult:
         """从 JSON 文件加载。"""
         return cls.from_json_str(path.read_text(encoding="utf-8"))
 
+def conclusion_lines(result: "AcqCheckResult") -> list[str]:
+    """从 AcqCheckResult 生成「人话结论」文本块（每块一段，永不返回空列表）。
+
+    三态组合（contrast_passed × area_jitter_passed × area_jitter_moving）共 27 种，
+    每种都能产出至少一条人话，调用方用 "\n\n".join(...) 组装。
+
+    Returns:
+        list[str]: 至少含一条说明，调用方直接 join 即可。
+    """
+    lines: list[str] = []
+    r = result
+
+    # ── 无面板带：完全测不出 ────────────────────────────────────────────────────
+    if r.contrast_value is None:
+        lines.append(
+            "【无法测量】没找到背光面板行带，说明画面结构与我们假设的不同"
+            "（亮背板横贯全宽、动物在其下方）。"
+            "这不是「不达标」，是「量不了」——请把一帧截图发给我们。"
+        )
+        return lines  # 无面板时其余门都测不到，直接返回
+
+    # ── 对比度不达标 ─────────────────────────────────────────────────────────────
+    if r.contrast_passed is False:
+        lines.append(
+            "【对比度不达标】背光不足或曝光不当。"
+            "我们的分割靠亮背板 + 黑剪影，"
+            f"绝对差 < {r.contrast_threshold_abs:.0f} 灰阶时阈值分割会不稳。"
+            "建议加背光板或调曝光后重录一段再自检。"
+        )
+
+    # ── 动物持续运动 ─────────────────────────────────────────────────────────────
+    if r.area_jitter_moving is True:
+        lines.append(
+            "【动物持续运动】本次抽到的帧里动物都在动，抖动读数含真实形变，"
+            "不能当噪声底看。换一段有静止时段的素材再自检。"
+        )
+
+    # ── 面积抖动不达标（且不是因为动物在动导致的）──────────────────────────────
+    if r.area_jitter_passed is False and r.area_jitter_moving is not True:
+        lines.append(
+            "【面积抖动超标】分割噪声底偏高，"
+            f"实测 {r.area_jitter_value:.4f}，门槛 ≤{r.area_jitter_threshold:.4f}，"
+            "可能影响 immobility 判定精度。建议改善采集条件后重试。"
+        )
+
+    # ── 找不到隔间（面积抖动无法测量）─────────────────────────────────────────
+    if r.area_jitter_value is None and r.area_jitter_passed is None:
+        lines.append(
+            "【隔间定位失败】找不到任何动物隔间，面积抖动读数无法获取。"
+            "请确认视频中有清晰的隔间边界。"
+        )
+
+    # ── 全部通过（无任何报警）─────────────────────────────────────────────────
+    if not lines:
+        lines.append("全部指标通过，可以开始正式分析。")
+
+    return lines
+
 
 def _require_keys(d: dict, keys: tuple[str, ...], location: str) -> None:
     """验证 d 包含所有必须的键；缺一即抛 AcqCheckError（而不是 KeyError）。

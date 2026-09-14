@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt
 
-from desktop.app.models.self_test import AcqCheckResult, AcqCheckError
+from desktop.app.models.self_test import AcqCheckResult, AcqCheckError, conclusion_lines
 
 
 class AcqCheckPage(QWidget):
@@ -186,42 +186,5 @@ class AcqCheckPage(QWidget):
     def _refresh_conclusion(self) -> None:
         if self._result is None:
             return
-        r = self._result
-        lines: list[str] = []
-
-        # 对比度不达标
-        if r.contrast_passed is False:
-            lines.append(
-                "【对比度不达标】背光不足或曝光不当。"
-                "我们的分割靠亮背板 + 黑剪影，"
-                f"绝对差 < {r.contrast_threshold_abs:.0f} 灰阶时阈值分割会不稳。"
-                "建议加背光板或调曝光后重录一段再自检。"
-            )
-
-        # 动物在动（抖动读数含信号）
-        if r.area_jitter_moving is True:
-            lines.append(
-                "【动物持续运动】本次抽到的帧里动物都在动，抖动读数含真实形变，"
-                "不能当噪声底看。换一段有静止时段的素材再自检。"
-            )
-
-        # 测不出（无面板带）
-        if r.contrast_value is None:
-            lines.append(
-                "【无法测量】没找到背光面板行带，说明画面结构与我们假设的不同"
-                "（亮背板横贯全宽、动物在其下方）。"
-                "这不是「不达标」，是「量不了」——请把一帧截图发给我们。"
-            )
-
-        if not lines:
-            # 全部通过或测量完成无报警
-            if r.contrast_passed and r.area_jitter_passed:
-                lines.append("全部指标通过，可以开始正式分析。")
-            elif r.area_jitter_passed is False:
-                lines.append(
-                    f"面积抖动超过门槛（{r.area_jitter_value:.4f} > "
-                    f"{r.area_jitter_threshold:.4f}），分割噪声底偏高，"
-                    "可能影响 immobility 判定精度。"
-                )
-
-        self._conclusion_label.setText("\n\n".join(lines) if lines else "")
+        text = "\n\n".join(conclusion_lines(self._result))
+        self._conclusion_label.setText(text)

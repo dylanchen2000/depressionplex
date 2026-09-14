@@ -10,6 +10,7 @@ import sys
 from pathlib import Path
 
 from desktop.app.models.experiment import SCHEMA_KEYS, VIDEO_KEYS
+from desktop.app.utils.paths import is_frozen as _is_frozen
 
 #: 一个 item 的产出文件名。**只有这一处**按视频名派生文件名：
 #: 原来 `build_argv`（查重名）与 `QueuePage._cleanup_outputs`（取消时删）各写一遍，
@@ -83,10 +84,7 @@ def engine_command() -> list[str]:
     if env_cmd:
         return shlex.split(env_cmd)
 
-    # 判断是否冻结（PyInstaller）
-    is_frozen = getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS")
-
-    if is_frozen:
+    if _is_frozen():
         # 冻结后：与主程序同目录的 dp-engine.exe / dp-engine
         main_exe = Path(sys.executable)
         engine_name = "dp-engine.exe" if sys.platform == "win32" else "dp-engine"
@@ -117,39 +115,10 @@ def engine_command() -> list[str]:
 
 def get_cwd() -> Path | None:
     """返回引擎子进程的 cwd。源码模式下必须是仓根，冻结模式下返回 None（用默认）。"""
-    is_frozen = getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS")
-    if is_frozen:
+    if _is_frozen():
         return None
     else:
         return Path(__file__).resolve().parent.parent.parent.parent
-
-
-def acq_check_argv(video: str, n_chambers: int) -> list[str]:
-    """采集自检的完整 argv。
-
-    引擎路径一律走 engine_command()，argv 只在这一处拼装（与 build_argv 做邻居）。
-    退出码语义见 depressionplex/cli/acq_check.py §0.1：
-      0 = 测到读数（通过/不通过），2 = 测不出，1 = 解码失败。
-
-    Note: 如果 B10 已合入 main，engine_command() 会已被改过；
-    本函数总是用 engine_command()，不自己再拼一次路径。
-    """
-    # 采集自检走单独的 CLI 模块（不复用 analyze）
-    cmd = engine_command()
-    # 将最后一个元素（analyze 模块名）替换成 acq_check 模块名
-    # 源码模式：engine_command() 返回 [sys.executable, "-m", "depressionplex.cli.analyze"]
-    # 冻结模式：engine_command() 返回 [str(engine_path)]，不含 -m
-    is_frozen = getattr(__import__("sys"), "frozen", False)
-    if is_frozen:
-        # 冻结模式：dp-engine 接受 acq-check 子命令（B10 约定），直接传参
-        argv = cmd + ["acq-check", "--video", str(video),
-                      "--chambers", str(n_chambers), "--json"]
-    else:
-        # 源码模式：替换模块名
-        argv = cmd[:-1] + ["depressionplex.cli.acq_check",
-                           "--video", str(video),
-                           "--chambers", str(n_chambers), "--json"]
-    return argv
 
 
 def build_argv(exp: dict, video_index: int) -> list[str]:

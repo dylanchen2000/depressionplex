@@ -101,6 +101,72 @@ def _load_reference() -> dict | None:
     with open(ref_path, encoding="utf-8") as f:
         return json.load(f)
 
+def _build_output(
+    *,
+    info_path: str,
+    info_fps: float,
+    info_n_frames: int,
+    info_width: int,
+    info_height: int,
+    frame_indices: list[int],
+    contrast_value: float | None,
+    contrast_ratio: float | None,
+    contrast_passed: bool | None,
+    noise_floor_value: float | None,
+    noise_floor_n_frames: int,
+    area_jitter_value: float | None,
+    area_jitter_passed: bool | None,
+    area_jitter_chamber: int | None,
+    area_jitter_chamber_residual: float | None,
+    area_jitter_moving: bool | None,
+    chambers: list[dict],
+    reference: dict | None,
+) -> dict:
+    """输出 JSON 的唯一构造点（DP-109 H6）。
+
+    四条退出路径（无面板带 / 无隔间 / 正常完成 / 帧数不足）都经过这一处构造，
+    值不同但形状完全一致——键集契约只有一份，改动必须到这里来。
+    """
+    return {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "video": {
+            "path": info_path,
+            "fps": info_fps,
+            "n_frames": info_n_frames,
+            "width": info_width,
+            "height": info_height,
+        },
+        "sampling": {
+            "n_windows": N_WINDOWS,
+            "frames_per_window": FRAMES_PER_WINDOW,
+            "frame_indices": frame_indices,
+        },
+        "gates": {
+            "contrast": {
+                "value": contrast_value,
+                "ratio": contrast_ratio,
+                "threshold_abs": GATE_CONTRAST_ABS,
+                "threshold_ratio": GATE_CONTRAST_RATIO,
+                "passed": contrast_passed,
+            },
+            "noise_floor": {
+                "value": noise_floor_value,
+                "n_frames": noise_floor_n_frames,
+            },
+            "area_jitter": {
+                "value": area_jitter_value,
+                "threshold": GATE_AREA_JITTER_P90,
+                "passed": area_jitter_passed,
+                "chamber": area_jitter_chamber,
+                "chamber_residual": area_jitter_chamber_residual,
+                "moving": area_jitter_moving,
+            },
+        },
+        "chambers": chambers,
+        "reference": reference,
+    }
+
+
 
 def _run_acq_check(frames: list[np.ndarray], frame_indices: list[int],
                    info_path: str, info_fps: float, info_n_frames: int,
@@ -124,44 +190,26 @@ def _run_acq_check(frames: list[np.ndarray], frame_indices: list[int],
         # 没有面板带 → 测不出 → rc=2
         # 依然输出 JSON（GUI 要看到"量不了"而不是程序崩了）
         reference = _load_reference()
-        out = {
-            "generated_at": datetime.now(timezone.utc).isoformat(),
-            "video": {
-                "path": info_path,
-                "fps": info_fps,
-                "n_frames": info_n_frames,
-                "width": info_width,
-                "height": info_height,
-            },
-            "sampling": {
-                "n_windows": N_WINDOWS,
-                "frames_per_window": FRAMES_PER_WINDOW,
-                "frame_indices": frame_indices,
-            },
-            "gates": {
-                "contrast": {
-                    "value": None,
-                    "ratio": None,
-                    "threshold_abs": GATE_CONTRAST_ABS,
-                    "threshold_ratio": GATE_CONTRAST_RATIO,
-                    "passed": None,
-                },
-                "noise_floor": {
-                    "value": None,
-                    "n_frames": 0,
-                },
-                "area_jitter": {
-                    "value": None,
-                    "threshold": GATE_AREA_JITTER_P90,
-                    "passed": None,
-                    "chamber": None,
-                    "chamber_residual": None,
-                    "moving": None,
-                },
-            },
-            "chambers": [],
-            "reference": reference,
-        }
+        out = _build_output(
+            info_path=info_path,
+            info_fps=info_fps,
+            info_n_frames=info_n_frames,
+            info_width=info_width,
+            info_height=info_height,
+            frame_indices=frame_indices,
+            contrast_value=None,
+            contrast_ratio=None,
+            contrast_passed=None,
+            noise_floor_value=None,
+            noise_floor_n_frames=0,
+            area_jitter_value=None,
+            area_jitter_passed=None,
+            area_jitter_chamber=None,
+            area_jitter_chamber_residual=None,
+            area_jitter_moving=None,
+            chambers=[],
+            reference=reference,
+        )
         return 2, out
 
     contrast_value = rep["abs_diff"]
@@ -180,44 +228,26 @@ def _run_acq_check(frames: list[np.ndarray], frame_indices: list[int],
     if not chamber_cols:
         # 找不到隔间 → 测不出
         reference = _load_reference()
-        out = {
-            "generated_at": datetime.now(timezone.utc).isoformat(),
-            "video": {
-                "path": info_path,
-                "fps": info_fps,
-                "n_frames": info_n_frames,
-                "width": info_width,
-                "height": info_height,
-            },
-            "sampling": {
-                "n_windows": N_WINDOWS,
-                "frames_per_window": FRAMES_PER_WINDOW,
-                "frame_indices": frame_indices,
-            },
-            "gates": {
-                "contrast": {
-                    "value": contrast_value,
-                    "ratio": contrast_ratio,
-                    "threshold_abs": GATE_CONTRAST_ABS,
-                    "threshold_ratio": GATE_CONTRAST_RATIO,
-                    "passed": contrast_passed,
-                },
-                "noise_floor": {
-                    "value": nf_value,
-                    "n_frames": nf_n_frames,
-                },
-                "area_jitter": {
-                    "value": None,
-                    "threshold": GATE_AREA_JITTER_P90,
-                    "passed": None,
-                    "chamber": None,
-                    "chamber_residual": None,
-                    "moving": None,
-                },
-            },
-            "chambers": [],
-            "reference": reference,
-        }
+        out = _build_output(
+            info_path=info_path,
+            info_fps=info_fps,
+            info_n_frames=info_n_frames,
+            info_width=info_width,
+            info_height=info_height,
+            frame_indices=frame_indices,
+            contrast_value=contrast_value,
+            contrast_ratio=contrast_ratio,
+            contrast_passed=contrast_passed,
+            noise_floor_value=nf_value,
+            noise_floor_n_frames=nf_n_frames,
+            area_jitter_value=None,
+            area_jitter_passed=None,
+            area_jitter_chamber=None,
+            area_jitter_chamber_residual=None,
+            area_jitter_moving=None,
+            chambers=[],
+            reference=reference,
+        )
         return 2, out
 
     # ── 4. 逐隔间计算面积抖动 p90 与 RAD 残差 ────────────────────────────────
@@ -288,44 +318,26 @@ def _run_acq_check(frames: list[np.ndarray], frame_indices: list[int],
     reference = _load_reference()
 
     # ── 7. 组装 JSON ─────────────────────────────────────────────────────────
-    out = {
-        "generated_at": datetime.now(timezone.utc).isoformat(),
-        "video": {
-            "path": info_path,
-            "fps": info_fps,
-            "n_frames": info_n_frames,
-            "width": info_width,
-            "height": info_height,
-        },
-        "sampling": {
-            "n_windows": N_WINDOWS,
-            "frames_per_window": FRAMES_PER_WINDOW,
-            "frame_indices": frame_indices,
-        },
-        "gates": {
-            "contrast": {
-                "value": contrast_value,
-                "ratio": contrast_ratio,
-                "threshold_abs": GATE_CONTRAST_ABS,
-                "threshold_ratio": GATE_CONTRAST_RATIO,
-                "passed": contrast_passed,
-            },
-            "noise_floor": {
-                "value": nf_value,
-                "n_frames": nf_n_frames,
-            },
-            "area_jitter": {
-                "value": jitter_best,
-                "threshold": GATE_AREA_JITTER_P90,
-                "passed": jitter_passed,
-                "chamber": best_ch_index,
-                "chamber_residual": best_ch_residual,
-                "moving": moving_flag,
-            },
-        },
-        "chambers": chamber_results,
-        "reference": reference,
-    }
+    out = _build_output(
+        info_path=info_path,
+        info_fps=info_fps,
+        info_n_frames=info_n_frames,
+        info_width=info_width,
+        info_height=info_height,
+        frame_indices=frame_indices,
+        contrast_value=contrast_value,
+        contrast_ratio=contrast_ratio,
+        contrast_passed=contrast_passed,
+        noise_floor_value=nf_value,
+        noise_floor_n_frames=nf_n_frames,
+        area_jitter_value=jitter_best,
+        area_jitter_passed=jitter_passed,
+        area_jitter_chamber=best_ch_index,
+        area_jitter_chamber_residual=best_ch_residual,
+        area_jitter_moving=moving_flag,
+        chambers=chamber_results,
+        reference=reference,
+    )
     return 0, out
 
 
@@ -361,44 +373,26 @@ def main(argv: list[str] | None = None) -> int:
             f"（{N_WINDOWS} 窗口 × {FRAMES_PER_WINDOW} 帧 + 首尾各 {_MARGIN} 帧余量）"
         )
         reference = _load_reference()
-        out = {
-            "generated_at": datetime.now(timezone.utc).isoformat(),
-            "video": {
-                "path": str(info.path),
-                "fps": info.fps,
-                "n_frames": info.n_frames,
-                "width": info.width,
-                "height": info.height,
-            },
-            "sampling": {
-                "n_windows": N_WINDOWS,
-                "frames_per_window": FRAMES_PER_WINDOW,
-                "frame_indices": [],
-            },
-            "gates": {
-                "contrast": {
-                    "value": None,
-                    "ratio": None,
-                    "threshold_abs": GATE_CONTRAST_ABS,
-                    "threshold_ratio": GATE_CONTRAST_RATIO,
-                    "passed": None,
-                },
-                "noise_floor": {
-                    "value": None,
-                    "n_frames": 0,
-                },
-                "area_jitter": {
-                    "value": None,
-                    "threshold": GATE_AREA_JITTER_P90,
-                    "passed": None,
-                    "chamber": None,
-                    "chamber_residual": None,
-                    "moving": None,
-                },
-            },
-            "chambers": [],
-            "reference": reference,
-        }
+        out = _build_output(
+            info_path=str(info.path),
+            info_fps=info.fps,
+            info_n_frames=info.n_frames,
+            info_width=info.width,
+            info_height=info.height,
+            frame_indices=[],
+            contrast_value=None,
+            contrast_ratio=None,
+            contrast_passed=None,
+            noise_floor_value=None,
+            noise_floor_n_frames=0,
+            area_jitter_value=None,
+            area_jitter_passed=None,
+            area_jitter_chamber=None,
+            area_jitter_chamber_residual=None,
+            area_jitter_moving=None,
+            chambers=[],
+            reference=reference,
+        )
         print(json.dumps(out, ensure_ascii=False), flush=True)
         return 2
 

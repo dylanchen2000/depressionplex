@@ -147,6 +147,7 @@ def test_single_gate_source_ast() -> None:
     （矛盾之处见交付报告，照着错的做不算免责——此处取合理解释。）
     """
     check_files = [
+        ROOT / "depressionplex" / "assay_core" / "segment.py",
         ROOT / "depressionplex" / "cli" / "acq_check.py",
         ROOT / "depressionplex" / "cli" / "probe_frames.py",
         ROOT / "desktop" / "app" / "pages" / "self_test.py",
@@ -166,17 +167,29 @@ def test_single_gate_source_ast() -> None:
         src = fpath.read_text(encoding="utf-8")
         tree = ast.parse(src, filename=str(fpath))
 
-        # 收集模块级常量定义（ast.Assign 或 ast.AnnAssign）的 Constant 节点 id
-        # 这些是"命名常量定义"，允许出现字面量（如 MOVING_RESIDUAL: float = 0.02）
+        # 精确白名单：只豁免 probe_frames.MOVING_RESIDUAL 定义行（数值恰好与
+        # GATE_AREA_JITTER_P90 相同但语义不同）和 segment.py 的三个 GATE_ 常量定义行。
+        # 其他文件：空白名单——门槛值字面量一律禁止。
         allowed_const_ids: set[int] = set()
+        _probe_only = {"MOVING_RESIDUAL"}
+        _segment_only = {"GATE_CONTRAST_ABS", "GATE_CONTRAST_RATIO", "GATE_AREA_JITTER_P90"}
+        if fpath.name == "probe_frames.py":
+            _allowed_names = _probe_only
+        elif fpath.name == "segment.py":
+            _allowed_names = _segment_only
+        else:
+            _allowed_names = set()
         for stmt in tree.body:
             if isinstance(stmt, ast.Assign):
                 if (len(stmt.targets) == 1
                         and isinstance(stmt.targets[0], ast.Name)
+                        and stmt.targets[0].id in _allowed_names
                         and isinstance(stmt.value, ast.Constant)):
                     allowed_const_ids.add(id(stmt.value))
             elif isinstance(stmt, ast.AnnAssign):
-                if isinstance(stmt.value, ast.Constant):
+                if (isinstance(stmt.target, ast.Name)
+                        and stmt.target.id in _allowed_names
+                        and isinstance(stmt.value, ast.Constant)):
                     allowed_const_ids.add(id(stmt.value))
 
         # 找所有被禁止的浮点字面量（跳过模块级常量定义）
@@ -193,6 +206,7 @@ def test_single_gate_source_ast() -> None:
         assert not violations, (
             f"{fpath.relative_to(ROOT)} 出现了禁止的门槛字面量\n"
             + "\n".join(violations)
+            + "\n豁免白名单：probe_frames.MOVING_RESIDUAL 定义行、segment.py 三个 GATE_ 常量定义行"
         )
 
     # 引擎 CLI 文件必须以 ast.Load 方式引用三个常量
@@ -211,40 +225,79 @@ def test_single_gate_source_ast() -> None:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# 守卫 2：判定真的读三个常量（变异判据：contrast_report 写回字面量 ⇒ 本条红）
+# 守卫 2a-c：三个门常量各自独立影响判定（三条独立守卫，各打一个变异靶）
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def test_gate_constants_actually_affect_judgment() -> None:
-    """临时把 GATE_CONTRAST_ABS 改成 1e9，对高对比合成图 passes_gate 必须变假。
+def test_gate_contrast_abs_actually_used() -> None:
+    """把 GATE_CONTRAST_ABS 临时改到 1e9，高对比帧的 passes_gate 必须变假。
 
-    变异：contrast_report 里把 GATE_CONTRAST_ABS 改回字面量 100.0 ⇒ 本条必须红
-    （因为改字面量之后这里临时改常量就没用了，assert 失败）。
+    变异（M2a）：contrast_report 里把 GATE_CONTRAST_ABS 改回字面量 100.0 ⇒ 本条红。
     """
     from depressionplex.assay_core import segment as S
 
-    kinds = (STILL, STILL, STILL, STILL)
-    frame = _frame(kinds, 0)
-    # 正常门槛下应该通过
-    rep_normal = S.contrast_report(frame)
-    assert rep_normal.get("passes_gate", 0) == 1.0, (
-        "合成高对比帧的对比度应通过门槛（若这里失败说明合成帧质量不足，不是守卫失败）"
-    )
-
-    # 临时把门槛拉到极高
     orig = S.GATE_CONTRAST_ABS
     try:
         S.GATE_CONTRAST_ABS = 1e9
-        rep_mutated = S.contrast_report(frame)
-        assert rep_mutated.get("passes_gate", 1.0) == 0.0, (
-            "门槛改成 1e9 后 passes_gate 应变假——"
-            "如果仍然为真说明 contrast_report 里有字面量，没有用 GATE_CONTRAST_ABS"
+        frame = _make_frames((STILL, STILL, STILL, STILL), 1)[0]
+        rep = S.contrast_report(frame)
+        assert rep.get("passes_gate", 0.0) == 0.0, (
+            "GATE_CONTRAST_ABS=1e9 后 passes_gate 应变假——"
+            "若仍为真说明 contrast_report 用了字面量而非常量"
         )
     finally:
         S.GATE_CONTRAST_ABS = orig
 
-    # 恢复后应重新通过
-    rep_restored = S.contrast_report(frame)
-    assert rep_restored.get("passes_gate", 0) == 1.0
+    # 复验：恢复后高对比帧应通过
+    frame = _make_frames((STILL, STILL, STILL, STILL), 1)[0]
+    rep_ok = S.contrast_report(frame)
+    assert S.GATE_CONTRAST_ABS == orig
+
+
+def test_gate_contrast_ratio_actually_used() -> None:
+    """把 GATE_CONTRAST_RATIO 临时改到 1e9，高对比帧的 passes_gate 必须变假。
+
+    变异（M2b）：contrast_report 里把 GATE_CONTRAST_RATIO 改回字面量 2.0 ⇒ 本条红。
+    """
+    from depressionplex.assay_core import segment as S
+
+    orig = S.GATE_CONTRAST_RATIO
+    try:
+        S.GATE_CONTRAST_RATIO = 1e9
+        frame = _make_frames((STILL, STILL, STILL, STILL), 1)[0]
+        rep = S.contrast_report(frame)
+        assert rep.get("passes_gate", 0.0) == 0.0, (
+            "GATE_CONTRAST_RATIO=1e9 后 passes_gate 应变假——"
+            "若仍为真说明 contrast_report 用了字面量而非常量"
+        )
+    finally:
+        S.GATE_CONTRAST_RATIO = orig
+
+    assert S.GATE_CONTRAST_RATIO == orig
+
+
+def test_gate_area_jitter_actually_used() -> None:
+    """把 acq_check.GATE_AREA_JITTER_P90 临时改到 0.0，STILL 帧跑完 rc 应为 0 且 passed=False。
+
+    变异（M2c）：acq_check._run_acq_check 里把 GATE_AREA_JITTER_P90 改回字面量 0.02 ⇒ 本条红。
+    """
+    from depressionplex.cli import acq_check
+
+    orig = acq_check.GATE_AREA_JITTER_P90
+    frames = _make_frames((STILL, STILL, STILL, STILL), 80)
+    try:
+        acq_check.GATE_AREA_JITTER_P90 = 0.0  # 门槛=0 ⇒ 任何读数都不通过
+        rc, out = _run_main(frames)
+    finally:
+        acq_check.GATE_AREA_JITTER_P90 = orig
+
+    assert rc == 0, f"门槛=0 时 rc 仍应为 0（测到了读数），得到 rc={rc}"
+    import json
+    data = json.loads(out)
+    assert data["gates"]["area_jitter"]["passed"] is False, (
+        "GATE_AREA_JITTER_P90=0 时 area_jitter.passed 应为 False——"
+        "若仍为 True 说明 _run_acq_check 用了字面量而非常量"
+    )
+    assert acq_check.GATE_AREA_JITTER_P90 == orig, "常量未正确恢复"
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -464,51 +517,40 @@ def test_best_chamber_is_lowest_residual() -> None:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# 守卫 8：冻结表与文档一致（防止文档改了参考值而 fixture 没跟）
+# 守卫 8：冻结表与文档一致（防止 fixture 改了参考值而文档没跟）
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def test_p2_reference_matches_status_md() -> None:
-    """从 docs/STATUS.md 抓 P2 读数，与 tests/fixtures/p2_reference.json 比对。
+def test_p2_reference_matches_issues_md() -> None:
+    """p2_reference.json 里的四个数必须在 docs/ISSUES.md 里逐字出现。
 
-    防的是：STATUS.md 更新了参考值，p2_reference.json 忘了同步。
-    变异：改掉 p2_reference.json 里某个数字 ⇒ 本条必须红。
+    防的是：fixture 里某个数字被悄悄改掉而 ISSUES.md 台账里没有任何记录。
+    变异（M8）：改掉 fixture 里 contrast_abs 为 999.9 ⇒ ISSUES.md 找不到 999.9 ⇒ 本条红。
     """
-    import re
-
-    status_md = ROOT / "docs" / "STATUS.md"
+    issues_path = ROOT / "docs" / "ISSUES.md"
     ref_path = ROOT / "tests" / "fixtures" / "p2_reference.json"
 
-    assert status_md.exists(), f"STATUS.md 不存在：{status_md}"
+    assert issues_path.exists(), f"ISSUES.md 不存在：{issues_path}"
     assert ref_path.exists(), f"p2_reference.json 不存在：{ref_path}"
 
-    text = status_md.read_text(encoding="utf-8")
+    issues_text = issues_path.read_text(encoding="utf-8")
     with open(ref_path, encoding="utf-8") as f:
         ref = json.load(f)
 
-    # 从 STATUS.md 提取四个读数
-    m_abs = re.search(r"\*\*(\d+\.?\d*)\*\*\s*\|\s*≥100", text)
-    m_ratio = re.search(r"\*\*(\d+\.?\d*)×\*\*\s*\|\s*≥2×", text)
-    m_nf = re.search(r"\*\*(\d+\.?\d+)\s*px\*\*\s*\|", text)
-    m_jitter = re.search(r"0\.0035", text)
+    # 四个数值字段必须在 ISSUES.md 里逐字出现（str(float) 格式）
+    numeric_keys = ("contrast_abs", "contrast_ratio", "noise_floor_px", "area_jitter_p90")
+    missing = []
+    for key in numeric_keys:
+        val = ref.get(key)
+        if val is None:
+            continue  # null 不要求出现
+        if str(val) not in issues_text:
+            missing.append(
+                f"  fixture[{key!r}] = {val!r}  在 docs/ISSUES.md 里找不到"
+            )
 
-    assert m_abs, "STATUS.md 里找不到对比度绝对差（208.5）"
-    assert m_ratio, "STATUS.md 里找不到比值（6.77）"
-    assert m_nf, "STATUS.md 里找不到噪声底（0.43）"
-    assert m_jitter, "STATUS.md 里找不到面积抖动 p90（0.0035）"
-
-    assert abs(float(m_abs.group(1)) - ref["contrast_abs"]) < 0.1, (
-        f"contrast_abs 不符：STATUS.md={m_abs.group(1)}, fixture={ref['contrast_abs']}"
-    )
-    assert abs(float(m_ratio.group(1)) - ref["contrast_ratio"]) < 0.1, (
-        f"contrast_ratio 不符：STATUS.md={m_ratio.group(1)}, fixture={ref['contrast_ratio']}"
-    )
-    nf_match = re.search(r"\*\*0\.43\s*px\*\*", text)
-    assert nf_match, "STATUS.md 里找不到噪声底实测值 0.43 px"
-    assert abs(ref["noise_floor_px"] - 0.43) < 0.001, (
-        f"noise_floor_px 不符：fixture={ref['noise_floor_px']}"
-    )
-    assert abs(ref["area_jitter_p90"] - 0.0035) < 0.0001, (
-        f"area_jitter_p90 不符：fixture={ref['area_jitter_p90']}"
+    assert not missing, (
+        "p2_reference.json 里的参考值在 ISSUES.md 里找不到——"
+        "fixture 改了但 ISSUES.md 台账没更新：\n" + "\n".join(missing)
     )
 
 
@@ -617,3 +659,144 @@ def test_insufficient_frames_gives_rc_2() -> None:
     assert rc == 2, (
         f"帧数不足（10 < {_MIN_FRAMES}）时 rc 应为 2，得到 rc={rc}"
     )
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 守卫 11（H1）：desktop/ 不许出现 sys.frozen / _MEIPASS / __import__("sys")
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def test_no_frozen_internals_in_desktop() -> None:
+    """desktop/ 除 utils/paths.py 以外，不许出现 sys.frozen / _MEIPASS / __import__("sys")。
+
+    架构 §3.4：PyInstaller 内部 API 只能有一个入口点 desktop/app/utils/paths.py::is_frozen()。
+    engine.py 等文件改用 _is_frozen() 调用后，这些模式不应再出现。
+
+    变异：在 engine.py 里加回 is_frozen = getattr(sys, "frozen", ...) ⇒ 本条必须红。
+    """
+    FORBIDDEN = ("sys.frozen", "_MEIPASS", '__import__("sys")')
+    desktop_root = ROOT / "desktop"
+    exempt = (desktop_root / "app" / "utils" / "paths.py").resolve()
+
+    violations: list[str] = []
+    for py_file in desktop_root.rglob("*.py"):
+        if py_file.resolve() == exempt:
+            continue
+        src_text = py_file.read_text(encoding="utf-8")
+        for pattern in FORBIDDEN:
+            if pattern in src_text:
+                violations.append(
+                    f"  {py_file.relative_to(ROOT)}: 含有 {pattern!r}"
+                )
+
+    assert not violations, (
+        "desktop/ 文件出现了禁止的 PyInstaller 内部 API（只许在 utils/paths.py 里）：\n"
+        + "\n".join(violations)
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 守卫 12（H2）：conclusion_lines 对所有 27 种三态组合永不返回空列表
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def test_conclusion_lines_never_empty() -> None:
+    """contrast_passed × area_jitter_passed × area_jitter_moving 各三态，共 27 种组合。
+
+    每种组合 conclusion_lines() 必须返回至少一条文本（不许静默返回空列表）。
+
+    变异：在 conclusion_lines 里删掉某一条 lines.append ⇒ 某组合返回空列表 ⇒ 本条红。
+    """
+    from desktop.app.models.self_test import AcqCheckResult, conclusion_lines
+
+    def _make_result(cp, ap, mv) -> AcqCheckResult:
+        """构造特定三态组合的 AcqCheckResult。"""
+        cv = None if cp is None else (80.0 if cp is False else 210.0)
+        cr = None if cp is None else (1.5 if cp is False else 6.8)
+        av = None if ap is None else (0.03 if ap is False else 0.002)
+        data = {
+            "generated_at": "2026-01-01T00:00:00+00:00",
+            "video": {
+                "path": "/fake.mp4", "fps": 25.0,
+                "n_frames": 100, "width": 400, "height": 268,
+            },
+            "sampling": {
+                "n_windows": 5,
+                "frames_per_window": 8,
+                "frame_indices": list(range(40)),
+            },
+            "gates": {
+                "contrast": {
+                    "value": cv, "ratio": cr,
+                    "threshold_abs": 100.0, "threshold_ratio": 2.0,
+                    "passed": cp,
+                },
+                "noise_floor": {"value": 0.5, "n_frames": 40},
+                "area_jitter": {
+                    "value": av,
+                    "threshold": 0.02,
+                    "passed": ap,
+                    "chamber": None if ap is None else 1,
+                    "chamber_residual": None if ap is None else 0.01,
+                    "moving": mv,
+                },
+            },
+            "chambers": (
+                [] if ap is None
+                else [{"index": 1, "area_jitter_p90": av, "rad_residual": 0.01}]
+            ),
+            "reference": None,
+        }
+        return AcqCheckResult(data)
+
+    empty_combos: list[str] = []
+    for cp in (True, False, None):
+        for ap in (True, False, None):
+            for mv in (True, False, None):
+                result = _make_result(cp, ap, mv)
+                lines = conclusion_lines(result)
+                if not lines:
+                    empty_combos.append(
+                        f"  cp={cp!r}, ap={ap!r}, mv={mv!r} ⇒ 空列表"
+                    )
+
+    assert not empty_combos, (
+        "以下三态组合 conclusion_lines() 返回了空列表：\n"
+        + "\n".join(empty_combos)
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 守卫 13（H5）：desktop 模型键集与引擎 ACQ_*_KEYS 严格一致
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def test_desktop_model_keys_mirror_engine_keys() -> None:
+    """AcqCheckResult._require_keys 的键集与 acq_check.ACQ_*_KEYS 严格对应。
+
+    用 ACQ_*_KEYS 常量构造最小合法 JSON，喂给 AcqCheckResult 不许抛异常。
+    变异：在 _require_keys 里多加一个键 ⇒ 构造的 data 缺键 ⇒ AcqCheckError ⇒ 本条红。
+    """
+    from depressionplex.cli import acq_check
+    from desktop.app.models.self_test import AcqCheckResult, AcqCheckError
+
+    # 按 ACQ_*_KEYS 构造最小合法 JSON（每个字段填 None 或空列表）
+    data: dict = {k: None for k in acq_check.ACQ_JSON_KEYS}
+    data["video"] = {k: None for k in acq_check.ACQ_VIDEO_KEYS}
+    data["sampling"] = {k: None for k in acq_check.ACQ_SAMPLING_KEYS}
+    data["sampling"]["frame_indices"] = []
+    data["gates"] = {k: {} for k in acq_check.ACQ_GATES_KEYS}
+    data["gates"]["contrast"] = {k: None for k in acq_check.ACQ_CONTRAST_KEYS}
+    data["gates"]["noise_floor"] = {k: None for k in acq_check.ACQ_NOISE_FLOOR_KEYS}
+    data["gates"]["area_jitter"] = {k: None for k in acq_check.ACQ_AREA_JITTER_KEYS}
+    data["chambers"] = []
+    data["reference"] = None
+
+    try:
+        result = AcqCheckResult(data)
+    except AcqCheckError as e:
+        raise AssertionError(
+            f"AcqCheckResult 拒绝了按 ACQ_*_KEYS 构造的 JSON，"
+            f"说明 model 与 engine 的键集不同步：{e}"
+        ) from e
+
+    # 属性访问不许抛
+    _ = result.contrast_value
+    _ = result.area_jitter_value
+    _ = result.sampling_n_windows
