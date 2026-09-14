@@ -1372,3 +1372,377 @@ def test_g5_valid_scored_variants_accepted():
         # ch2 和 ch4 是 scored=False 的 alarm 行
         assert ch_rows[2].kind == "alarm"
         assert ch_rows[4].kind == "alarm"
+
+
+# ========================================================================
+# 第三轮复核新增守卫（N1–N13）：run.json 值类型校验
+# ========================================================================
+
+
+def _make_csv_with_rows(tmp: Path, chambers: list[int]) -> None:
+    """辅助：写一份含指定隔间行的合法 CSV。"""
+    csv_path = tmp / "v.csv"
+    with csv_path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=results.CSV_FIELDS_EXPECTED)
+        writer.writeheader()
+        for ch in chambers:
+            writer.writerow({
+                "trial_id": f"v-ch{ch}",
+                "assay": "TST",
+                "fps": "30.0",
+                "recording_frames": "10800",
+                "window_frames": "10800",
+                "scorable_frames": "10000",
+                "unknown_frames_window": "800",
+                "validity_status": "valid",
+                "occupied_fraction": "0.98",
+                "scored": "True",
+                "immobility_s": "100.0",
+                "immobility_raw_s": "100.0",
+                "mobility_s": "260.0",
+                "mobility_bouts": "50",
+                "first_mobility_onset_s": "1.0",
+                "gate_messages": "",
+            })
+
+
+def _make_empty_csv(tmp: Path) -> None:
+    """辅助：写一份只有表头、没有数据行的 CSV。"""
+    csv_path = tmp / "v.csv"
+    with csv_path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=results.CSV_FIELDS_EXPECTED)
+        writer.writeheader()
+
+
+def test_n1_chambers_null_raises():
+    """守卫 N1：chambers: null → ResultsError（不许 TypeError 飞到调用方）。"""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        exp = _make_exp(tmp, tmp / "v.mp4")
+
+        data = _make_run_json([1])
+        data["chambers"] = None   # null
+
+        (tmp / "v_run.json").write_text(json.dumps(data), encoding="utf-8")
+        _make_empty_csv(tmp)
+
+        try:
+            results.load_results(exp, 0)
+            assert False, "chambers=null 应该抛 ResultsError"
+        except results.ResultsError as e:
+            assert "chambers" in str(e).lower(), f"错误信息应提到 chambers：{e}"
+
+
+def test_n2_chambers_wrong_type_roster_none():
+    """守卫 N2：chambers 是 {} → 名册进「不可信」态，不许出现「名册外的隔间」。
+
+    {} 是 dict 不是 list，迭代结果取决于 dict 内容（此处为空 dict），
+    会导致 chamber_roster=set() 而 CSV 里的产出行全被扣上「名册外的隔间」。
+    修复后：chamber_roster 必须变 None，CSV 行保持自己的 kind。
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        exp = _make_exp(tmp, tmp / "v.mp4")
+
+        data = _make_run_json([])
+        data["chambers"] = {}   # dict，不是 list
+
+        (tmp / "v_run.json").write_text(json.dumps(data), encoding="utf-8")
+        _make_csv_with_rows(tmp, [1, 3])
+
+        # 不许抛错，必须正常返回
+        table = results.load_results(exp, 0)
+
+        # 隔间行（chamber is not None）不许被贴「名册外的隔间」标签
+        # 注意：chamber=None 的元报警行（说明名册为何不可信）可以提到这个词，但不应出现在隔间行里
+        for row in table.rows:
+            if row.chamber is not None and row.reason is not None:
+                assert "名册外的隔间" not in row.reason, (
+                    f"chambers={{}} 时隔间行不许被贴「名册外的隔间」标签，"
+                    f"ch={row.chamber} reason={row.reason!r}"
+                )
+
+        # CSV 行必须保持自己的 kind（scored）
+        ch_rows = {r.chamber: r for r in table.rows if r.chamber is not None}
+        assert 1 in ch_rows and ch_rows[1].kind == "scored"
+        assert 3 in ch_rows and ch_rows[3].kind == "scored"
+
+
+def test_n3_chambers_items_not_dict_raises():
+    """守卫 N3：chambers=[1, 2]（条目不是 dict）→ ResultsError。"""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        exp = _make_exp(tmp, tmp / "v.mp4")
+
+        data = _make_run_json([])
+        data["chambers"] = [1, 2]   # 条目是 int，不是 dict
+
+        (tmp / "v_run.json").write_text(json.dumps(data), encoding="utf-8")
+        _make_empty_csv(tmp)
+
+        try:
+            results.load_results(exp, 0)
+            assert False, "chambers=[1,2] 应该抛 ResultsError"
+        except results.ResultsError as e:
+            assert "chambers" in str(e).lower(), f"错误信息应提到 chambers：{e}"
+
+
+def test_n4_chambers_index_wrong_type_raises():
+    """守卫 N4：chambers[].index 是字符串 "1" → ResultsError（index 必须是整数）。"""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        exp = _make_exp(tmp, tmp / "v.mp4")
+
+        data = _make_run_json([])
+        data["chambers"] = [{"index": "1"}]   # index 是 str
+
+        (tmp / "v_run.json").write_text(json.dumps(data), encoding="utf-8")
+        _make_empty_csv(tmp)
+
+        try:
+            results.load_results(exp, 0)
+            assert False, "index='1' 应该抛 ResultsError"
+        except results.ResultsError as e:
+            assert "index" in str(e).lower(), f"错误信息应提到 index：{e}"
+
+
+def test_n5_chambers_index_null_raises():
+    """守卫 N5：chambers[].index 是 null → ResultsError。"""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        exp = _make_exp(tmp, tmp / "v.mp4")
+
+        data = _make_run_json([])
+        data["chambers"] = [{"index": None}]   # index 是 null
+
+        (tmp / "v_run.json").write_text(json.dumps(data), encoding="utf-8")
+        _make_empty_csv(tmp)
+
+        try:
+            results.load_results(exp, 0)
+            assert False, "index=null 应该抛 ResultsError"
+        except results.ResultsError as e:
+            assert "index" in str(e).lower(), f"错误信息应提到 index：{e}"
+
+
+def test_n6_empty_chambers_with_csv_rows_roster_none():
+    """守卫 N6：chambers=[] 但 CSV 有产出行 → 名册进「不可信」态。
+
+    引擎不可能在计划里没有 chN 的情况下产出 chN 的秒数；
+    这种矛盾说明名册不可信，不许推出「名册外的隔间」。
+    对照组：chambers=[] 且 CSV 也为空 → 正常（真的空名册）。
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        exp = _make_exp(tmp, tmp / "v.mp4")
+
+        data = _make_run_json([])   # chambers=[]
+
+        (tmp / "v_run.json").write_text(json.dumps(data), encoding="utf-8")
+        _make_csv_with_rows(tmp, [1, 3])   # CSV 有产出行 → 矛盾
+
+        # 不许抛错，必须正常返回
+        table = results.load_results(exp, 0)
+
+        # 隔间行（chamber is not None）不许被贴「名册外的隔间」标签
+        for row in table.rows:
+            if row.chamber is not None and row.reason is not None:
+                assert "名册外的隔间" not in row.reason, (
+                    f"chambers=[] 且 CSV 有行时隔间行不许被贴「名册外的隔间」标签，"
+                    f"ch={row.chamber} reason={row.reason!r}"
+                )
+
+        # CSV 行保持 kind='scored'
+        ch_rows = {r.chamber: r for r in table.rows if r.chamber is not None}
+        assert 1 in ch_rows and ch_rows[1].kind == "scored"
+        assert 3 in ch_rows and ch_rows[3].kind == "scored"
+
+    # 对照组：chambers=[] 且 CSV 也为空 → 应该能正常加载（真的空名册）
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        exp = _make_exp(tmp, tmp / "v.mp4")
+
+        data = _make_run_json([])   # chambers=[]
+        (tmp / "v_run.json").write_text(json.dumps(data), encoding="utf-8")
+        _make_empty_csv(tmp)   # CSV 也没有产出行
+
+        # 不许抛错
+        table = results.load_results(exp, 0)
+        # 没有 chamber 行（名册为空，CSV 也为空）
+        ch_rows = [r for r in table.rows if r.chamber is not None]
+        assert len(ch_rows) == 0, f"空名册 + 空 CSV 不应有 chamber 行，实际：{ch_rows}"
+
+
+def test_n7_not_scored_null_raises():
+    """守卫 N7：not_scored: null → ResultsError（不许 TypeError 飞到调用方）。"""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        exp = _make_exp(tmp, tmp / "v.mp4")
+
+        # chambers=[1]，CSV 没有该隔间 → 模型要去查 not_scored
+        data = _make_run_json([1])
+        data["not_scored"] = None   # null
+
+        (tmp / "v_run.json").write_text(json.dumps(data), encoding="utf-8")
+        _make_empty_csv(tmp)   # ch1 在名册里但 CSV 无此行
+
+        try:
+            results.load_results(exp, 0)
+            assert False, "not_scored=null 应该抛 ResultsError"
+        except results.ResultsError as e:
+            assert "not_scored" in str(e), f"错误信息应提到 not_scored：{e}"
+
+
+def test_n9_rules_null_raises():
+    """守卫 N9：rules: null → ResultsError（不许 TypeError 飞到调用方）。"""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        exp = _make_exp(tmp, tmp / "v.mp4")
+
+        data = _make_run_json([1])
+        data["rules"] = None   # null
+
+        (tmp / "v_run.json").write_text(json.dumps(data), encoding="utf-8")
+        _make_empty_csv(tmp)
+
+        try:
+            results.load_results(exp, 0)
+            assert False, "rules=null 应该抛 ResultsError"
+        except results.ResultsError as e:
+            assert "rules" in str(e), f"错误信息应提到 rules：{e}"
+
+
+def test_n10_video_null_raises():
+    """守卫 N10：video: null → ResultsError（不许 TypeError 飞到调用方）。"""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        exp = _make_exp(tmp, tmp / "v.mp4")
+
+        data = _make_run_json([1])
+        data["video"] = None   # null
+
+        (tmp / "v_run.json").write_text(json.dumps(data), encoding="utf-8")
+        _make_empty_csv(tmp)
+
+        try:
+            results.load_results(exp, 0)
+            assert False, "video=null 应该抛 ResultsError"
+        except results.ResultsError as e:
+            assert "video" in str(e), f"错误信息应提到 video：{e}"
+
+
+def test_n11_context_fields_wrong_type_become_none():
+    """守卫 N11：上下文字段类型不对时，字段变 None（不抛错，不许原样传给报告）。
+
+    scoring_window_s=1（期望 list）、theta_mob='很大'（期望数字）、
+    video.name=123（期望 str）、video.fps='abc'（期望数字）、
+    video.n_frames=[]（期望 int）→ 载入成功，五个字段都变 None。
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        exp = _make_exp(tmp, tmp / "v.mp4")
+
+        data = _make_run_json([1])
+        # 五个字段都设成错误类型
+        data["scoring_window_s"] = 1          # int，期望 list
+        data["rules"]["theta_mob"] = "很大"   # str，期望数字
+        data["video"]["name"] = 123            # int，期望 str
+        data["video"]["fps"] = "abc"           # str，期望数字
+        data["video"]["n_frames"] = []         # list，期望 int
+
+        (tmp / "v_run.json").write_text(json.dumps(data), encoding="utf-8")
+        _make_csv_with_rows(tmp, [1])
+
+        # 不许抛错，必须正常返回
+        table = results.load_results(exp, 0)
+
+        # 五个字段必须全是 None
+        assert table.scoring_window_s is None, (
+            f"scoring_window_s=1 时应变 None，实际 {table.scoring_window_s!r}"
+        )
+        assert table.theta_mob is None, (
+            f"theta_mob='很大' 时应变 None，实际 {table.theta_mob!r}"
+        )
+        assert table.video_name is None, (
+            f"video.name=123 时应变 None，实际 {table.video_name!r}"
+        )
+        assert table.video_fps is None, (
+            f"video.fps='abc' 时应变 None，实际 {table.video_fps!r}"
+        )
+        assert table.video_n_frames is None, (
+            f"video.n_frames=[] 时应变 None，实际 {table.video_n_frames!r}"
+        )
+
+
+def test_n11_context_fields_reverse_guard():
+    """守卫 N11 反向：合法的 run.json 载入后，上下文字段必须是原值（不变 None）。"""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        exp = _make_exp(tmp, tmp / "v.mp4")
+
+        data = _make_run_json([1])
+        # _make_run_json 已经设了合法值
+        (tmp / "v_run.json").write_text(json.dumps(data), encoding="utf-8")
+        _make_csv_with_rows(tmp, [1])
+
+        table = results.load_results(exp, 0)
+
+        # 合法值不许被当成「类型不对」而清零
+        assert table.scoring_window_s == [0, 360]
+        assert table.theta_mob == 0.0175
+        assert table.video_name == "test.mp4"
+        assert table.video_fps == 30.0
+        assert table.video_n_frames == 10800
+
+        # 字段类型也必须正确（不许变成 str 之类的）
+        assert isinstance(table.scoring_window_s, list)
+        assert isinstance(table.theta_mob, float)
+        assert isinstance(table.video_name, str)
+        assert isinstance(table.video_fps, float)
+        assert isinstance(table.video_n_frames, int)
+
+
+def test_n13_top_level_not_dict_raises():
+    """守卫 N13：run.json 顶层是 [] 而非 {} → ResultsError，错误提到顶层类型不对。"""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        exp = _make_exp(tmp, tmp / "v.mp4")
+
+        # 顶层写成数组
+        (tmp / "v_run.json").write_text("[]", encoding="utf-8")
+        _make_empty_csv(tmp)
+
+        try:
+            results.load_results(exp, 0)
+            assert False, "顶层是数组应该抛 ResultsError"
+        except results.ResultsError as e:
+            err_str = str(e)
+            assert "顶层" in err_str or "dict" in err_str.lower() or "对象" in err_str, (
+                f"错误信息应指出顶层类型不对，实际：{err_str}"
+            )
+
+
+def test_bool_index_raises():
+    """守卫 bool：chambers[].index=true → ResultsError（bool 不算 int）。
+
+    Python 里 isinstance(True, int) 为 True，不加特判会把 true 当成 1 接受。
+    引擎不可能写 true，写了就是合约破坏，必须拒绝。
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        exp = _make_exp(tmp, tmp / "v.mp4")
+
+        data = _make_run_json([])
+        data["chambers"] = [{"index": True}]   # bool，不是 int
+
+        (tmp / "v_run.json").write_text(json.dumps(data), encoding="utf-8")
+        _make_empty_csv(tmp)
+
+        try:
+            results.load_results(exp, 0)
+            assert False, "index=true 应该抛 ResultsError"
+        except results.ResultsError as e:
+            err_str = str(e)
+            assert "index" in err_str.lower() or "bool" in err_str.lower(), (
+                f"错误信息应提到 index 或 bool：{err_str}"
+            )

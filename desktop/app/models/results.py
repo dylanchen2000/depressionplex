@@ -198,8 +198,8 @@ def load_results(exp: dict, video_index: int) -> ResultsTable:
     # ── 加载 run.json（如果存在）──────────────────────────────────────────────
     run_data: dict[str, Any] | None = None
     # G1：chamber_roster 有三种状态：
-    #   None          = 名册未知（run.json 不存在，不许做任何「名册外」判断）
-    #   set()         = 名册已知但为空（run.json 存在但 chambers[] 是空列表）
+    #   None          = 名册未知（run.json 不存在或名册不可信）
+    #   set()         = 名册已知但为空（run.json 存在且 chambers=[]，且 CSV 无产出行）
     #   {1, 2, ...}   = 名册已知且非空
     chamber_roster: set[int] | None = None
 
@@ -209,6 +209,13 @@ def load_results(exp: dict, video_index: int) -> ResultsTable:
                 run_data = json.load(f)
         except (OSError, json.JSONDecodeError) as e:
             raise ResultsError(f"读取 run.json 失败：{run_json_path}\n  {e}") from e
+
+        # N13：顶层必须是对象（dict），不许是 [] / null / 数字等
+        if not isinstance(run_data, dict):
+            raise ResultsError(
+                f"run.json 顶层必须是对象，实际类型 {type(run_data).__name__}："
+                f"{run_json_path}"
+            )
 
         # 校验 schema_version
         if "schema_version" not in run_data:
@@ -234,49 +241,131 @@ def load_results(exp: dict, video_index: int) -> ResultsTable:
                     f"run.json 缺少必写键 '{key}'：{run_json_path}"
                 )
 
-        # 提取上下文信息
+        # 提取基础字段（字符串类型，不需要特别校验）
         context.tool_version = run_data["tool_version"]
         context.assay = run_data["assay"]
-        context.scoring_window_s = run_data["scoring_window_s"]
 
-        # rules.theta_mob 必须存在
+        # N11：scoring_window_s 必须是 list；类型不对就当未知
+        scoring_window_raw = run_data["scoring_window_s"]
+        if isinstance(scoring_window_raw, list):
+            context.scoring_window_s = scoring_window_raw
+        else:
+            context.scoring_window_s = None
+
+        # N9：rules 必须是 dict
         rules = run_data["rules"]
+        if not isinstance(rules, dict):
+            raise ResultsError(
+                f"run.json 的 rules 字段必须是对象，实际类型 {type(rules).__name__}："
+                f"{run_json_path}"
+            )
+
+        # rules.theta_mob 必须存在，且必须是数字（不许是 bool）
         if "theta_mob" not in rules:
             raise ResultsError(
                 f"run.json 的 rules 缺少必写键 'theta_mob'：{run_json_path}"
             )
-        context.theta_mob = rules["theta_mob"]
+        theta_mob_raw = rules["theta_mob"]
+        # N11：theta_mob 类型校验（bool 不算数字）
+        if isinstance(theta_mob_raw, bool) or not isinstance(theta_mob_raw, (int, float)):
+            context.theta_mob = None
+        else:
+            context.theta_mob = theta_mob_raw
+
+        # N10：video 必须是 dict
+        video_info = run_data["video"]
+        if not isinstance(video_info, dict):
+            raise ResultsError(
+                f"run.json 的 video 字段必须是对象，实际类型 {type(video_info).__name__}："
+                f"{run_json_path}"
+            )
 
         # video 必写键
-        video_info = run_data["video"]
         video_required_keys = ["name", "fps", "n_frames", "frame_count_source"]
         for key in video_required_keys:
             if key not in video_info:
                 raise ResultsError(
                     f"run.json 的 video 缺少必写键 '{key}'：{run_json_path}"
                 )
-        context.video_name = video_info["name"]
-        context.video_fps = video_info["fps"]
-        context.video_n_frames = video_info["n_frames"]
-        context.frame_count_source = video_info["frame_count_source"]
+
+        # N11：video 字段类型校验（类型不对就当未知，不抛错）
+        video_name_raw = video_info["name"]
+        context.video_name = video_name_raw if isinstance(video_name_raw, str) else None
+
+        video_fps_raw = video_info["fps"]
+        if isinstance(video_fps_raw, bool) or not isinstance(video_fps_raw, (int, float)):
+            context.video_fps = None
+        else:
+            context.video_fps = video_fps_raw
+
+        video_n_frames_raw = video_info["n_frames"]
+        if isinstance(video_n_frames_raw, bool) or not isinstance(video_n_frames_raw, int):
+            context.video_n_frames = None
+        else:
+            context.video_n_frames = video_n_frames_raw
+
+        video_fcs_raw = video_info["frame_count_source"]
+        context.frame_count_source = (
+            video_fcs_raw if isinstance(video_fcs_raw, str) else None
+        )
 
         # 提取名册（F1）：chambers[].index 是唯一权威来源
-        # G1：run.json 存在时 roster 初始化为 set()（不是 None）
-        chamber_roster = set()
-        chambers_list = run_data["chambers"]
-        for ch_obj in chambers_list:
-            if "index" not in ch_obj:
-                raise ResultsError(
-                    f"run.json 的 chambers[] 条目缺少必写键 'index'：{run_json_path}"
-                )
-            idx = ch_obj["index"]
-            # G6：名册里的 index 必须 ≥ 1（引擎隔间号 1 起，runner.py:284）
-            if idx < 1:
-                raise ResultsError(
-                    f"run.json 的 chambers[] 条目 index={idx!r} 不合法"
-                    f"（引擎隔间号从 1 起）：{run_json_path}"
-                )
-            chamber_roster.add(idx)
+        # G1 + N1/N2/N3/N4/N5/bool：细化名册可信度判断
+        chambers_raw = run_data["chambers"]
+
+        if chambers_raw is None:
+            # N1：chambers 是 null → 明确的合约破坏，抛错
+            raise ResultsError(
+                f"run.json 的 chambers 字段不能是 null：{run_json_path}"
+            )
+        elif not isinstance(chambers_raw, list):
+            # N2：chambers 不是 list（如 dict）→ 名册不可信（roster=None）
+            chamber_roster = None
+            rows.append(ResultsRow(
+                trial_id="[名册不可读]",
+                chamber=None,
+                kind="alarm",
+                reason=(
+                    f"run.json 名册不可读：chambers 字段不是列表"
+                    f"（实际类型 {type(chambers_raw).__name__}）——名册不可信，"
+                    f"不许推出「名册外的隔间」"
+                ),
+            ))
+        else:
+            # chambers 是 list，逐条校验
+            chamber_roster = set()
+            for i, ch_obj in enumerate(chambers_raw):
+                # N3：条目必须是 dict
+                if not isinstance(ch_obj, dict):
+                    raise ResultsError(
+                        f"run.json 的 chambers[{i}] 条目不是对象"
+                        f"（实际类型 {type(ch_obj).__name__}）：{run_json_path}"
+                    )
+                if "index" not in ch_obj:
+                    raise ResultsError(
+                        f"run.json 的 chambers[] 条目缺少必写键 'index'：{run_json_path}"
+                    )
+                idx = ch_obj["index"]
+                # bool 特判（Python bool 是 int 的子类，isinstance(True, int) 为 True）
+                if isinstance(idx, bool):
+                    raise ResultsError(
+                        f"run.json 的 chambers[{i}].index 不能是布尔值（{idx!r}）："
+                        f"{run_json_path}"
+                    )
+                # N4/N5：index 必须是整数
+                if not isinstance(idx, int):
+                    raise ResultsError(
+                        f"run.json 的 chambers[{i}].index 不是整数"
+                        f"（实际类型 {type(idx).__name__}，值 {idx!r}）："
+                        f"{run_json_path}"
+                    )
+                # G6：index 必须 ≥ 1
+                if idx < 1:
+                    raise ResultsError(
+                        f"run.json 的 chambers[{i}].index={idx!r} 不合法"
+                        f"（引擎隔间号从 1 起）：{run_json_path}"
+                    )
+                chamber_roster.add(idx)
 
     else:
         # run.json 缺失：名册未知（G1：保持 None，不能当成空名册处理）
@@ -380,14 +469,33 @@ def load_results(exp: dict, video_index: int) -> ResultsTable:
         except (OSError, csv.Error) as e:
             raise ResultsError(f"读取 CSV 失败：{csv_path}\n  {e}") from e
 
+    # ── N6：chambers=[] 但 CSV 有产出行 → 名册不可信 ────────────────────────
+    # 引擎不可能在计划里没有 chN 的情况下算出 chN 的秒数；
+    # 若出现这种矛盾，名册是不可信的，不许由此推出「名册外的隔间」。
+    if (
+        isinstance(chamber_roster, set)
+        and len(chamber_roster) == 0
+        and len(csv_rows) > 0
+    ):
+        chamber_roster = None
+        rows.append(ResultsRow(
+            trial_id="[名册不可读]",
+            chamber=None,
+            kind="alarm",
+            reason=(
+                "run.json 名册为空（chambers=[]）但 CSV 有产出行——名册不可信，"
+                "不许推出「名册外的隔间」"
+            ),
+        ))
+
     # 获取 trial_id 前缀（F4）
     prefix = trial_prefix(exp, video_index)
 
     # ── 构造结果行 ─────────────────────────────────────────────────────────────
     #
     # 两条分支取决于名册状态：
-    #   chamber_roster is not None  → 名册已知（run.json 存在），按名册驱动
-    #   chamber_roster is None      → 名册未知（run.json 缺失），CSV 行保持自己的 kind
+    #   chamber_roster is not None  → 名册已知（run.json 存在且可信），按名册驱动
+    #   chamber_roster is None      → 名册未知（run.json 缺失或名册不可信），CSV 行保持自己的 kind
 
     if chamber_roster is not None:
         # ── 分支 A：名册已知，按名册遍历 ────────────────────────────────────
@@ -404,6 +512,13 @@ def load_results(exp: dict, video_index: int) -> ResultsTable:
 
                 # 先查 not_scored
                 not_scored_list = run_data["not_scored"]
+                # N7：not_scored 必须是 list
+                if not isinstance(not_scored_list, list):
+                    raise ResultsError(
+                        f"run.json 的 not_scored 字段必须是列表，"
+                        f"实际类型 {type(not_scored_list).__name__}："
+                        f"{run_json_path}"
+                    )
                 found_in_not_scored = False
                 for item in not_scored_list:
                     if "chamber" not in item:
@@ -423,6 +538,13 @@ def load_results(exp: dict, video_index: int) -> ResultsTable:
 
                 # 再查 chamber_validity
                 chamber_validity_list = run_data["chamber_validity"]
+                # 也需要是 list
+                if not isinstance(chamber_validity_list, list):
+                    raise ResultsError(
+                        f"run.json 的 chamber_validity 字段必须是列表，"
+                        f"实际类型 {type(chamber_validity_list).__name__}："
+                        f"{run_json_path}"
+                    )
                 found_in_validity = False
                 for cv in chamber_validity_list:
                     cv_required_keys = ["chamber", "status", "occupied_fraction",
@@ -475,9 +597,9 @@ def load_results(exp: dict, video_index: int) -> ResultsTable:
                 ))
 
     else:
-        # ── 分支 B：名册未知（run.json 缺失）────────────────────────────────
-        # G1：CSV 行保持自己的 kind，不许挂「名册外」这类 reason
-        # 上下文缺失的 alarm 行（chamber=None）已经在 run.json 缺失时加入了
+        # ── 分支 B：名册未知（run.json 缺失或名册不可信）────────────────────
+        # G1 + N2/N6：CSV 行保持自己的 kind，不许挂「名册外」这类 reason
+        # 上下文缺失或名册不可读的 alarm 行（chamber=None）已经在前面加入了
         for chamber in sorted(csv_rows.keys()):
             tid = f"{prefix}-ch{chamber}"
             rows.append(_build_row_from_csv(csv_rows[chamber], tid, chamber))
