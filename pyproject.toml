@@ -12,6 +12,22 @@ dependencies = ["numpy>=1.24"]
 video = ["opencv-python-headless>=4.8"]
 ml = ["scikit-learn>=1.3"]
 
+# 桌面外壳（desktop/）允许的第三方依赖。**这是唯一权威清单**（DP-114）：
+#   - `tests/test_desktop_boundary.py::test_third_party_whitelist` 的白名单从这里读；
+#   - 架构文件 §3.2 那张表是给人读的镜像，有守卫按这里对账；
+#   - CI `tests.yml` 装哪些包也按这里对账（PySide6 除外，见下）。
+# 版本必须**钉死**：客户打开的那个 .xlsx 是某个具体版本的 openpyxl 写出来的字节，
+# 写成 `>=` 等于「客户拿到的文件由一个我们没测过的库产出」。
+desktop = ["PySide6==6.7.3", "openpyxl==3.1.5"]
+
+# 分发名 → import 名 + 允许出现的位置。
+# **分发名不等于 import 名**（`opencv-python-headless` → `cv2`），所以映射必须显式写。
+# `scope` 不是洁癖：xlsx 是客户拿走的文件，让 `import openpyxl` 散到七个页面里去，
+# 「哪段代码在写客户手里的文件」这件事就再也说不清了。
+[tool.depressionplex.desktop-imports]
+PySide6 = { module = "PySide6", scope = "*" }
+openpyxl = { module = "openpyxl", scope = "desktop/app/services/export_xlsx.py" }
+
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"

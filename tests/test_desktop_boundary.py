@@ -11,6 +11,7 @@
 """
 
 import ast
+import re
 import sys
 from pathlib import Path
 from typing import Set
@@ -150,18 +151,52 @@ def test_no_engine_imports():
     )
 
 
-def test_third_party_whitelist():
-    """规则 2：desktop/**/*.py 的第三方 import 只许 PySide6。
+def _desktop_deps() -> tuple[dict[str, str], dict[str, dict[str, str]]]:
+    """外壳第三方依赖的**唯一权威清单**：`pyproject.toml`（DP-114）。
 
-    标准库随意用，但第三方库只许 PySide6（不许引入 onnxruntime / opencv / torch 等）。
+    返回 `({分发名: 需求串}, {分发名: {module, scope}})`。
+
+    为什么不在这里手抄一份白名单：这条守卫原来写死 `module != "PySide6"`，
+    而架构 §3.2 的依赖表里 `openpyxl==3.1.5` 早就写着了。于是 B6 按架构文件把
+    xlsx 导出做出来，撞在一条比架构文件更严的守卫上——**这时候最省事的一步永远是
+    把守卫改松**，而那一步会把「外壳只许 PySide6 + 一个受限的 openpyxl」这条边界
+    换成「外壳想 import 什么都行」。清单只留一份，谁要加依赖就去改那一份。
+    """
+    import tomllib
+
+    data = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    reqs = data["project"]["optional-dependencies"]["desktop"]
+    declared = {}
+    for r in reqs:
+        name, _, ver = r.partition("==")
+        assert ver, f"外壳依赖必须钉死版本，`{r}` 不是 `名==版本`（>= 等于客户拿到一个我们没测过的库）"
+        declared[name] = r
+    scopes = data["tool"]["depressionplex"]["desktop-imports"]
+    missing = sorted(set(declared) - set(scopes))
+    extra = sorted(set(scopes) - set(declared))
+    assert not missing, f"这些外壳依赖没有 import 名/作用域声明：{missing}（pyproject 的 [tool.depressionplex.desktop-imports]）"
+    assert not extra, f"这些 import 声明没有对应的已声明依赖：{extra}（声明了作用域却没人装它）"
+    return declared, scopes
+
+
+def test_third_party_whitelist():
+    """规则 2：desktop/**/*.py 的第三方 import 必须在 pyproject 的 `desktop` 清单里，
+    且必须出现在允许它出现的那个文件里。
+
+    标准库随意用。第三方**只有两个**：PySide6（全仓可用）与 openpyxl（只许导出那一层）。
+    onnxruntime / opencv / torch 一律不许——它们不在清单里，加进来要先改 pyproject。
     """
     files = collect_desktop_python_files()
     assert files, "desktop/ 下一个 .py 都没扫到——目录被删或 glob 写错，这不是通过"
+
+    _, scopes = _desktop_deps()
+    allowed = {v["module"]: v["scope"] for v in scopes.values()}
 
     violations = []
 
     for file_path in files:
         top_level, _ = extract_imports_from_ast(file_path)
+        rel = file_path.relative_to(ROOT).as_posix()
 
         for module in top_level:
             # 跳过标准库
@@ -173,17 +208,71 @@ def test_third_party_whitelist():
             if module in ("desktop", "depressionplex", "assay_core"):
                 continue
 
-            # 只允许 PySide6
-            if module != "PySide6":
+            if module not in allowed:
                 violations.append(
-                    f"{file_path.relative_to(ROOT)}: import {module}"
-                    f"（第三方库只许 PySide6）"
-                )
+                    f"{rel}: import {module}"
+                    f"（不在 pyproject 的 desktop 清单里：{sorted(allowed)}）")
+                continue
+
+            scope = allowed[module]
+            if scope != "*" and rel != scope:
+                violations.append(
+                    f"{rel}: import {module}（这个包只许出现在 {scope}）")
 
     assert not violations, (
-        "外壳第三方依赖只许 PySide6（见架构 §3.2）：\n" +
+        "外壳第三方依赖只认 pyproject 的 `desktop` 清单（架构 §3.2 是它的镜像）：\n" +
         "\n".join(violations)
     )
+
+
+def test_dependency_table_in_spec_matches_pyproject():
+    """架构 §3.2 那张依赖表必须与 pyproject 的 `desktop` 清单**逐字相等**。
+
+    §3.2 是给人读的那一份：道俊、外派 agent、将来接手的人都从那里知道「外壳能用什么」。
+    它和 pyproject 分叉一次，就会有人照着过期的那份写代码——DP-110 的 B6 就是这么撞上
+    白名单守卫的（§3.2 早写着 openpyxl，守卫却只认 PySide6）。
+
+    `numpy` 不在比对范围：它是引擎的依赖，不是外壳的（外壳不许 import 引擎，见规则 1）。
+    """
+    declared, _ = _desktop_deps()
+    spec = (ROOT / "docs/SPEC_产品化总体架构_v1.md").read_text(encoding="utf-8")
+    # 先切出 §3.2 这一节（到下一个同级标题为止），再取节内**第一个**代码块。
+    # 不写成「标题紧跟代码块」：那样在标题与代码块之间加一段说明文字就会让守卫红，
+    # 而假违规的下一步永远是有人把守卫删掉。
+    section = re.search(r"### 3\.2 [^\n]*\n(.*?)(?=\n### )", spec, re.S)
+    assert section, "架构文件里找不到 §3.2 这一节——它被改名或删了，这不是通过"
+    block = re.search(r"```\n(.*?)```", section.group(1), re.S)
+    assert block, "§3.2 里找不到依赖清单代码块——清单被删了，这不是通过"
+    pinned = dict(re.findall(r"^([A-Za-z0-9_.\-]+)==([^\s#]+)", block.group(1), re.M))
+    pinned.pop("numpy", None)
+    in_spec = {f"{k}=={v}" for k, v in pinned.items()}
+    assert in_spec == set(declared.values()), (
+        "架构 §3.2 的依赖表与 pyproject 的 `desktop` 清单不一致（清单只许有一份）：\n"
+        f"  §3.2：      {sorted(in_spec)}\n"
+        f"  pyproject： {sorted(declared.values())}")
+
+
+def test_ci_installs_the_pinned_desktop_deps():
+    """`tests.yml` 装的版本必须与 pyproject 的 pin **一致**（PySide6 例外）。
+
+    两个方向都要防：
+    - 装了别的版本 ⇒ CI 验的不是产品用的那一份；
+    - **根本不装** ⇒ 依赖那个包的守卫在 CI 上必然红，而下一步永远是有人把守卫删掉。
+      DP-110 第一轮就是这样：三条 xlsx 守卫在 CI 上以 `ModuleNotFoundError` 收场。
+
+    PySide6 是**唯一的例外，而且是刻意的**：测试套件必须能在没有 PySide6 的环境里跑完
+    （`test_no_pyside_import_in_tests` 守着这条），外壳的运行期验证走
+    `desktop-selftest.yml`，那边单独装 `PySide6==6.7.3`。
+    """
+    declared, _ = _desktop_deps()
+    wf = (ROOT / ".github/workflows/tests.yml").read_text(encoding="utf-8")
+    missing = [r for name, r in declared.items() if name != "PySide6" and r not in wf]
+    assert not missing, (
+        f"`tests.yml` 没有装这些钉死的依赖：{missing}\n"
+        "（不装的后果不是「少测一点」，而是相关守卫在 CI 上永远红，然后被删掉）")
+    sf = (ROOT / ".github/workflows/desktop-selftest.yml").read_text(encoding="utf-8")
+    assert declared["PySide6"] in sf, (
+        f"`desktop-selftest.yml` 必须装 {declared['PySide6']}（版本也要与 pyproject 一致）")
 
 
 def test_no_sys_path_magic():

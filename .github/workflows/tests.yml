@@ -19,6 +19,11 @@ jobs:
         with:
           python-version: '3.11'
       - name: Install dependencies
-        run: pip install "numpy>=1.24"
+        # openpyxl 的版本**必须与 pyproject 的 pin 一致**（守卫
+        # test_ci_installs_the_pinned_desktop_deps 对账）：不装的后果不是「少测一点」，
+        # 而是依赖它的守卫在 CI 上永远红，然后被人删掉（DP-110 第一轮就是这样）。
+        # PySide6 刻意不装——套件必须能在没有 PySide6 的环境里跑完，外壳的运行期验证
+        # 在 desktop-selftest.yml。
+        run: pip install "numpy>=1.24" "openpyxl==3.1.5"
       - name: Run tests
         run: python3 run_tests.py
