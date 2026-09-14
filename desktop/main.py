@@ -80,6 +80,28 @@ def self_test() -> int:
     if got != want:
         problems.append(f"页面清单不符：期望 {want}，实际 {got}")
 
+    # 模式徽章必须真的挂在状态栏上（B8 / DP-111）。沙箱里没有 PySide6，
+    # 只有这里能验「它确实是主窗口的一个子控件」——AST 守卫只能看见代码写了这句，
+    # 看不见它有没有生效。**这一条是徽章唯一的运行期证明。**
+    badge = getattr(window, "mode_badge", None)
+    if badge is None:
+        problems.append("主窗口上没有 mode_badge：资质徽章不见了")
+    elif badge.parent() is None:
+        problems.append("mode_badge 没有被加进任何容器（不会显示）")
+    else:
+        view = badge.view
+        print(f"模式徽章：{view.text}（mode={window.calibration_status.mode.value}，"
+              f"claims_metrology={view.claims_metrology}）")
+        for reason in window.calibration_status.reasons:
+            print(f"  原因：{reason}")
+        # 自检**不判断该是黄还是绿**（那取决于随包标定文件，两种都是合法发布态），
+        # 只判断「徽章的声称」与「判定模块的结论」一致。这两个数一旦分叉，
+        # 就会出现界面写着计量模式而导出按研究版声明（或反过来）的情形。
+        if view.claims_metrology != window.calibration_status.may_report_metrology:
+            problems.append(
+                f"徽章声称 claims_metrology={view.claims_metrology}，"
+                f"但判定结论是 {window.calibration_status.may_report_metrology}")
+
     total_ms = (time.perf_counter() - t0) * 1000
     if problems:
         for p in problems:
