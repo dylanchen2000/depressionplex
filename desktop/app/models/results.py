@@ -105,6 +105,97 @@ class ResultsTable:
     run_json_missing: bool = False
 
 
+# ── run.json 上下文字段的类型校验（DP-107 第三轮，架构师收口）────────────────────
+#
+# 为什么这一层必须存在：`ResultsTable` 的签名写着 `scoring_window_s: list[float] | None`、
+# `theta_mob: float | None`，而这些值是从磁盘上的 run.json **原样**读进来的。
+# **注解不是校验，写了类型就得当真**——灌一份坏 run.json 进去，`theta_mob='很大'`
+# 会一路印到客户手里那份 PDF 上，而 0.0175 是冻结参数、是科学结论的一部分。
+#
+# 两条规矩，缺一条这层就白做：
+# 1. 类型不对 ⇒ 当**未知**（`None`），不许照原样往下传（报告那边未知印「未知」）；
+# 2. 降级必须**留下一句说明**。静默把一个数字变成「未知」，用户看到的是一份少了一项的
+#    报告，而不是「这个字段读不出来」——本仓的规矩是**静默兜底比报错危险**。
+#
+# 三个函数都收 `problems` 列表，因为「降级」和「说明」必须在同一处发生：
+# 分开写的下一步永远是有人加了个新字段、只记得降级、忘了说明。
+def _short(value: object, limit: int = 40) -> str:
+    text = repr(value)
+    return text if len(text) <= limit else text[:limit] + "…"
+
+
+def _number_or_unknown(
+    value: object, what: str, problems: list[str], positive: bool = False
+) -> float | None:
+    """数字上下文字段。**`bool` 不算数字**：`True` 会被印成 `1`，假数字比未知危险。
+
+    `positive=True` 用在帧率这种**物理上不可能 ≤ 0** 的量上：报告里印一个「0 fps」
+    是一句关于这段视频的假话，而它只可能来自一个坏文件。`theta_mob` 不加这条——
+    阈值取多少是科学口径的事，不该由读文件的这一层来判。
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        problems.append(f"{what}（实际是 {type(value).__name__}：{_short(value)}）")
+        return None
+    if positive and value <= 0:
+        problems.append(f"{what}（不可能的值：{_short(value)}）")
+        return None
+    return value
+
+
+def _int_or_unknown(
+    value: object, what: str, problems: list[str], positive: bool = False
+) -> int | None:
+    """整数上下文字段（帧数）。浮点也不收：帧数是计数，`9000.5` 帧不存在。"""
+    if isinstance(value, bool) or not isinstance(value, int):
+        problems.append(f"{what}（实际是 {type(value).__name__}：{_short(value)}）")
+        return None
+    if positive and value <= 0:
+        problems.append(f"{what}（不可能的值：{_short(value)}）")
+        return None
+    return value
+
+
+def _text_or_unknown(value: object, what: str, problems: list[str]) -> str | None:
+    """文本上下文字段。**空串也算未知**：报告上一个空格看起来像「这一项本来就没有」，
+    而真相是「这个文件里它坏了」。引擎从不写空串，所以这不会误判合法输出。"""
+    if not isinstance(value, str) or not value.strip():
+        problems.append(f"{what}（实际是 {type(value).__name__}：{_short(value)}）")
+        return None
+    return value
+
+
+def _window_or_unknown(
+    value: object, what: str, problems: list[str]
+) -> list[float] | None:
+    """计分窗口。签名是 `list[float]`，所以**逐个元素都要是数字**——
+    只查「是不是 list」会让 `['a','b']` 原样印到报告的计分窗口那一栏上。
+
+    **不限长度**：FST 的计分窗口口径还没定（DP-057/074），今天写死「必须两个数」
+    等于给将来的合法输出埋一条假违规，而假违规的下一步永远是有人把校验删掉。
+    空列表算未知：一个没有边界的窗口不是窗口。
+    """
+    if not isinstance(value, list) or not value:
+        problems.append(f"{what}（实际是 {type(value).__name__}：{_short(value)}）")
+        return None
+    bad = [v for v in value if isinstance(v, bool) or not isinstance(v, (int, float))]
+    if bad:
+        problems.append(f"{what}（列表里有不是数字的元素：{_short(bad)}）")
+        return None
+    return value
+
+
+def _reason_text(value: object, what: str) -> str:
+    """报警源里那句给人看的原因文本。
+
+    坏值**不抛**：这句话只影响某一行的说明，抛出去会让整张结果页打不开、
+    连 CSV 里算好的数字一起看不见。但也**不许静默换成空串**——
+    那样界面上会出现一个没有原因的报警行，看起来像「引擎什么都没说」。
+    """
+    if isinstance(value, str) and value.strip():
+        return value
+    return f"[{what}不可读：run.json 里它是 {type(value).__name__}（{_short(value)}）]"
+
+
 def _make_csv_row_fields(row_dict: dict[str, str]) -> dict[str, str]:
     """从 DictReader 行提取 16 个 CSV 字段（不含 trial_id）。"""
     return {
@@ -197,6 +288,9 @@ def load_results(exp: dict, video_index: int) -> ResultsTable:
 
     # ── 加载 run.json（如果存在）──────────────────────────────────────────────
     run_data: dict[str, Any] | None = None
+    # 被判成「未知」的上下文字段，逐条记原因；最后合成**一条**报警行说给用户听。
+    # 一个字段一行会把真正的隔间报警冲掉，所以只出一行。
+    context_problems: list[str] = []
     # G1：chamber_roster 有三种状态：
     #   None          = 名册未知（run.json 不存在或名册不可信）
     #   set()         = 名册已知但为空（run.json 存在且 chambers=[]，且 CSV 无产出行）
@@ -241,16 +335,16 @@ def load_results(exp: dict, video_index: int) -> ResultsTable:
                     f"run.json 缺少必写键 '{key}'：{run_json_path}"
                 )
 
-        # 提取基础字段（字符串类型，不需要特别校验）
-        context.tool_version = run_data["tool_version"]
-        context.assay = run_data["assay"]
+        # 基础字段也要校验：`tool_version` 会印在报告上（「这份结果是哪个版本算的」），
+        # 一个 `tool_version: 123` 印上去和印一个假版本号没有区别。
+        context.tool_version = _text_or_unknown(
+            run_data["tool_version"], "工具版本 tool_version", context_problems)
+        context.assay = _text_or_unknown(
+            run_data["assay"], "实验类型 assay", context_problems)
 
-        # N11：scoring_window_s 必须是 list；类型不对就当未知
-        scoring_window_raw = run_data["scoring_window_s"]
-        if isinstance(scoring_window_raw, list):
-            context.scoring_window_s = scoring_window_raw
-        else:
-            context.scoring_window_s = None
+        # N11：计分窗口——是不是 list、以及**里面是不是数字**，两层都查
+        context.scoring_window_s = _window_or_unknown(
+            run_data["scoring_window_s"], "计分窗口 scoring_window_s", context_problems)
 
         # N9：rules 必须是 dict
         rules = run_data["rules"]
@@ -265,12 +359,9 @@ def load_results(exp: dict, video_index: int) -> ResultsTable:
             raise ResultsError(
                 f"run.json 的 rules 缺少必写键 'theta_mob'：{run_json_path}"
             )
-        theta_mob_raw = rules["theta_mob"]
-        # N11：theta_mob 类型校验（bool 不算数字）
-        if isinstance(theta_mob_raw, bool) or not isinstance(theta_mob_raw, (int, float)):
-            context.theta_mob = None
-        else:
-            context.theta_mob = theta_mob_raw
+        # N11：theta_mob 是冻结参数（0.0175），它印错的代价比读不出来大得多
+        context.theta_mob = _number_or_unknown(
+            rules["theta_mob"], "不动阈值 theta_mob", context_problems)
 
         # N10：video 必须是 dict
         video_info = run_data["video"]
@@ -288,26 +379,17 @@ def load_results(exp: dict, video_index: int) -> ResultsTable:
                     f"run.json 的 video 缺少必写键 '{key}'：{run_json_path}"
                 )
 
-        # N11：video 字段类型校验（类型不对就当未知，不抛错）
-        video_name_raw = video_info["name"]
-        context.video_name = video_name_raw if isinstance(video_name_raw, str) else None
-
-        video_fps_raw = video_info["fps"]
-        if isinstance(video_fps_raw, bool) or not isinstance(video_fps_raw, (int, float)):
-            context.video_fps = None
-        else:
-            context.video_fps = video_fps_raw
-
-        video_n_frames_raw = video_info["n_frames"]
-        if isinstance(video_n_frames_raw, bool) or not isinstance(video_n_frames_raw, int):
-            context.video_n_frames = None
-        else:
-            context.video_n_frames = video_n_frames_raw
-
-        video_fcs_raw = video_info["frame_count_source"]
-        context.frame_count_source = (
-            video_fcs_raw if isinstance(video_fcs_raw, str) else None
-        )
+        # N11：video 四个字段（类型不对就当未知 + 记一句说明，不抛错）
+        context.video_name = _text_or_unknown(
+            video_info["name"], "视频文件名 video.name", context_problems)
+        context.video_fps = _number_or_unknown(
+            video_info["fps"], "帧率 video.fps", context_problems, positive=True)
+        context.video_n_frames = _int_or_unknown(
+            video_info["n_frames"], "总帧数 video.n_frames", context_problems,
+            positive=True)
+        context.frame_count_source = _text_or_unknown(
+            video_info["frame_count_source"], "帧数来源 video.frame_count_source",
+            context_problems)
 
         # 提取名册（F1）：chambers[].index 是唯一权威来源
         # G1 + N1/N2/N3/N4/N5/bool：细化名册可信度判断
@@ -375,6 +457,20 @@ def load_results(exp: dict, video_index: int) -> ResultsTable:
             chamber=None,
             kind="alarm",
             reason="上下文缺失：run.json 文件不存在，无法显示 tool_version、theta_mob 等信息",
+        ))
+
+    # 上下文字段被降级成「未知」时必须说出来。**这一行是那次降级唯一的痕迹**：
+    # 没有它，报告上就只是某几项印着「未知」，用户无法分辨是「这次运行没记这个」
+    # 还是「run.json 坏了」——而后者意味着这份结果的元数据不可信。
+    if context_problems:
+        rows.append(ResultsRow(
+            trial_id="[上下文不可读]",
+            chamber=None,
+            kind="alarm",
+            reason=(
+                "run.json 里这些上下文字段类型不对，已按未知处理（报告上会印「未知」）："
+                + "；".join(context_problems)
+            ),
         ))
 
     # ── 加载 CSV（如果存在）──────────────────────────────────────────────────
@@ -520,7 +616,16 @@ def load_results(exp: dict, video_index: int) -> ResultsTable:
                         f"{run_json_path}"
                     )
                 found_in_not_scored = False
-                for item in not_scored_list:
+                for j, item in enumerate(not_scored_list):
+                    # 条目必须是对象。**这一条不是洁癖**：`item` 是字符串时
+                    # `"chamber" not in item` 会变成子串判断（`"chamber"` 这个字符串
+                    # 自己就含 "chamber"，检查恒真），然后 `item["chamber"]` 抛裸
+                    # `TypeError` 穿到 Qt 事件循环——页面按契约只接 ResultsError。
+                    if not isinstance(item, dict):
+                        raise ResultsError(
+                            f"run.json 的 not_scored[{j}] 条目不是对象"
+                            f"（实际类型 {type(item).__name__}）：{run_json_path}"
+                        )
                     if "chamber" not in item:
                         raise ResultsError(
                             f"run.json 的 not_scored[] 条目缺少必写键 'chamber'："
@@ -532,7 +637,8 @@ def load_results(exp: dict, video_index: int) -> ResultsTable:
                             f"{run_json_path}"
                         )
                     if item["chamber"] == chamber:
-                        reason_parts.append(item["reason"])
+                        reason_parts.append(_reason_text(
+                            item["reason"], f"not_scored[{j}].reason"))
                         found_in_not_scored = True
                         break
 
@@ -546,7 +652,13 @@ def load_results(exp: dict, video_index: int) -> ResultsTable:
                         f"{run_json_path}"
                     )
                 found_in_validity = False
-                for cv in chamber_validity_list:
+                for j, cv in enumerate(chamber_validity_list):
+                    # 同上：条目不是对象时，`key not in cv` 对字符串会变成子串判断
+                    if not isinstance(cv, dict):
+                        raise ResultsError(
+                            f"run.json 的 chamber_validity[{j}] 条目不是对象"
+                            f"（实际类型 {type(cv).__name__}）：{run_json_path}"
+                        )
                     cv_required_keys = ["chamber", "status", "occupied_fraction",
                                         "unsegmentable_fraction", "note"]
                     for key in cv_required_keys:
@@ -556,11 +668,14 @@ def load_results(exp: dict, video_index: int) -> ResultsTable:
                                 f"{run_json_path}"
                             )
                     if cv["chamber"] == chamber:
-                        status = cv["status"]
+                        # `status` 必有话说，`note` 允许为空（引擎写空串表示没有备注），
+                        # 所以只有在它**非空但不是文本**时才标不可读。
+                        reason_parts.append(_reason_text(
+                            cv["status"], f"chamber_validity[{j}].status"))
                         note = cv["note"]
-                        reason_parts.append(status)
                         if note:
-                            reason_parts.append(note)
+                            reason_parts.append(_reason_text(
+                                note, f"chamber_validity[{j}].note"))
                         found_in_validity = True
                         break
 

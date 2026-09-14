@@ -1746,3 +1746,294 @@ def test_bool_index_raises():
             assert "index" in err_str.lower() or "bool" in err_str.lower(), (
                 f"错误信息应提到 index 或 bool：{err_str}"
             )
+
+
+# ========================================================================
+# 架构师收口（DP-107 第三轮结束时，改的人 = 复核的人）：
+# 同一个形状的第四处。前三轮修的是「run.json 的顶层键」，这一批修的是
+#   ① 上下文字段的**元素类型**（`list[float]` 里的 float 也得当真）；
+#   ② 降级的**说明**（第三轮派工单 §2.3 要求「不合就当未知并挂一条说明」，
+#      说明那半句没做——一个静默变成「未知」的数字，用户分不清是没记还是文件坏了）；
+#   ③ `not_scored[]` / `chamber_validity[]` **条目层**的类型（顶层修了，条目层没修，
+#      七个裸 TypeError 仍会穿到 Qt 事件循环）。
+#
+# ③ 里有一个专门的陷阱：条目是**字符串**时，`"chamber" not in item` 不报错，
+# 它变成了子串判断——`"chamber"` 这个字符串自己就含 "chamber"，检查恒真通过，
+# 然后 `item["chamber"]` 才抛 TypeError。所以「缺键检查」看着像挡住了非 dict，
+# 其实没挡。查类型必须显式 `isinstance`。
+# ========================================================================
+
+
+def _load_with_run_json(tmp: Path, data: dict, chambers_in_csv: list[int]):
+    """辅助：写 run.json + CSV 后载入（这一批守卫都是这个形状）。"""
+    exp = _make_exp(tmp, tmp / "v.mp4")
+    (tmp / "v_run.json").write_text(json.dumps(data), encoding="utf-8")
+    if chambers_in_csv:
+        _make_csv_with_rows(tmp, chambers_in_csv)
+    else:
+        _make_empty_csv(tmp)
+    return results.load_results(exp, 0)
+
+
+def test_scoring_window_elements_must_be_numbers():
+    """`scoring_window_s: list[float]` 里的元素也要是数字。
+
+    只查「是不是 list」的后果：`['a','b']` 原样进 `ResultsTable`，
+    再原样印到客户那份 PDF 的「计分窗口」一栏上。**注解不是校验。**
+    空列表同样算未知——一个没有边界的窗口不是窗口。
+    """
+    for bad in (["a", "b"], [0, "360"], [None], [True, 360], []):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            data = _make_run_json([1])
+            data["scoring_window_s"] = bad
+            table = _load_with_run_json(tmp, data, [1])
+            assert table.scoring_window_s is None, (
+                f"scoring_window_s={bad!r} 应当按未知处理，实际 {table.scoring_window_s!r}")
+
+
+def test_scoring_window_reverse_guard_lengths():
+    """反向：合法窗口不许被判掉，**长度也不许限**。
+
+    FST 的计分窗口口径还没定（DP-057/074）。今天写死「必须两个数」等于给将来的
+    合法输出埋一条假违规，而假违规的下一步永远是有人把校验整段删掉。
+    """
+    for good in ([0, 360], [0.0, 360.0], [120, 360], [0, 60, 120]):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            data = _make_run_json([1])
+            data["scoring_window_s"] = good
+            table = _load_with_run_json(tmp, data, [1])
+            assert table.scoring_window_s == good, (
+                f"合法窗口 {good!r} 被判成了 {table.scoring_window_s!r}")
+
+
+def test_tool_version_and_assay_type_checked():
+    """`tool_version` / `assay` 也要校验：它们印在报告上。
+
+    「这份结果是哪个版本算的」印成 `123`，和印一个假版本号没有区别。
+    空串同样算未知：报告上一个空格看起来像「本来就没有这一项」。
+    """
+    for key, bad in (("tool_version", 123), ("tool_version", ""),
+                     ("assay", None), ("assay", "   ")):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            data = _make_run_json([1])
+            data[key] = bad
+            table = _load_with_run_json(tmp, data, [1])
+            assert getattr(table, key) is None, (
+                f"{key}={bad!r} 应当按未知处理，实际 {getattr(table, key)!r}")
+
+
+def test_impossible_fps_and_frame_count_become_unknown():
+    """帧率/总帧数 ≤ 0 物理上不可能，印上去是一句关于这段视频的假话。
+
+    只可能来自坏文件，所以按未知处理。**`theta_mob` 不加这条**——
+    阈值取多少是科学口径的事，不该由读文件的这一层来判（`theta_mob=0.0` 必须放行）。
+    """
+    for key, bad in (("fps", 0), ("fps", -1), ("n_frames", 0), ("n_frames", -5),
+                     ("n_frames", 10800.5)):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            data = _make_run_json([1])
+            data["video"][key] = bad
+            table = _load_with_run_json(tmp, data, [1])
+            got = table.video_fps if key == "fps" else table.video_n_frames
+            assert got is None, f"video.{key}={bad!r} 应当按未知处理，实际 {got!r}"
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        data = _make_run_json([1])
+        data["rules"]["theta_mob"] = 0.0
+        table = _load_with_run_json(tmp, data, [1])
+        assert table.theta_mob == 0.0, "theta_mob=0.0 是合法数字，不许当未知判掉"
+
+
+def test_context_degradation_leaves_an_explanation_row():
+    """降级必须**说出来**：一条 `[上下文不可读]` 报警行，点名每个被判未知的字段。
+
+    没有这一行，用户看到的只是报告上某几项印着「未知」，无法分辨是
+    「这次运行没记这个」还是「run.json 坏了」——后者意味着这份结果的元数据不可信。
+    **静默兜底比报错危险。**
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        data = _make_run_json([1])
+        data["scoring_window_s"] = 1
+        data["rules"]["theta_mob"] = "很大"
+        data["video"]["name"] = 123
+        data["video"]["fps"] = "abc"
+        data["video"]["n_frames"] = []
+        table = _load_with_run_json(tmp, data, [1])
+
+        notes = [r for r in table.rows if r.trial_id == "[上下文不可读]"]
+        assert len(notes) == 1, (
+            f"应当恰好一条 [上下文不可读] 报警行，实际 {len(notes)} 条"
+            f"（行：{[r.trial_id for r in table.rows]}）")
+        note = notes[0]
+        assert note.kind == "alarm" and note.chamber is None, (
+            "上下文级报警不属于任何隔间，chamber 必须是 None（F7）")
+        for field in ("scoring_window_s", "theta_mob", "video.name",
+                      "video.fps", "video.n_frames"):
+            assert field in note.reason, f"说明里没点出 {field}：{note.reason!r}"
+
+
+def test_no_explanation_row_when_context_is_clean():
+    """反向：run.json 干净时**不许**出现那条说明行（不许无事报警）。
+
+    误报的守卫最后都会被人削弱——界面上的误报同理，用户会学会忽略这一行。
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        table = _load_with_run_json(tmp, _make_run_json([1]), [1])
+        assert not [r for r in table.rows if r.trial_id == "[上下文不可读]"], \
+            "合法 run.json 不许出现 [上下文不可读] 行"
+
+
+def test_alarm_source_items_must_be_dicts():
+    """`not_scored[]` / `chamber_validity[]` 的条目不是对象 ⇒ ResultsError。
+
+    这七个场景原来全是裸 `TypeError`，会穿到 Qt 事件循环——页面按契约只接
+    `ResultsError`（G2 那一轮的教训）。用户看到的是软件消失或一个英文栈。
+
+    **`'chamber'` 这个字符串是专门的一例**：`"chamber" not in item` 对字符串是
+    子串判断，恒真通过，缺键检查根本没挡住它。
+    """
+    cases = [
+        ("not_scored", ["chamber"]),
+        ("not_scored", [None]),
+        ("not_scored", [42]),
+        ("not_scored", [["chamber", "reason"]]),
+        ("chamber_validity", [1]),
+        ("chamber_validity", ["chamber"]),
+        ("chamber_validity", [None]),
+    ]
+    for key, bad in cases:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            # 名册 (1,2)、CSV 只有 ch1 ⇒ 必定去查这两个报警源
+            data = _make_run_json([1, 2])
+            data[key] = bad
+            try:
+                _load_with_run_json(tmp, data, [1])
+                assert False, f"{key}={bad!r} 应该抛 ResultsError"
+            except results.ResultsError as e:
+                assert key in str(e), f"错误信息应点出是哪个列表：{e}"
+
+
+def test_unreadable_reason_text_degrades_not_crashes():
+    """报警源里的 `reason` / `status` 不是文本 ⇒ 标成不可读，**不抛也不留空**。
+
+    抛出去会让整张结果页打不开，连 CSV 里算好的数字一起看不见；
+    静默换成空串会让界面上出现一个没有原因的报警行，看起来像「引擎什么都没说」。
+    """
+    cases = [
+        ("not_scored", [{"chamber": 2, "reason": None}]),
+        ("not_scored", [{"chamber": 2, "reason": 123}]),
+        ("not_scored", [{"chamber": 2, "reason": "  "}]),
+        ("chamber_validity", [{"chamber": 2, "status": None, "occupied_fraction": 0.9,
+                               "unsegmentable_fraction": 0.0, "note": ""}]),
+        ("chamber_validity", [{"chamber": 2, "status": 123, "occupied_fraction": 0.9,
+                               "unsegmentable_fraction": 0.0, "note": ""}]),
+    ]
+    for key, bad in cases:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            data = _make_run_json([1, 2])
+            data[key] = bad
+            table = _load_with_run_json(tmp, data, [1])
+            ch2 = [r for r in table.rows if r.chamber == 2]
+            assert len(ch2) == 1 and ch2[0].kind == "alarm"
+            reason = ch2[0].reason or ""
+            assert "不可读" in reason, f"{key}={bad!r} 的说明应标不可读，实际 {reason!r}"
+            assert reason.strip(), "报警行不许没有原因"
+
+
+def test_readable_reason_text_passes_through():
+    """反向：合法的 `reason` / `status` 必须原样出现，不许被「不可读」盖掉。"""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        data = _make_run_json([1, 2])
+        data["not_scored"] = [{"chamber": 2, "reason": "排除态不放行计分"}]
+        table = _load_with_run_json(tmp, data, [1])
+        ch2 = [r for r in table.rows if r.chamber == 2][0]
+        assert ch2.reason == "排除态不放行计分", f"合法原因被改写了：{ch2.reason!r}"
+
+
+def test_n2_nonempty_dict_roster_is_unreadable_not_an_error():
+    """N2 补强：`chambers` 是**非空** dict 时也必须走「名册不可读」，不许抛。
+
+    变异检验抓出来的：原来那条 N2 守卫用的是 `chambers={}`，而空 dict 迭代出零个
+    条目，`chamber_roster` 变成空集，接着被**邻居** N6（空名册+CSV有行 ⇒ 不可信）
+    兜成了 None——于是把 N2 自己那段 `isinstance(chambers_raw, list)` 判断整段删掉，
+    守卫照样绿。**能被邻居悄悄换掉的守卫比装饰更糟**：它看起来在守着一件事，
+    实际守着的是另一段代码的副作用。
+
+    非空 dict 是这条判断唯一无法被兜住的入口：没有这段判断，`{"1": {...}}` 会去
+    迭代它的**键**（字符串），撞上「条目不是对象」而抛 ResultsError——
+    而第三轮的裁决要的是「名册不可信 + 一条报警」，不是让整张页面打不开。
+    """
+    for bad in ({"1": {"index": 1}}, {"a": 1, "b": 2}):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            data = _make_run_json([])
+            data["chambers"] = bad
+            table = _load_with_run_json(tmp, data, [1, 3])   # 抛出来就是不通过
+
+            notes = [r for r in table.rows if r.chamber is None and r.reason]
+            assert any("名册" in (r.reason or "") for r in notes), (
+                f"chambers={bad!r} 应当留下一条说明名册不可信的报警行，"
+                f"实际报警行：{[r.reason for r in notes]}")
+            for row in table.rows:
+                if row.chamber is not None and row.reason:
+                    assert "名册外的隔间" not in row.reason, (
+                        f"名册不可信时不许推出「名册外的隔间」：{row.reason!r}")
+            ch_rows = {r.chamber: r for r in table.rows if r.chamber is not None}
+            assert ch_rows[1].kind == "scored" and ch_rows[3].kind == "scored"
+
+
+def test_g6_chamber_index_below_one_raises():
+    """G6：`chambers[].index < 1` ⇒ ResultsError（引擎隔间号从 1 起）。
+
+    变异检验抓出来的：第二轮验收时我用探针确认了这条**代码**是对的，但从来没有
+    **测试**守着它——把 `if idx < 1:` 整段删掉，全套测试照样全绿。
+    探针是一次性的，守卫才是留下来的那个。**没跑到 ≠ 通过**，
+    这里是「跑到了，但没人盯着它」。
+    """
+    for bad in (0, -1, -999):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            data = _make_run_json([])
+            data["chambers"] = [{"index": bad}]
+            try:
+                _load_with_run_json(tmp, data, [])
+                assert False, f"index={bad} 应该抛 ResultsError"
+            except results.ResultsError as e:
+                assert "index" in str(e).lower(), f"错误信息应提到 index：{e}"
+
+
+def test_bool_valued_numbers_are_unknown_not_one():
+    """`true` 出现在数字字段上必须当未知，**不许被当成 1**。
+
+    Python 里 `isinstance(True, int)` 为真，`True > 0` 也为真——所以少写一个
+    `isinstance(value, bool)` 特判，`theta_mob: true` 会变成报告上的 `1`、
+    `fps: true` 会变成 `1 fps`。**一个假数字比一句「未知」危险得多**，
+    而 `theta_mob` 是冻结参数、是科学结论的一部分。
+
+    这条也是变异检验抓出来的：`chambers[].index` 的 bool 特判有守卫
+    （`test_bool_index_raises`），上下文数字字段的没有。
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        data = _make_run_json([1])
+        data["rules"]["theta_mob"] = True
+        data["video"]["fps"] = True
+        data["video"]["n_frames"] = True
+        data["scoring_window_s"] = [True, False]
+        table = _load_with_run_json(tmp, data, [1])
+        assert table.theta_mob is None, f"theta_mob=true 应当按未知处理，实际 {table.theta_mob!r}"
+        assert table.video_fps is None, f"fps=true 应当按未知处理，实际 {table.video_fps!r}"
+        assert table.video_n_frames is None, \
+            f"n_frames=true 应当按未知处理，实际 {table.video_n_frames!r}"
+        assert table.scoring_window_s is None, \
+            f"窗口里的 true/false 应当按未知处理，实际 {table.scoring_window_s!r}"
