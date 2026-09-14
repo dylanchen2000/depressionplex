@@ -18,6 +18,8 @@ import argparse
 import csv
 import json
 import sys
+
+from . import _stdio
 from pathlib import Path
 
 DONE_KEY = '"done":['

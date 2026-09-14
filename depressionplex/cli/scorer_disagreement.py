@@ -14,6 +14,8 @@ import math
 import pathlib
 import sys
 
+from . import _stdio
+
 Seg = tuple[float, float]
 
 
