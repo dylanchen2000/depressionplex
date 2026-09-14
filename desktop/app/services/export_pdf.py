@@ -24,7 +24,7 @@ from desktop.app.models.report import Report
 # ---------------------------------------------------------------------------
 
 CJK_FONT_CANDIDATES: tuple[str, ...] = (
-    "Microsoft YaHei",  # 微软雅黑
+    "Microsoft YaHei",  # 微软雅黑（startswith 匹配，含 "Microsoft YaHei UI" 等变体）
     "SimSun",           # 宋体
     "Noto Sans CJK SC", # Noto Sans CJK SC
 )
@@ -37,76 +37,88 @@ class FontUnavailableError(RuntimeError):
     pass
 
 
-def select_cjk_font(available_families: Sequence[str]) -> str:
-    """从候选字体列表里选第一个可用的，全不可用则抛 FontUnavailableError。
+def _check_font_renders(family: str) -> bool:
+    """用 QRawFont 实测字体能否渲中文字符，是字体可渲性的唯一判据。
 
-    这是纯函数，输入「哪些字体可用」，输出「用哪个」。
-    Qt 只负责问系统可用字体列表，然后调这个函数。
-    沙箱测试可以直接用字符串列表模拟输入。
+    只用 QRawFont.fromFont(QFont(family)).supportsCharacter("中")，
+    不用 QFontDatabase() 实例也不调 addApplicationFont("")。
 
     Args:
-        available_families: 系统已安装的字体 family 名列表（大小写不敏感匹配）
+        family: 字体 family 名
 
     Returns:
-        选中的字体 family 名
+        True 表示该字体可渲中文
 
     Raises:
-        FontUnavailableError: 三个候选字体都不在 available_families 里
+        FontUnavailableError: 当底层 Qt 调用抛出特定异常时，把原异常内容包进来抛出
     """
-    available_lower = {f.lower() for f in available_families}
-    for candidate in CJK_FONT_CANDIDATES:
-        if candidate.lower() in available_lower:
-            return candidate
-    raise FontUnavailableError(
-        f"本机缺中文字体，已找过这三个：{', '.join(CJK_FONT_CANDIDATES)}；"
-        "xlsx 与审计包不受影响，可以先导那两个。"
-    )
-
-
-def _check_font_renders(family: str) -> bool:
-    """用 QRawFont 实测字体能否渲染测试汉字。返回 True 表示可以渲染。
-
-    需要 PySide6，只在真机/CI 里调用。
-    """
+    from PySide6.QtGui import QRawFont, QFont
     try:
-        from PySide6.QtGui import QRawFont, QFontDatabase
-        from PySide6.QtCore import QByteArray
-
-        db = QFontDatabase()
-        # 从系统字体数据库载入
-        font_id = db.addApplicationFont("")  # 触发初始化
-        raw = QRawFont.fromFont(
-            __import__("PySide6.QtGui", fromlist=["QFont"]).QFont(family)
-        )
-        return raw.isValid() and raw.supportsCharacter(_TEST_CHAR)
-    except Exception:
-        return False
+        raw = QRawFont.fromFont(QFont(family))
+        return raw.supportsCharacter(_TEST_CHAR)
+    except (TypeError, RuntimeError, AttributeError) as e:
+        raise FontUnavailableError(
+            f"检查字体 {family!r} 时内部出错: {e}"
+        ) from e
 
 
-def _get_qt_font_families() -> list[str]:
-    """从 Qt 查询系统字体列表，并实测中文可渲。"""
+def _get_renderable_families() -> list[str]:
+    """枚举系统全部 family，过滤出通过 _check_font_renders 的那些。
+
+    Returns:
+        能渲中文的 family 名列表（空列表 = 本机没有中文字体）
+    """
     from PySide6.QtGui import QFontDatabase
-    return list(QFontDatabase.families())
+    renderable: list[str] = []
+    for f in QFontDatabase.families():
+        try:
+            if _check_font_renders(f):
+                renderable.append(f)
+        except FontUnavailableError:
+            pass  # 内部错误，跳过这个字体
+    return renderable
+
+
+def select_cjk_font(renderable_families: Sequence[str]) -> str:
+    """从「已实测可渲中文」的 family 列表里选字体（纯函数）。
+
+    按 CJK_FONT_CANDIDATES 优先级：找到第一个 renderable family 名以候选名为前缀
+    （大小写不敏感），返回它；找不到则返回列表第一个。
+    列表为空抛 FontUnavailableError。
+
+    Args:
+        renderable_families: 已验证能渲中文的 family 名列表
+
+    Returns:
+        选中的 family 名
+
+    Raises:
+        FontUnavailableError: renderable_families 为空时
+    """
+    if not renderable_families:
+        raise FontUnavailableError(
+            "本机缺中文字体（无任何已安装字体通过中文渲染测试）；"
+            "xlsx 与审计包不受影响，可以先导那两个。"
+        )
+    for candidate in CJK_FONT_CANDIDATES:
+        cand_lower = candidate.lower()
+        for fam in renderable_families:
+            if fam.lower().startswith(cand_lower):
+                return fam
+    return renderable_families[0]
 
 
 def _select_font_with_qt() -> str:
-    """Qt 问字体 + 纯函数选字体。失败抛 FontUnavailableError。"""
-    families = _get_qt_font_families()
-    # 先用纯函数选候选字体（看字体是否在列表里）
-    chosen = select_cjk_font(families)
-    # 再实测这个字体能否渲中文
-    if not _check_font_renders(chosen):
-        # 第一个候选不行，继续往下找
-        remaining = [f for f in CJK_FONT_CANDIDATES if f != chosen]
-        for candidate in remaining:
-            if candidate.lower() in {f.lower() for f in families}:
-                if _check_font_renders(candidate):
-                    return candidate
+    """枚举可渲中文的字体，再选优先级最高的。失败抛 FontUnavailableError（含枚举总数）。"""
+    from PySide6.QtGui import QFontDatabase
+    all_families = list(QFontDatabase.families())
+    renderable = _get_renderable_families()
+    if not renderable:
         raise FontUnavailableError(
-            f"本机缺中文字体，已找过这三个：{', '.join(CJK_FONT_CANDIDATES)}；"
+            f"本机缺中文字体，已枚举 {len(all_families)} 个字体均不可渲中文；"
             "xlsx 与审计包不受影响，可以先导那两个。"
         )
-    return chosen
+    return select_cjk_font(renderable)
 
 
 def _build_html(report: Report) -> str:

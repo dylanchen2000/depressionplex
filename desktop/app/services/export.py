@@ -1,9 +1,9 @@
 """导出入口：EXPORT_SUFFIXES 单一来源 + 三个导出函数（B6，DP-110）。
 
 架构约束（派工单 §0.3）：
-- 导出文件名后缀（含 "_research" / ".xlsx" / ".pdf" / "_审计包"）**只许出现在本文件**。
-- "_research" 必须由 calibration.Mode 的取值拼出，不许写字面量。
-- AST 守卫会扫 services/ 下其他文件，若找到这些字面量即红。
+- 导出文件名后缀（含 ".xlsx" / ".pdf" / "_审计包" / ".zip"）**只许出现在本文件**。
+- EXPORT_SUFFIXES 是唯一的文件名模板来源；export_paths 唯一消费它。
+- AST 守卫会扫 services/ / models/ / pages/ 下其他文件，若找到这些字面量即红。
 """
 
 from __future__ import annotations
@@ -21,33 +21,29 @@ from desktop.app.services.calibration import (
 from desktop.app.services.engine import output_paths as engine_output_paths
 
 # ---------------------------------------------------------------------------
-# 导出文件名模板 — 唯一来源
-# "_research" 来自 Mode.RESEARCH.value，不许写字面量
+# 导出文件名模板 — 唯一来源（与 mode 无关的模板，由 export_paths 消费）
+# {stem} 由引擎 OUTPUT_SUFFIXES 的 stem 填充；{mode} 由 Mode.value 填充。
 # ---------------------------------------------------------------------------
-_MODE_RESEARCH = Mode.RESEARCH.value  # == "research"
-
 EXPORT_SUFFIXES: dict[str, str] = {
-    "xlsx":      "{stem}_" + _MODE_RESEARCH + ".xlsx",
-    "pdf":       "{stem}_" + _MODE_RESEARCH + ".pdf",
-    "audit_zip": "{stem}_" + _MODE_RESEARCH + "_审计包.zip",
+    "xlsx":      "{stem}_{mode}.xlsx",
+    "pdf":       "{stem}_{mode}.pdf",
+    "audit_zip": "{stem}_{mode}_审计包.zip",
 }
 
 
 def export_paths(exp: dict, video_index: int, mode: Mode) -> dict[str, Path]:
     """给定 experiment + 视频索引 + 发布态，返回三个导出文件的绝对路径。
 
-    注意：文件名里的 _research / _validated 后缀由 mode.value 拼出，
-    全仓只此一处，守卫会扫别处的字面量。
+    文件名由 EXPORT_SUFFIXES 模板格式化得出——全仓只此一处，守卫检查别处不许出现
+    ".xlsx" / ".pdf" / "_审计包" 等字面量（services/ models/ pages/ 三目录内）。
     """
     paths = engine_output_paths(exp, video_index)
     stem = paths["csv"].stem  # 与引擎 OUTPUT_SUFFIXES 的 stem 保持一致
     out_dir = paths["csv"].parent
-    mode_str = mode.value  # "research" 或 "validated"
 
     return {
-        "xlsx":      out_dir / f"{stem}_{mode_str}.xlsx",
-        "pdf":       out_dir / f"{stem}_{mode_str}.pdf",
-        "audit_zip": out_dir / f"{stem}_{mode_str}_审计包.zip",
+        k: out_dir / v.format(stem=stem, mode=mode.value)
+        for k, v in EXPORT_SUFFIXES.items()
     }
 
 

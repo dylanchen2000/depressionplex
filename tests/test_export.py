@@ -26,22 +26,37 @@ from desktop.app.models.report import (
 
 
 # ---------------------------------------------------------------------------
-# EXPORT_SUFFIXES 唯一来源
+# EXPORT_SUFFIXES 唯一来源（C9：_MODE_RESEARCH 已删除，改为 {mode} 模板）
 # ---------------------------------------------------------------------------
 
 def test_export_suffixes_contain_mode_value() -> None:
-    """EXPORT_SUFFIXES 的 xlsx 后缀里应含 research（来自 Mode.RESEARCH.value）。"""
-    from desktop.app.services.export import EXPORT_SUFFIXES, _MODE_RESEARCH
-    assert _MODE_RESEARCH == Mode.RESEARCH.value, (
-        "_MODE_RESEARCH 应等于 Mode.RESEARCH.value"
+    """EXPORT_SUFFIXES 的模板里含 {mode} 占位符，格式化后含 Mode.RESEARCH.value。
+
+    C9：_MODE_RESEARCH 已从 export.py 中删除。
+    EXPORT_SUFFIXES 现在是纯模板，由 export_paths() 在调用时注入 mode.value。
+    """
+    from desktop.app.services.export import EXPORT_SUFFIXES
+
+    research_val = Mode.RESEARCH.value  # "research"
+
+    # 1. 每个模板都含 {mode} 和 {stem} 占位符
+    for k, tmpl in EXPORT_SUFFIXES.items():
+        assert "{mode}" in tmpl, (
+            f"EXPORT_SUFFIXES[{k!r}]={tmpl!r} 应含 '{{mode}}' 占位符"
+        )
+        assert "{stem}" in tmpl, (
+            f"EXPORT_SUFFIXES[{k!r}]={tmpl!r} 应含 '{{stem}}' 占位符"
+        )
+
+    # 2. 格式化后含 mode.value
+    formatted = {k: v.format(stem="test_video", mode=research_val)
+                 for k, v in EXPORT_SUFFIXES.items()}
+    assert research_val in formatted["xlsx"], (
+        f"格式化后 xlsx={formatted['xlsx']!r} 里应含 {research_val!r}"
     )
-    # xlsx 后缀应包含 research
-    assert _MODE_RESEARCH in EXPORT_SUFFIXES["xlsx"], (
-        f"EXPORT_SUFFIXES['xlsx']={EXPORT_SUFFIXES['xlsx']!r} 里应含 research"
-    )
-    assert ".xlsx" in EXPORT_SUFFIXES["xlsx"]
-    assert ".pdf" in EXPORT_SUFFIXES["pdf"]
-    assert ".zip" in EXPORT_SUFFIXES["audit_zip"]
+    assert ".xlsx" in formatted["xlsx"]
+    assert ".pdf" in formatted["pdf"]
+    assert ".zip" in formatted["audit_zip"]
 
 
 def test_export_paths_uses_mode_value() -> None:
@@ -199,38 +214,48 @@ def test_declaration_template_has_no_hardcoded_numbers() -> None:
 
 
 # ---------------------------------------------------------------------------
-# export.py 里的 _research 字面量检查（变异：写死 → 红）
+# export.py 里的 _research 字面量检查（C9：_MODE_RESEARCH 已删除，改为模板设计）
 # ---------------------------------------------------------------------------
 
 def test_research_literal_not_hardcoded_in_export_suffixes() -> None:
-    """EXPORT_SUFFIXES 的值里不出现字面量 'research'（应该是通过 Mode.RESEARCH.value 构造）。
+    """EXPORT_SUFFIXES 的模板值里不出现字面量 'research'（应使用 {mode} 占位符）。
 
-    包含两项检查：
-    1. EXPORT_SUFFIXES 里没有 \"_research\" 字面量
-    2. _MODE_RESEARCH 的赋值不是字符串常量（必须是 Mode.RESEARCH.value 这样的属性访问）
+    C9 修正：_MODE_RESEARCH 已从 export.py 中删除。
+    新检查：
+    1. export.py 里没有 _MODE_RESEARCH 赋值（已清除）
+    2. EXPORT_SUFFIXES 的任何字符串值里不含字面量 "research" 或 "validated"
+       （模式应通过 {mode} 占位符在运行时注入，不许写死）
+    3. export.py 里没有字面量 "_research" 或 "_validated"
     """
     export_py = ROOT / "desktop" / "app" / "services" / "export.py"
     source = export_py.read_text(encoding="utf-8")
     tree = ast.parse(source)
 
-    # 检查 _MODE_RESEARCH 的赋值方式：RHS 不许是字符串常量
+    # 1. _MODE_RESEARCH 不应再出现（C9 已删除）
     for node in ast.walk(tree):
         if isinstance(node, ast.Assign):
             for target in node.targets:
                 if isinstance(target, ast.Name) and target.id == "_MODE_RESEARCH":
-                    if isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
-                        raise AssertionError(
-                            f"export.py:{node.lineno} _MODE_RESEARCH 被赋值为字符串字面量 "
-                            f"{node.value.value!r}，必须通过 Mode.RESEARCH.value 派生，"
-                            "不许写死任何字符串"
-                        )
+                    raise AssertionError(
+                        f"export.py:{node.lineno} 仍然有 _MODE_RESEARCH 赋值，"
+                        "C9 要求已删除该常量，改为 {{mode}} 模板占位符"
+                    )
 
-    # 找 EXPORT_SUFFIXES 的赋值
-    # 检查：没有任何字符串常量直接是 "_research"（允许通过变量拼）
+    # 2. EXPORT_SUFFIXES 的字符串值里不含硬编码的 mode 名称
+    from desktop.app.services.export import EXPORT_SUFFIXES
+    for k, v in EXPORT_SUFFIXES.items():
+        for literal in ("research", "validated"):
+            assert literal not in v, (
+                f"EXPORT_SUFFIXES[{k!r}]={v!r} 含字面量 {literal!r}，"
+                "应使用 {{mode}} 占位符，由 export_paths() 在运行时注入"
+            )
+
+    # 3. export.py 里不许有字面量 "_research" 或 "_validated"
     for node in ast.walk(tree):
         if isinstance(node, ast.Constant) and isinstance(node.value, str):
-            if node.value == "_research":
-                raise AssertionError(
-                    f"export.py:{node.lineno} 里出现字面量 \"_research\"，"
-                    "应该通过 Mode.RESEARCH.value 构造"
-                )
+            for bad in ("_research", "_validated"):
+                if node.value == bad:
+                    raise AssertionError(
+                        f"export.py:{node.lineno} 里出现字面量 {bad!r}，"
+                        "应通过 Mode.xxx.value 格式化到 {{mode}} 模板里"
+                    )

@@ -16,6 +16,7 @@ jobs:
         os: [ubuntu-latest, windows-latest]
     env:
       QT_QPA_PLATFORM: offscreen
+      PYTHONUTF8: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -25,7 +26,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libegl1 libxkbcommon0 libdbus-1-3
+          sudo apt-get install -y libegl1 libxkbcommon0 libdbus-1-3 fonts-noto-cjk
       - name: Install PySide6
         run: pip install PySide6==6.7.3
       - name: Install openpyxl (export render step)
@@ -51,7 +52,7 @@ jobs:
       - name: Export render smoke test (PDF + xlsx offscreen)
         run: |
           python -c "
-          import sys, json, csv, tempfile
+          import sys, json, csv, tempfile, html as html_lib
           from pathlib import Path
 
           sys.path.insert(0, '.')
@@ -62,7 +63,7 @@ jobs:
           from desktop.app.models.results import ResultsTable, ResultsRow, load_results
           from desktop.app.models.report import build_report
           from desktop.app.services.export_xlsx import render_xlsx
-          from desktop.app.services.export_pdf import render_pdf, FontUnavailableError
+          from desktop.app.services.export_pdf import render_pdf, _build_html
 
           with tempfile.TemporaryDirectory() as tmpdir:
               tmp = Path(tmpdir)
@@ -105,10 +106,17 @@ jobs:
                   g7_threshold=G7_MIN_R, g8_threshold_s=G8_MAX_ABS_BIAS_S,
               )
 
+              # HTML assertion: _build_html is pure function, check declaration lines
+              html_content = _build_html(report)
+              for line in report.declaration.splitlines():
+                  escaped = html_lib.escape(line)
+                  assert escaped in html_content, f'HTML 里找不到声明行: {line!r}'
+              print('HTML assertion PASSED')
+
               # xlsx
               xlsx_path = tmp / 'out.xlsx'
               render_xlsx(report, xlsx_path)
-              assert xlsx_path.exists() and xlsx_path.stat().st_size > 0, 'xlsx 为空'
+              assert xlsx_path.exists() and xlsx_path.stat().st_size > 2000, 'xlsx 太小或为空'
               import openpyxl
               wb = openpyxl.load_workbook(str(xlsx_path))
               ws = wb.active
@@ -118,19 +126,17 @@ jobs:
               wb.close()
               print(f'xlsx OK: {xlsx_path.stat().st_size} bytes')
 
-              # PDF
+              # PDF: must truly render, no fallback allowed
               pdf_path = tmp / 'out.pdf'
               from PySide6.QtWidgets import QApplication
               app = QApplication.instance() or QApplication(sys.argv)
-              try:
-                  render_pdf(report, pdf_path)
-              except FontUnavailableError as e:
-                  print(f'WARNING: PDF 字体不可用（CI 字体库），跳过 PDF 断言: {e}')
-              else:
-                  assert pdf_path.exists() and pdf_path.stat().st_size > 0, 'PDF 为空'
-                  header = pdf_path.read_bytes()[:4]
-                  assert header == b'%PDF', f'PDF 头字节不对: {header!r}'
-                  print(f'PDF OK: {pdf_path.stat().st_size} bytes, header={header}')
+              render_pdf(report, pdf_path)
+              assert pdf_path.exists(), 'PDF 文件不存在'
+              pdf_size = pdf_path.stat().st_size
+              assert pdf_size > 2000, f'PDF 太小: {pdf_size} bytes'
+              header = pdf_path.read_bytes()[:4]
+              assert header == b'%PDF', f'PDF 头字节不对: {header!r}'
+              print(f'PDF OK: {pdf_size} bytes, header={header}')
               app.quit()
               print('Export render smoke test PASSED')
           "

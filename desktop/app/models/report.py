@@ -27,10 +27,17 @@ VALIDATION_READINGS_PATH = _REPO_ROOT / "data" / "validation_readings.json"
 # 守卫要断言：模板文本里不出现那些读数的数字——改了 JSON 声明照旧印旧数是最难发现的错法。
 # 三处（xlsx / PDF / 审计包）都从这个常量取同一份字符串。
 # ---------------------------------------------------------------------------
+
+# 发布态标签映射（唯一来源）。计量版文案未定，M3 前禁止生成。
+_MODE_LABELS: dict[str, str] = {
+    "research":  "研究版",
+    "validated": "计量版",
+}
+
 DECLARATION_TEMPLATE = """\
 ### 研究用途声明
 
-本报告由 DEPRESSION-PLEX **研究版**生成。本软件当前**没有计量资质**，
+本报告由 DEPRESSION-PLEX **{version_label}**生成。本软件当前**没有计量资质**，
 报告中的秒数**不得**作为计量结果、申报材料或合规证据使用。
 
 **为什么是研究版**：签发计量资质的前置条件之一是「逐秒时间对齐门」（G11）
@@ -67,9 +74,15 @@ DECLARATION_TEMPLATE = """\
 """
 
 
-def _load_validation_readings() -> dict[str, Any]:
-    """从 data/validation_readings.json 加载验证读数。"""
-    with VALIDATION_READINGS_PATH.open("r", encoding="utf-8") as f:
+def _load_validation_readings(readings_path: "Path | None" = None) -> dict[str, Any]:
+    """从 data/validation_readings.json 加载验证读数。
+
+    Args:
+        readings_path: 显式指定 JSON 路径（None = 用 VALIDATION_READINGS_PATH）。
+                       测试可以传 tmpdir 下的副本，避免修改仓库文件。
+    """
+    path = readings_path if readings_path is not None else VALIDATION_READINGS_PATH
+    with path.open("r", encoding="utf-8") as f:
         raw = json.load(f)
     # 过滤掉 __comment 和 __sources 这两个注释键
     return {k: v for k, v in raw.items() if not k.startswith("__")}
@@ -79,19 +92,28 @@ def render_declaration(
     g7_threshold: Any,
     g8_threshold_s: Any,
     theta_mob: Any,
+    mode: str = "research",
+    readings_path: "Path | None" = None,
 ) -> str:
     """用运行时读数填充声明模板，返回最终声明文本。
 
     g7_threshold / g8_threshold_s：来自 calibration.py 的门槛值
     theta_mob：来自本次 run.json 的 rules.theta_mob
+    mode：发布态（"research" 或 "validated"）；validated 时抛 NotImplementedError
+    readings_path：显式指定验证读数 JSON 路径（None = VALIDATION_READINGS_PATH）
 
     G11 门槛 None ⇒ 印「未定」。
     """
-    readings = _load_validation_readings()
+    if mode == "validated":
+        raise NotImplementedError(
+            "计量版声明文案未定，M3 前不许生成计量版报告"
+        )
+    readings = _load_validation_readings(readings_path=readings_path)
     ctx = dict(readings)
     ctx["g7_threshold"] = g7_threshold
     ctx["g8_threshold_s"] = g8_threshold_s
     ctx["theta_mob"] = theta_mob if theta_mob is not None else "未知"
+    ctx["version_label"] = _MODE_LABELS.get(mode, mode)
     return DECLARATION_TEMPLATE.format(**ctx)
 
 
@@ -402,6 +424,7 @@ def build_report(
         g7_threshold=g7_threshold,
         g8_threshold_s=g8_threshold_s,
         theta_mob=theta_mob,
+        mode=calib_mode,
     )
 
     # 逐试次表

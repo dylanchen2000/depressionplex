@@ -26,6 +26,10 @@ from PySide6.QtWidgets import (
 
 from desktop.app.models.results import load_results, ResultsTable, ResultsRow, DENOMINATORS
 
+# M2 研究版不随包标定文件；M3 计量版在此接入 paths.calibration_json()。
+# 守卫会检查 export_* 调用的第三个实参不得出现字面量 None（DP-118）。
+_CALIB_PATH_FOR_M2: Path | None = None
+
 
 class ResultsPage(QWidget):
     """结果页：显示一个视频段的 trial 级数字 + 分母 + 报警行。"""
@@ -243,16 +247,22 @@ class ResultsPage(QWidget):
         return item
 
     def _on_export(self) -> None:
-        """导出按钮点击处理（B6 新增，只加按钮与调用，不动表格逻辑）。"""
+        """导出按钮点击处理（B6 新增，只加按钮与调用，不动表格逻辑）。
+
+        原子性契约：三份产物先渲染到临时子目录，三份都成功才移动到目标目录；
+        任何一份失败则整体不留（DP-110 C7/C12）。
+        """
         if self._current_exp is None:
             return
 
+        import tempfile
+        import shutil
         from desktop.app.services.calibration import evaluate_calibration
         from desktop.app.services.export import export_paths, export_xlsx, export_audit
+        from desktop.app.services.export import export_pdf as _export_pdf
         from desktop.app.services.export_pdf import FontUnavailableError
-        from desktop.app.services.calibration import Mode
 
-        calib_status = evaluate_calibration(None)
+        calib_status = evaluate_calibration(_CALIB_PATH_FOR_M2)
         e_paths = export_paths(
             self._current_exp, self._current_video_index, calib_status.mode
         )
@@ -264,32 +274,58 @@ class ResultsPage(QWidget):
 
         out_dir = Path(dir_path)
 
-        xlsx_path = out_dir / e_paths["xlsx"].name
-        audit_path = out_dir / e_paths["audit_zip"].name
-        pdf_path = out_dir / e_paths["pdf"].name
+        # 先渲染到临时子目录，全部成功才移到目标目录
+        successes: list[str] = []
+        failures: list[str] = []
 
-        errors: list[str] = []
+        with tempfile.TemporaryDirectory() as _tmpdir:
+            tmp = Path(_tmpdir)
+            tmp_xlsx = tmp / e_paths["xlsx"].name
+            tmp_audit = tmp / e_paths["audit_zip"].name
+            tmp_pdf = tmp / e_paths["pdf"].name
 
-        try:
-            export_xlsx(self._current_exp, self._current_video_index, None, xlsx_path)
-        except Exception as e:
-            errors.append(f"xlsx 导出失败：{e}")
+            # xlsx
+            try:
+                export_xlsx(self._current_exp, self._current_video_index,
+                            _CALIB_PATH_FOR_M2, tmp_xlsx)
+                successes.append("xlsx")
+            except Exception as e:
+                failures.append(f"xlsx 导出失败：这是软件内部错误，请把这段话发给我们: {e}")
 
-        try:
-            export_audit(self._current_exp, self._current_video_index, None, audit_path)
-        except Exception as e:
-            errors.append(f"审计包导出失败：{e}")
+            # 审计包
+            try:
+                export_audit(self._current_exp, self._current_video_index,
+                             _CALIB_PATH_FOR_M2, tmp_audit)
+                successes.append("审计包")
+            except Exception as e:
+                failures.append(f"审计包导出失败：这是软件内部错误，请把这段话发给我们: {e}")
 
-        try:
-            from desktop.app.services.export import export_pdf as _export_pdf
-            _export_pdf(self._current_exp, self._current_video_index, None, pdf_path)
-        except FontUnavailableError as e:
-            # 缺中文字体 → 友好提示，xlsx 和审计包不受影响
-            errors.append(f"PDF 未导出：{e}")
-        except Exception as e:
-            errors.append(f"PDF 导出失败：{e}")
+            # PDF
+            try:
+                _export_pdf(self._current_exp, self._current_video_index,
+                            _CALIB_PATH_FOR_M2, tmp_pdf)
+                successes.append("PDF")
+            except FontUnavailableError:
+                failures.append("PDF 未导出：请检查中文字体安装")
+            except Exception as e:
+                failures.append(f"PDF 导出失败：这是软件内部错误，请把这段话发给我们: {e}")
 
-        if errors:
-            QMessageBox.warning(self, "导出完成（有警告）", "\n".join(errors))
-        else:
+            # 原子移动：全部成功才移到目标目录
+            if not failures:
+                for src in [tmp_xlsx, tmp_audit, tmp_pdf]:
+                    shutil.move(str(src), str(out_dir / src.name))
+
+        # 弹窗反馈
+        if not failures:
             QMessageBox.information(self, "导出成功", f"已导出到：{out_dir}")
+        elif not successes:
+            QMessageBox.critical(
+                self, "导出失败",
+                "三份产物全部失败，目标目录里没有任何文件。\n" + "\n".join(failures),
+            )
+        else:
+            QMessageBox.warning(
+                self, "部分导出失败",
+                f"成功：{', '.join(successes)}\n失败（目标目录里没有这些文件）：\n"
+                + "\n".join(failures),
+            )
