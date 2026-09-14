@@ -391,3 +391,146 @@ def test_license_files_in_packaging():
         "fetch_ffmpeg.py 里找不到 bin/ 提取规则"
     assert "ffplay" in fetch_text.lower(), \
         "fetch_ffmpeg.py 里找不到跳过 ffplay 的说明"
+
+
+def test_ffmpeg_hash_must_be_none_not_placeholder():
+    """守卫 H3：占位哈希必须长成 None，不许长成格式合法的 64 位十六进制。
+
+    格式合法的占位（45eb9e600e7a...）会通过守卫 8 的长度/格式检查，
+    但下载回来的真文件哈希不匹配时才红——那时已经跑了网络请求。
+    None 在取用时立刻 TypeError，在本地就能发现。
+    """
+    fetch_py = ROOT / "packaging" / "fetch_ffmpeg.py"
+    tree = ast.parse(fetch_py.read_text(encoding="utf-8"), filename=str(fetch_py))
+
+    sha256_value = None
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name) and target.id == "FFMPEG_SHA256":
+                    if isinstance(node.value, ast.Constant):
+                        sha256_value = node.value.value
+
+    # 如果哈希是 None，守卫通过（意味着还没填真值）
+    if sha256_value is None:
+        return
+
+    # 如果哈希不是 None，必须是真实的 64 位十六进制（守卫 8 已检查）
+    # 这条守卫的作用是：占位时不许写成 "00000..."，必须写 None
+    assert len(sha256_value) == 64 and re.fullmatch(r'[0-9a-fA-F]{64}', sha256_value), \
+        f"FFMPEG_SHA256 如果不是 None，必须是 64 位十六进制（真哈希），不许用占位符"
+
+
+def test_bin_extraction_no_hardcoded_dll_list():
+    """守卫 H6：bin/ 提取规则不许手写 DLL 名单。
+
+    -shared 构建需要 7 个 DLL（avcodec / avfilter / avformat / swscale / avdevice /
+    avutil / swresample），上游版本升级可能改 DLL 后缀（如 avcodec-62 → -63）。
+    手写名单会在客户机上变成「缺失 ...dll」弹窗。必须用循环提取 bin/ 下全部文件。
+    """
+    fetch_py = ROOT / "packaging" / "fetch_ffmpeg.py"
+    tree = ast.parse(fetch_py.read_text(encoding="utf-8"), filename=str(fetch_py))
+
+    # 从 AST 提取所有字符串常量，只看可能是文件名/路径的（包含 .dll 且包含斜杠）
+    string_constants = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            s = node.value.lower()
+            # 只检查看起来像 DLL 文件名/路径的字符串（同时包含 .dll 和路径分隔符）
+            if '.dll' in s and ('/' in s or '\\' in s):
+                string_constants.append(s)
+
+    # 不许在这些字符串中出现 DLL 基础名（说明硬编码了成员名）
+    forbidden = ['avcodec', 'avfilter', 'avformat', 'swscale', 'avdevice', 'avutil', 'swresample']
+    violations = []
+    for dll_name in forbidden:
+        for s in string_constants:
+            if dll_name in s:
+                violations.append(f"{dll_name} in '{s[:60]}'")
+                break
+
+    assert not violations, (
+        f"fetch_ffmpeg.py 代码字符串里硬编码了 DLL 路径：{violations}。"
+        f"必须循环提取 bin/ 全体，不许手写成员名"
+    )
+
+    # 必须有循环提取 bin/ 的逻辑
+    src = fetch_py.read_text(encoding="utf-8")
+    assert "bin/" in src and "for " in src and "member" in src.lower(), \
+        "fetch_ffmpeg.py 必须循环提取 bin/ 下的文件"
+
+
+def test_cli_encoding_reconfigure_single_source():
+    """守卫：每个 CLI 入口的 main() 都 reconfigure stdout/stderr 为 UTF-8。
+
+    Windows 客户机（cp1252/cp936）上引擎的中文报告会 UnicodeEncodeError 或乱码。
+    每个 CLI 入口必须在 main() 最前面做一次 reconfigure，且不许有第二处。
+    """
+    cli_dir = ROOT / "depressionplex" / "cli"
+    violations = []
+
+    for py_file in cli_dir.glob("*.py"):
+        if py_file.name == "__init__.py":
+            continue
+
+        src = py_file.read_text(encoding="utf-8")
+        tree = ast.parse(src, filename=str(py_file))
+
+        # 找到所有 main 函数
+        main_funcs = [node for node in ast.walk(tree)
+                      if isinstance(node, ast.FunctionDef) and node.name == "main"]
+
+        if not main_funcs:
+            continue
+
+        for main_func in main_funcs:
+            # 检查 main 函数的第一条或前几条语句是否有 reconfigure
+            has_reconfigure = False
+            for stmt in main_func.body[:5]:  # 只检查前 5 条语句（注释、docstring 可能占位）
+                if isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call):
+                    call = stmt.value
+                    if (isinstance(call.func, ast.Attribute) and
+                        call.func.attr == "reconfigure" and
+                        isinstance(call.func.value, ast.Attribute) and
+                        call.func.value.attr in ("stdout", "stderr")):
+                        has_reconfigure = True
+                        break
+
+            if not has_reconfigure:
+                violations.append(f"{py_file.name}::main() 缺少 stdout/stderr.reconfigure()")
+
+    assert not violations, (
+        "这些 CLI 入口的 main() 没有 reconfigure stdout/stderr 为 UTF-8：\n"
+        + "\n".join(violations)
+    )
+
+
+def test_workflow_deps_match_arch_spec():
+    """守卫：workflow 里的 numpy/PySide6 pin 必须等于架构文件 §3.2。
+
+    numpy 2.x 改了标量提升规则（NEP 50），客户机 exe 算出的秒数可能与验收读数不同。
+    一个门槛只许有一个来源：架构文件是真值，workflow 必须与它一致。
+    """
+    # 读取架构文件中的版本号
+    arch_spec = ROOT / "docs" / "SPEC_产品化总体架构_v1.md"
+    arch_text = arch_spec.read_text(encoding="utf-8")
+
+    # 提取 numpy==x.y.z 和 PySide6==x.y.z
+    numpy_match = re.search(r'numpy==(\d+\.\d+\.\d+)', arch_text)
+    pyside6_match = re.search(r'PySide6==(\d+\.\d+\.\d+)', arch_text)
+
+    assert numpy_match, "架构文件中找不到 numpy==x.y.z"
+    assert pyside6_match, "架构文件中找不到 PySide6==x.y.z"
+
+    arch_numpy = numpy_match.group(1)
+    arch_pyside6 = pyside6_match.group(1)
+
+    # 读取 workflow 文件
+    workflow = ROOT / ".github" / "workflows" / "build-windows.yml"
+    workflow_text = workflow.read_text(encoding="utf-8")
+
+    # 检查 workflow 中的版本号
+    assert f"numpy=={arch_numpy}" in workflow_text, \
+        f"build-windows.yml 的 numpy 版本必须是 {arch_numpy}（与架构文件一致）"
+    assert f"PySide6=={arch_pyside6}" in workflow_text, \
+        f"build-windows.yml 的 PySide6 版本必须是 {arch_pyside6}（与架构文件一致）"
