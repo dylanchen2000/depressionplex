@@ -4,7 +4,7 @@
 读不到的读数是 None（测不出时引擎写 null），**不是 0**——
 未知不许长成数字的样子（本仓成文的规矩）。
 
-页面代码里不许出现门槛字面量 100 / 2.0 / 0.02——GUI 只显示 JSON 说的，
+页面代码里不许出现门槛字面量——GUI 只显示 JSON 说的，
 门槛值全靠本模型从 JSON 里读出来传给页面。
 """
 
@@ -12,6 +12,15 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+
+
+# ── 键集常量（守卫 13 双向对账用）─────────────────────────────────────────────
+_MODEL_JSON_KEYS = ("generated_at", "video", "sampling", "gates", "chambers", "reference")
+_MODEL_GATES_KEYS = ("contrast", "noise_floor", "area_jitter")
+_MODEL_CONTRAST_KEYS = ("value", "ratio", "threshold_abs", "threshold_ratio", "passed")
+_MODEL_NOISE_FLOOR_KEYS = ("value", "n_frames")
+_MODEL_AREA_JITTER_KEYS = ("value", "threshold", "passed", "chamber", "chamber_residual", "moving")
+_MODEL_SAMPLING_KEYS = ("n_windows", "frames_per_window", "frame_indices")
 
 
 class AcqCheckError(ValueError):
@@ -169,7 +178,9 @@ def conclusion_lines(result: "AcqCheckResult") -> list[str]:
     """从 AcqCheckResult 生成「人话结论」文本块（每块一段，永不返回空列表）。
 
     三态组合（contrast_passed × area_jitter_passed × area_jitter_moving）共 27 种，
-    每种都能产出至少一条人话，调用方用 "\n\n".join(...) 组装。
+    每种都能产出至少一条人话，调用方用 "\\n\\n".join(...) 组装。
+
+    兜底「全部指标通过」只在三门都是明确 True 且动物不在动时出现。
 
     Returns:
         list[str]: 至少含一条说明，调用方直接 join 即可。
@@ -185,6 +196,13 @@ def conclusion_lines(result: "AcqCheckResult") -> list[str]:
             "这不是「不达标」，是「量不了」——请把一帧截图发给我们。"
         )
         return lines  # 无面板时其余门都测不到，直接返回
+
+    # ── 对比度门有值但判定未知（has value, no conclusion） ────────────────────
+    if r.contrast_value is not None and r.contrast_passed is None:
+        lines.append(
+            "【对比度量不了结论】有对比度读数但无法得出通过/不通过判断。"
+            "这是内部状态异常，请联系技术支持。"
+        )
 
     # ── 对比度不达标 ─────────────────────────────────────────────────────────────
     if r.contrast_passed is False:
@@ -210,16 +228,32 @@ def conclusion_lines(result: "AcqCheckResult") -> list[str]:
             "可能影响 immobility 判定精度。建议改善采集条件后重试。"
         )
 
-    # ── 找不到隔间（面积抖动无法测量）─────────────────────────────────────────
-    if r.area_jitter_value is None and r.area_jitter_passed is None:
+    # ── 面积抖动门无法测量（找不到隔间）─────────────────────────────────────
+    if r.area_jitter_passed is None and r.area_jitter_moving is None:
         lines.append(
-            "【隔间定位失败】找不到任何动物隔间，面积抖动读数无法获取。"
+            "【面积抖动量不了】找不到任何动物隔间，面积抖动读数无法获取。"
             "请确认视频中有清晰的隔间边界。"
         )
+    elif r.area_jitter_passed is None and r.area_jitter_moving is not None:
+        lines.append(
+            "【面积抖动量不了】面积抖动门无法得出通过/不通过判断。"
+            "这是内部状态异常，请联系技术支持。"
+        )
 
-    # ── 全部通过（无任何报警）─────────────────────────────────────────────────
-    if not lines:
+    # ── 全部指标明确通过（无任何报警）────────────────────────────────────────
+    all_known_pass = (
+        r.contrast_passed is True
+        and r.area_jitter_passed is True
+        and r.area_jitter_moving is not True
+    )
+    if all_known_pass:
         lines.append("全部指标通过，可以开始正式分析。")
+
+    # ── 安全网：不应触达（所有路径都已覆盖）──────────────────────────────────
+    if not lines:
+        lines.append(
+            "【状态未知】当前指标组合未能产出结论，请联系技术支持（内部错误）。"
+        )
 
     return lines
 

@@ -52,7 +52,7 @@ def otsu_threshold(gray: np.ndarray, bins: int = 256) -> float:
     if total <= 0:
         return 128.0
     p /= total
-    centers = (edges[:-1] + edges[1:]) / 2
+    centers = (edges[:-1] + edges[1:]) / 2.0
     w0 = np.cumsum(p)
     m0 = np.cumsum(p * centers)
     m_tot = m0[-1]
@@ -470,10 +470,10 @@ def _scaled(bl: float | None) -> dict:
     return {
         "min_cols": max(_PRESENCE_FLOOR_COLS, int(round(0.1 * bl))),
         "block_gap": max(_BLOCK_GAP_FLOOR, int(round(0.1 * bl))),
-        "hang_reach": max(_HANG_REACH_FLOOR, int(round(2 * bl))),
+        "hang_reach": max(_HANG_REACH_FLOOR, int(round(2.0 * bl))),
         "box_margin": max(_BOX_MARGIN_FLOOR, int(round(0.5 * bl))),
         "bottom_guard": max(_BOTTOM_GUARD_FLOOR, int(round(0.66 * bl))),
-        "min_area": max(int(round(bl * bl / 50)), _MIN_AREA_FLOOR_PX),
+        "min_area": max(int(round(0.02 * bl * bl)), _MIN_AREA_FLOOR_PX),
     }
 
 

@@ -192,11 +192,24 @@ def test_single_gate_source_ast() -> None:
                         and isinstance(stmt.value, ast.Constant)):
                     allowed_const_ids.add(id(stmt.value))
 
+        # 对 segment.py 只扫 contrast_report 函数体，其余模块代码不扫
+        if fpath.name == "segment.py":
+            contrast_func = None
+            for node in ast.walk(tree):
+                if isinstance(node, ast.FunctionDef) and node.name == "contrast_report":
+                    contrast_func = node
+                    break
+            if contrast_func is None:
+                raise AssertionError("segment.py: 找不到 contrast_report 函数")
+            nodes_to_scan = list(ast.walk(contrast_func))
+        else:
+            nodes_to_scan = list(ast.walk(tree))
+
         # 找所有被禁止的浮点字面量（跳过模块级常量定义）
         # 只检查 float 类型：整数 2 / 100 在代码里有合法用途（退出码/切片），
         # 门槛值以 float 形式写入（100.0 / 2.0 / 0.02）才是违规
         violations: list[str] = []
-        for node in ast.walk(tree):
+        for node in nodes_to_scan:
             if isinstance(node, ast.Constant) and isinstance(node.value, float):
                 val = node.value
                 if val in forbidden_float_values and id(node) not in allowed_const_ids:
@@ -222,6 +235,50 @@ def test_single_gate_source_ast() -> None:
         assert not missing, (
             f"{fpath.relative_to(ROOT)} 缺少以 ast.Load 引用的常量：{sorted(missing)}"
         )
+
+    # 字符串常量中不许包含门槛数值的十进制写法（DP-054 形状：屏幕写一个数、实际按另一个判）
+    # 五种渲染逐一查子串：str(v)、f"{v}"、f"{v:.0f}"、f"{v:.1f}"、f"{v:.4f}"
+    # 只保留含小数点且长度 >= 3 的形式，避免 "0" / "2" / "100" 等整数形式产生大量误报
+    from depressionplex.assay_core.segment import (
+        GATE_CONTRAST_ABS, GATE_CONTRAST_RATIO, GATE_AREA_JITTER_P90,
+    )
+    from depressionplex.cli.probe_frames import MOVING_RESIDUAL
+    gate_vals = [GATE_CONTRAST_ABS, GATE_CONTRAST_RATIO, GATE_AREA_JITTER_P90, MOVING_RESIDUAL]
+    gate_val_strs: set[str] = set()
+    for val in gate_vals:
+        for fmt in (str(val), f"{val}", f"{val:.0f}", f"{val:.1f}", f"{val:.4f}"):
+            # 过滤掉整数形式（无小数点），避免 "0"/"2"/"100" 等在代码字符串中无处不在
+            if "." in fmt:
+                gate_val_strs.add(fmt)
+    str_violations: list[str] = []
+    for fpath in check_files:
+        src = fpath.read_text(encoding="utf-8")
+        tree2 = ast.parse(src, filename=str(fpath))
+        # segment.py 与浮点字面量守卫一样，只扫 contrast_report 函数体
+        if fpath.name == "segment.py":
+            _cf = None
+            for _n in ast.walk(tree2):
+                if isinstance(_n, ast.FunctionDef) and _n.name == "contrast_report":
+                    _cf = _n
+                    break
+            str_nodes = list(ast.walk(_cf)) if _cf else []
+        else:
+            str_nodes = list(ast.walk(tree2))
+        for node in str_nodes:
+            if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                s = node.value
+                for vs in gate_val_strs:
+                    if vs in s:
+                        str_violations.append(
+                            f"  {fpath.relative_to(ROOT)} line {node.lineno}: "
+                            f"字符串含门槛数值字符串 {vs!r}"
+                        )
+                        break  # 同一节点只报一次
+    assert not str_violations, (
+        "检查文件里有字符串常量包含门槛数值——"
+        "屏幕写着一个数、实际按另一个判（DP-054 形状）：\n"
+        + "\n".join(str_violations)
+    )
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -337,6 +394,16 @@ def test_json_key_set_is_fixed() -> None:
             assert set(ch.keys()) == set(acq_check.ACQ_CHAMBER_KEYS), (
                 f"chambers 项键不符：{sorted(ch.keys())} vs {sorted(acq_check.ACQ_CHAMBER_KEYS)}"
             )
+
+    # reference 层键集对账（ACQ_REFERENCE_KEYS 不许是零读者）
+    ref = data.get("reference")
+    assert ref is not None, (
+        "reference 不应为 None——P2_REFERENCE 随包走，改完 A4 后永远可用"
+    )
+    missing_ref = [k for k in acq_check.ACQ_REFERENCE_KEYS if k not in ref]
+    extra_ref = [k for k in ref if k not in acq_check.ACQ_REFERENCE_KEYS]
+    assert not missing_ref, f"reference 层缺少键：{missing_ref}（ACQ_REFERENCE_KEYS 不完整）"
+    assert not extra_ref, f"reference 层多出键：{extra_ref}（ACQ_REFERENCE_KEYS 漏声明了这些键）"
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -525,11 +592,16 @@ def test_best_chamber_is_lowest_residual() -> None:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def test_p2_reference_matches_issues_md() -> None:
-    """p2_reference.json 里的四个数必须在 docs/ISSUES.md 里逐字出现。
+    """p2_reference.json（对账凭证）与 P2_REFERENCE 常量逐字段相同，
+    且四个数值在 docs/ISSUES.md 里逐字出现。
 
-    防的是：fixture 里某个数字被悄悄改掉而 ISSUES.md 台账里没有任何记录。
-    变异（M8）：改掉 fixture 里 contrast_abs 为 999.9 ⇒ ISSUES.md 找不到 999.9 ⇒ 本条红。
+    防的是：
+    - fixture 里某个数字被悄悄改掉而常量没跟（M8 变异）；
+    - ISSUES.md 台账没有记录参考读数；
+    - fixture 键被删掉或改名（A10 fix：先断言键存在）。
     """
+    from depressionplex.assay_core.p2_reference import P2_REFERENCE
+
     issues_path = ROOT / "docs" / "ISSUES.md"
     ref_path = ROOT / "tests" / "fixtures" / "p2_reference.json"
 
@@ -538,23 +610,38 @@ def test_p2_reference_matches_issues_md() -> None:
 
     issues_text = issues_path.read_text(encoding="utf-8")
     with open(ref_path, encoding="utf-8") as f:
-        ref = json.load(f)
+        fixture = json.load(f)
 
-    # 四个数值字段必须在 ISSUES.md 里逐字出现（str(float) 格式）
+    # fixture 与 P2_REFERENCE 逐字段相同（对账凭证不许悄悄漂移）
     numeric_keys = ("contrast_abs", "contrast_ratio", "noise_floor_px", "area_jitter_p90")
-    missing = []
+    fixture_errors: list[str] = []
     for key in numeric_keys:
-        val = ref.get(key)
-        if val is None:
-            continue  # null 不要求出现
-        if str(val) not in issues_text:
-            missing.append(
-                f"  fixture[{key!r}] = {val!r}  在 docs/ISSUES.md 里找不到"
+        # A10 fix：先断言键存在，不许 get+None 豁免
+        assert key in fixture, (
+            f"p2_reference.json 缺少必须的键 {key!r}——"
+            "删键或改名是一种「悄悄改掉」，比改值更彻底"
+        )
+        assert key in P2_REFERENCE, f"P2_REFERENCE 缺少键 {key!r}"
+        if fixture[key] != P2_REFERENCE[key]:
+            fixture_errors.append(
+                f"  fixture[{key!r}]={fixture[key]!r} != P2_REFERENCE[{key!r}]={P2_REFERENCE[key]!r}"
             )
+    assert not fixture_errors, (
+        "p2_reference.json 与 P2_REFERENCE 常量不同步：\n" + "\n".join(fixture_errors)
+    )
 
-    assert not missing, (
-        "p2_reference.json 里的参考值在 ISSUES.md 里找不到——"
-        "fixture 改了但 ISSUES.md 台账没更新：\n" + "\n".join(missing)
+    # 四个数值必须在 ISSUES.md 里逐字出现
+    missing_in_issues: list[str] = []
+    for key in numeric_keys:
+        val = P2_REFERENCE[key]
+        # val is not None (all four are concrete floats)
+        if str(val) not in issues_text:
+            missing_in_issues.append(
+                f"  P2_REFERENCE[{key!r}] = {val!r}  在 docs/ISSUES.md 里找不到"
+            )
+    assert not missing_in_issues, (
+        "P2_REFERENCE 里的参考值在 ISSUES.md 里找不到——台账没更新：\n"
+        + "\n".join(missing_in_issues)
     )
 
 
@@ -632,9 +719,9 @@ def test_end_to_end_main_feeds_model() -> None:
     _ = result.area_jitter_threshold
     _ = result.area_jitter_passed
 
-    # 参考列读得出（reference 是字典，不是 None——因为 p2_reference.json 存在）
+    # 参考列读得出（reference 是字典，不是 None——P2_REFERENCE 随包走，永远可用）
     ref = result.reference
-    assert ref is not None, "参考列读不到（p2_reference.json 不存在？）"
+    assert ref is not None, "参考列读不到（P2_REFERENCE 应随包走，永远可用）"
     assert "contrast_abs" in ref, "reference 缺少 contrast_abs"
     assert "area_jitter_p90" in ref, "reference 缺少 area_jitter_p90"
 
@@ -669,14 +756,17 @@ def test_insufficient_frames_gives_rc_2() -> None:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def test_no_frozen_internals_in_desktop() -> None:
-    """desktop/ 除 utils/paths.py 以外，不许出现 sys.frozen / _MEIPASS / __import__("sys")。
+    """desktop/ 除 utils/paths.py 以外，不许出现任何 PyInstaller frozen 内部检查。
 
     架构 §3.4：PyInstaller 内部 API 只能有一个入口点 desktop/app/utils/paths.py::is_frozen()。
-    engine.py 等文件改用 _is_frozen() 调用后，这些模式不应再出现。
 
-    变异：在 engine.py 里加回 is_frozen = getattr(sys, "frozen", ...) ⇒ 本条必须红。
+    禁令（字符串常量 + AST 双查）：
+    - 不许有值为 "frozen" 或 "_MEIPASS" 的字符串常量；
+    - 不许有对 sys 的属性访问名为 frozen 或 _MEIPASS；
+    - 不许有 __import__ 调用。
+
+    变异：在 engine.py 里加 `is_frozen = bool(getattr(sys, "frozen", False))` ⇒ 本条红。
     """
-    FORBIDDEN = ("sys.frozen", "_MEIPASS", '__import__("sys")')
     desktop_root = ROOT / "desktop"
     exempt = (desktop_root / "app" / "utils" / "paths.py").resolve()
 
@@ -685,11 +775,30 @@ def test_no_frozen_internals_in_desktop() -> None:
         if py_file.resolve() == exempt:
             continue
         src_text = py_file.read_text(encoding="utf-8")
-        for pattern in FORBIDDEN:
-            if pattern in src_text:
-                violations.append(
-                    f"  {py_file.relative_to(ROOT)}: 含有 {pattern!r}"
-                )
+        tree = ast.parse(src_text, filename=str(py_file))
+        rel = py_file.relative_to(ROOT)
+
+        for node in ast.walk(tree):
+            # 禁 __import__ 调用
+            if isinstance(node, ast.Call):
+                if isinstance(node.func, ast.Name) and node.func.id == "__import__":
+                    violations.append(f"  {rel}: line {node.lineno}: __import__ 调用")
+
+            # 禁 sys.frozen / sys._MEIPASS 属性访问
+            if isinstance(node, ast.Attribute):
+                if (isinstance(node.value, ast.Name)
+                        and node.value.id == "sys"
+                        and node.attr in ("frozen", "_MEIPASS")):
+                    violations.append(
+                        f"  {rel}: line {node.lineno}: sys.{node.attr} 属性访问"
+                    )
+
+            # 禁字符串常量 "frozen" 或 "_MEIPASS"
+            if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                if node.value in ("frozen", "_MEIPASS"):
+                    violations.append(
+                        f"  {rel}: line {node.lineno}: 字符串常量 {node.value!r}"
+                    )
 
     assert not violations, (
         "desktop/ 文件出现了禁止的 PyInstaller 内部 API（只许在 utils/paths.py 里）：\n"
@@ -704,14 +813,21 @@ def test_no_frozen_internals_in_desktop() -> None:
 def test_conclusion_lines_never_empty() -> None:
     """contrast_passed × area_jitter_passed × area_jitter_moving 各三态，共 27 种组合。
 
-    每种组合 conclusion_lines() 必须返回至少一条文本（不许静默返回空列表）。
+    每种组合 conclusion_lines() 必须：
+    - 返回至少一条文本（不许静默返回空列表）；
+    - 「全部指标通过」只许在三门都明确通过时出现；
+    - 每个 False 的门至少有一条对应的报警；
+    - 每个 None 的门（无法测量）至少有一条含「量不了」或「无法测量」的话。
 
-    变异：在 conclusion_lines 里删掉某一条 lines.append ⇒ 某组合返回空列表 ⇒ 本条红。
+    变异：
+    - M5  删掉「对比度不达标」整条 lines.append ⇒ cp=False 时无报警 ⇒ 本条红；
+    - M14 删掉「面积抖动超标」整条 lines.append ⇒ ap=False+mv!=True 时无报警 ⇒ 本条红；
+    - M6  删掉兜底「全部指标通过」⇒ 全通过组合输出空或其他句子 ⇒ 本条红；
+    - 修改兜底条件（去掉 area_jitter_passed is True）⇒ 部分 None 组合错误出现「全部通过」⇒ 本条红。
     """
     from desktop.app.models.self_test import AcqCheckResult, conclusion_lines
 
     def _make_result(cp, ap, mv) -> AcqCheckResult:
-        """构造特定三态组合的 AcqCheckResult。"""
         cv = None if cp is None else (80.0 if cp is False else 210.0)
         cr = None if cp is None else (1.5 if cp is False else 6.8)
         av = None if ap is None else (0.03 if ap is False else 0.002)
@@ -722,8 +838,7 @@ def test_conclusion_lines_never_empty() -> None:
                 "n_frames": 100, "width": 400, "height": 268,
             },
             "sampling": {
-                "n_windows": 5,
-                "frames_per_window": 8,
+                "n_windows": 5, "frames_per_window": 8,
                 "frame_indices": list(range(40)),
             },
             "gates": {
@@ -734,8 +849,7 @@ def test_conclusion_lines_never_empty() -> None:
                 },
                 "noise_floor": {"value": 0.5, "n_frames": 40},
                 "area_jitter": {
-                    "value": av,
-                    "threshold": 0.02,
+                    "value": av, "threshold": 0.02,
                     "passed": ap,
                     "chamber": None if ap is None else 1,
                     "chamber_residual": None if ap is None else 0.01,
@@ -750,20 +864,48 @@ def test_conclusion_lines_never_empty() -> None:
         }
         return AcqCheckResult(data)
 
-    empty_combos: list[str] = []
+    errors: list[str] = []
     for cp in (True, False, None):
         for ap in (True, False, None):
             for mv in (True, False, None):
                 result = _make_result(cp, ap, mv)
                 lines = conclusion_lines(result)
+                joined = "\n".join(lines)
+                combo = f"cp={cp!r}, ap={ap!r}, mv={mv!r}"
+
+                # 必须非空
                 if not lines:
-                    empty_combos.append(
-                        f"  cp={cp!r}, ap={ap!r}, mv={mv!r} ⇒ 空列表"
+                    errors.append(f"  [{combo}] ⇒ 空列表")
+                    continue
+
+                # 「全部指标通过」只许在三门都明确通过时出现
+                all_pass_phrase = "全部指标通过"
+                expected_all_pass = (cp is True and ap is True and mv is not True)
+                if all_pass_phrase in joined and not expected_all_pass:
+                    errors.append(
+                        f"  [{combo}] 出现「全部指标通过」但有门未明确通过"
+                    )
+                if expected_all_pass and all_pass_phrase not in joined:
+                    errors.append(
+                        f"  [{combo}] 三门全明确通过但没有「全部指标通过」"
                     )
 
-    assert not empty_combos, (
-        "以下三态组合 conclusion_lines() 返回了空列表：\n"
-        + "\n".join(empty_combos)
+                # 每个 False 的门必须有对应报警
+                # 注：cp=None 时函数早返回（无面板时其余门都测不到），面积抖动报警不会出现
+                if cp is False and "对比度" not in joined:
+                    errors.append(f"  [{combo}] cp=False 但没有对比度相关的报警")
+                if ap is False and mv is not True and cp is not None and "面积抖动" not in joined:
+                    errors.append(f"  [{combo}] ap=False+mv!=True 但没有面积抖动相关的报警")
+
+                # 每个 None 的门必须有「量不了」或「无法测量」
+                if cp is None and not any(w in joined for w in ("量不了", "无法测量")):
+                    errors.append(f"  [{combo}] cp=None 但没有「量不了/无法测量」")
+                if ap is None and not any(w in joined for w in ("量不了", "无法测量")):
+                    errors.append(f"  [{combo}] ap=None 但没有「量不了/无法测量」")
+
+    assert not errors, (
+        "conclusion_lines() 口径错误（不只是「非空」，要求口径正确）：\n"
+        + "\n".join(errors)
     )
 
 
@@ -772,35 +914,114 @@ def test_conclusion_lines_never_empty() -> None:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def test_desktop_model_keys_mirror_engine_keys() -> None:
-    """AcqCheckResult._require_keys 的键集与 acq_check.ACQ_*_KEYS 严格对应。
+    """AcqCheckResult 的 _MODEL_*_KEYS 与 acq_check.ACQ_*_KEYS 严格双向相等。
 
-    用 ACQ_*_KEYS 常量构造最小合法 JSON，喂给 AcqCheckResult 不许抛异常。
-    变异：在 _require_keys 里多加一个键 ⇒ 构造的 data 缺键 ⇒ AcqCheckError ⇒ 本条红。
+    一面只照一个方向的镜子不是镜子：引擎加键+模型没跟（M4 改名、M12 少要）都要红。
+
+    变异：
+    - M4  ACQ_JSON_KEYS 加 "extra" ⇒ 引擎侧多键 ⇒ 本条红；
+    - M12 模型 _require_keys 少一个键 ⇒ 模型侧少键 ⇒ 本条红。
     """
     from depressionplex.cli import acq_check
-    from desktop.app.models.self_test import AcqCheckResult, AcqCheckError
+    from desktop.app.models import self_test as M
 
-    # 按 ACQ_*_KEYS 构造最小合法 JSON（每个字段填 None 或空列表）
-    data: dict = {k: None for k in acq_check.ACQ_JSON_KEYS}
-    data["video"] = {k: None for k in acq_check.ACQ_VIDEO_KEYS}
-    data["sampling"] = {k: None for k in acq_check.ACQ_SAMPLING_KEYS}
-    data["sampling"]["frame_indices"] = []
-    data["gates"] = {k: {} for k in acq_check.ACQ_GATES_KEYS}
-    data["gates"]["contrast"] = {k: None for k in acq_check.ACQ_CONTRAST_KEYS}
-    data["gates"]["noise_floor"] = {k: None for k in acq_check.ACQ_NOISE_FLOOR_KEYS}
-    data["gates"]["area_jitter"] = {k: None for k in acq_check.ACQ_AREA_JITTER_KEYS}
-    data["chambers"] = []
-    data["reference"] = None
+    layer_pairs = [
+        ("顶层", acq_check.ACQ_JSON_KEYS, M._MODEL_JSON_KEYS),
+        ("gates", acq_check.ACQ_GATES_KEYS, M._MODEL_GATES_KEYS),
+        ("gates.contrast", acq_check.ACQ_CONTRAST_KEYS, M._MODEL_CONTRAST_KEYS),
+        ("gates.noise_floor", acq_check.ACQ_NOISE_FLOOR_KEYS, M._MODEL_NOISE_FLOOR_KEYS),
+        ("gates.area_jitter", acq_check.ACQ_AREA_JITTER_KEYS, M._MODEL_AREA_JITTER_KEYS),
+        ("sampling", acq_check.ACQ_SAMPLING_KEYS, M._MODEL_SAMPLING_KEYS),
+    ]
 
-    try:
-        result = AcqCheckResult(data)
-    except AcqCheckError as e:
-        raise AssertionError(
-            f"AcqCheckResult 拒绝了按 ACQ_*_KEYS 构造的 JSON，"
-            f"说明 model 与 engine 的键集不同步：{e}"
-        ) from e
+    errors: list[str] = []
+    for layer_name, engine_keys, model_keys in layer_pairs:
+        e_set = set(engine_keys)
+        m_set = set(model_keys)
+        if e_set != m_set:
+            errors.append(
+                f"  层 {layer_name!r}：引擎有 {sorted(e_set - m_set)} 而模型没有；"
+                f"模型有 {sorted(m_set - e_set)} 而引擎没有"
+            )
 
-    # 属性访问不许抛
-    _ = result.contrast_value
-    _ = result.area_jitter_value
-    _ = result.sampling_n_windows
+    assert not errors, (
+        "acq_check.ACQ_*_KEYS 与 desktop model _MODEL_*_KEYS 不同步（双向对账失败）：\n"
+        + "\n".join(errors)
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 守卫 14（A3）：ISSUES.md 编号不重复
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def test_issues_md_no_duplicate_numbers() -> None:
+    """docs/ISSUES.md 里表格行首 DP-\\d+ 编号不许重复。
+
+    只检查表格行首（`| DP-NNN |` 开头的行），不检查行内容里的交叉引用——
+    那样会把"DP-032 提到了 DP-005"算成 DP-005 重复出现，是误报。
+
+    防的是：新行用了已存在的编号，导致 open 阻塞项被 done 行盖住。
+    变异：ISSUES.md 里加一行重复编号 ⇒ 本条红。
+    """
+    import re
+    issues_path = ROOT / "docs" / "ISSUES.md"
+    assert issues_path.exists(), f"ISSUES.md 不存在：{issues_path}"
+    text = issues_path.read_text(encoding="utf-8")
+    # 只匹配表格行首：| DP-NNN | 开头的行
+    nums = re.findall(r"^\| DP-(\d+) \|", text, re.MULTILINE)
+    seen: dict[str, int] = {}
+    dups: list[str] = []
+    for n in nums:
+        seen[n] = seen.get(n, 0) + 1
+    for n, cnt in seen.items():
+        if cnt > 1:
+            dups.append(f"  DP-{n} 出现 {cnt} 次")
+    assert not dups, (
+        "docs/ISSUES.md 里有重复行首编号（open 阻塞项可能被 done 行盖住）：\n"
+        + "\n".join(dups)
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 守卫 15（A9）：四个门槛数值与 ISSUES.md 台账逐字对账
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def test_gate_thresholds_match_issues_md() -> None:
+    """GATE_CONTRAST_ABS / GATE_CONTRAST_RATIO / GATE_AREA_JITTER_P90 / MOVING_RESIDUAL
+    四个常量的数值必须在 docs/ISSUES.md 里逐字出现。
+
+    防的是：把门槛放松十倍（如 100→10、0.02→0.2）422 条测试全绿——
+    守卫 1-3 证明「常量被读了」，这条证明「常量的值是对的」。
+    两者缺一，不能形成闭环。
+
+    变异（M9/M10/M15b）：
+    - GATE_CONTRAST_ABS 100.0 → 10.0 ⇒ str(10.0)="10.0" 不在 ISSUES.md ⇒ 本条红；
+    - GATE_AREA_JITTER_P90 0.02 → 0.2 ⇒ str(0.2)="0.2" 不在 ISSUES.md ⇒ 本条红；
+    - MOVING_RESIDUAL 0.02 → 0.2 ⇒ 同上 ⇒ 本条红。
+    """
+    from depressionplex.assay_core.segment import (
+        GATE_CONTRAST_ABS, GATE_CONTRAST_RATIO, GATE_AREA_JITTER_P90,
+    )
+    from depressionplex.cli.probe_frames import MOVING_RESIDUAL
+
+    issues_path = ROOT / "docs" / "ISSUES.md"
+    assert issues_path.exists(), f"ISSUES.md 不存在：{issues_path}"
+    issues_text = issues_path.read_text(encoding="utf-8")
+
+    gate_constants = {
+        "GATE_CONTRAST_ABS": GATE_CONTRAST_ABS,
+        "GATE_CONTRAST_RATIO": GATE_CONTRAST_RATIO,
+        "GATE_AREA_JITTER_P90": GATE_AREA_JITTER_P90,
+        "MOVING_RESIDUAL": MOVING_RESIDUAL,
+    }
+    missing: list[str] = []
+    for name, val in gate_constants.items():
+        if str(val) not in issues_text:
+            missing.append(
+                f"  {name}={val!r}  str 形式 {str(val)!r} 在 docs/ISSUES.md 里找不到"
+            )
+    assert not missing, (
+        "门槛常量数值未在 ISSUES.md 台账文字中出现——"
+        "改门槛是科学决定，必须留痕：\n"
+        + "\n".join(missing)
+    )

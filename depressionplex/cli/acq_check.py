@@ -23,8 +23,6 @@ import argparse
 import json
 import sys
 from datetime import datetime, timezone
-from pathlib import Path
-
 import numpy as np
 
 from ..assay_core import rad as R
@@ -34,6 +32,7 @@ from ..assay_core.segment import (
     GATE_CONTRAST_RATIO,
     GATE_AREA_JITTER_P90,
 )
+from ..assay_core.p2_reference import P2_REFERENCE
 from .. import video as V
 # MOVING_RESIDUAL 与 GATE_AREA_JITTER_P90 数值相同但意义不同：前者判"动物是否在动"，
 # 后者判"面积抖动噪声底是否达标"。统一从 probe_frames 引入，不在本文件重复定义。
@@ -58,9 +57,10 @@ ACQ_NOISE_FLOOR_KEYS = ("value", "n_frames")
 ACQ_AREA_JITTER_KEYS = ("value", "threshold", "passed", "chamber", "chamber_residual", "moving")
 ACQ_CHAMBER_KEYS = ("index", "area_jitter_p90", "rad_residual")
 ACQ_REFERENCE_KEYS = (
+    "_note", "_decoder_note",
     "contrast_abs", "contrast_ratio", "noise_floor_px", "area_jitter_p90",
     "source_video", "frames_start", "frames_end", "width", "height",
-    "fps", "total_frames", "sha256", "measured_at",
+    "fps", "total_frames", "sha256", "measured_at", "decoder",
 )
 
 
@@ -88,18 +88,6 @@ def _compute_frame_indices(n_frames: int) -> list[int]:
         indices.extend(range(win_start, win_start + FRAMES_PER_WINDOW))
     return indices
 
-
-def _load_reference() -> dict | None:
-    """从冻结文件 tests/fixtures/p2_reference.json 读参考值。
-
-    参考素材（`10mg 2周.mp4`）不在仓里，沙箱和 CI 都没有它。
-    返回 None 意味着参考文件不存在（不应在正常部署里出现）。
-    """
-    ref_path = Path(__file__).resolve().parent.parent.parent / "tests" / "fixtures" / "p2_reference.json"
-    if not ref_path.exists():
-        return None
-    with open(ref_path, encoding="utf-8") as f:
-        return json.load(f)
 
 def _build_output(
     *,
@@ -189,7 +177,7 @@ def _run_acq_check(frames: list[np.ndarray], frame_indices: list[int],
     if not has_panel:
         # 没有面板带 → 测不出 → rc=2
         # 依然输出 JSON（GUI 要看到"量不了"而不是程序崩了）
-        reference = _load_reference()
+        reference = P2_REFERENCE
         out = _build_output(
             info_path=info_path,
             info_fps=info_fps,
@@ -227,7 +215,7 @@ def _run_acq_check(frames: list[np.ndarray], frame_indices: list[int],
     chamber_cols = S.find_chambers(first_frame)
     if not chamber_cols:
         # 找不到隔间 → 测不出
-        reference = _load_reference()
+        reference = P2_REFERENCE
         out = _build_output(
             info_path=info_path,
             info_fps=info_fps,
@@ -315,7 +303,7 @@ def _run_acq_check(frames: list[np.ndarray], frame_indices: list[int],
         moving_flag = None
 
     # ── 6. 加载参考值 ────────────────────────────────────────────────────────
-    reference = _load_reference()
+    reference = P2_REFERENCE
 
     # ── 7. 组装 JSON ─────────────────────────────────────────────────────────
     out = _build_output(
@@ -372,7 +360,7 @@ def main(argv: list[str] | None = None) -> int:
             f"帧数不足：{info.n_frames} 帧 < 最小要求 {_MIN_FRAMES} 帧"
             f"（{N_WINDOWS} 窗口 × {FRAMES_PER_WINDOW} 帧 + 首尾各 {_MARGIN} 帧余量）"
         )
-        reference = _load_reference()
+        reference = P2_REFERENCE
         out = _build_output(
             info_path=str(info.path),
             info_fps=info.fps,

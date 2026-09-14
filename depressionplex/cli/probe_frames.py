@@ -190,7 +190,7 @@ def main(argv: list[str] | None = None) -> int:
         moving = bool(res) and float(np.mean(res)) > MOVING_RESIDUAL
         gate = jit_p90 <= GATE_AREA_JITTER_P90 and not sanity
         if moving and not gate:
-            sanity.append("动物在动（RAD 残差 > 0.02），本帧段不适合用于噪声门判定")
+            sanity.append(f"动物在动（RAD 残差 > {MOVING_RESIDUAL}），本帧段不适合用于噪声门判定")
         all_pass = all_pass and gate
         print(
             f"  隔间{k}: 可用 {len(ok)}/{len(results)} | 面积 {areas.mean():.0f}±{areas.std():.0f} px"
