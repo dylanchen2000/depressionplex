@@ -70,6 +70,23 @@ def output_paths(exp: dict, video_index: int) -> dict[str, Path]:
     return {k: (out / tpl.format(stem=stem)).resolve() for k, tpl in OUTPUT_SUFFIXES.items()}
 
 
+def trial_prefix(exp: dict, video_index: int) -> str:
+    """CSV 里 trial_id 的前缀。与引擎 runner.py:340 同一条规则。
+
+    引擎规则：prefix = trial_prefix or Path(path).stem
+    前缀派生只许一份，测试会拿引擎真产出核对。
+    """
+    require_contract(exp)
+    if not 0 <= video_index < len(exp["videos"]):
+        raise ValueError(f"video_index {video_index} 越界（共 {len(exp['videos'])} 段）")
+
+    video = exp["videos"][video_index]
+    user_prefix = video.get("trial_prefix")
+    if user_prefix:
+        return user_prefix
+    return Path(video["path"]).stem
+
+
 def engine_command() -> list[str]:
     """引擎调用前缀。冻结与源码两种情形；环境变量优先（给测试与现场排障用）。
 
