@@ -8,7 +8,7 @@
 
 from __future__ import annotations
 
-import importlib.util
+import importlib
 import json
 import random
 import tempfile
@@ -35,18 +35,13 @@ COMMITTED_TABLE = REPO / "data" / "human_scores" / "recomputed" / "human_scores_
 
 
 def _load_salvage_ref():
-    """按文件路径 import 抢救工具（DP-030 后在 depressionplex/cli/，旧路径兜底）。"""
-    for rel in ("depressionplex/cli/salvage_truncated_audit.py",
-                "cli/salvage_truncated_audit.py"):
-        p = REPO / rel
-        if p.exists():
-            break
-    else:
-        raise AssertionError("找不到 salvage_truncated_audit.py——位置变了？")
-    spec = importlib.util.spec_from_file_location("salvage_ref", p)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
+    """按包导入抢救工具，让相对 import 的 __package__ 成立。
+
+    不许用 spec_from_file_location 按路径加载：那样 __package__ 为空，
+    模块里 `from . import _stdio` 必然 ImportError，而桌面端 / 冻结 exe
+    都走 `python -m depressionplex.cli`，从不按文件路径跑这个模块。
+    """
+    return importlib.import_module("depressionplex.cli.salvage_truncated_audit")
 
 
 # ---------------------------------------------------------------- 规则 2：排序取并集

@@ -20,13 +20,17 @@ import csv
 import dataclasses
 import importlib.metadata
 import json
+import os
+import subprocess
 import sys
 import time
 from collections.abc import Collection
 from pathlib import Path
 
 from .. import runner, video
+from ..video import TOOL_FFMPEG, TOOL_FFPROBE
 from ..assay_core import rules, timeline, trial_report
+from . import _stdio
 
 
 def _plan_text(info: video.VideoInfo, plan: runner.TrialPlan) -> str:
@@ -136,9 +140,35 @@ def _get_tool_version() -> str:
         return "unknown"
 
 
+def _get_ffmpeg_version(ffmpeg_path: str) -> str | None:
+    """取 ffmpeg -version 第一行。取不到返回 None 并往 stderr 写一行原因。
+
+    照 `_get_tool_version()` 的先例：stdout 要逐位稳定，不许碰；
+    退化必须往 stderr 说一行，**不许写空串冒充**。
+    """
+    try:
+        p = subprocess.run([ffmpeg_path, "-version"],
+                           capture_output=True, text=True, timeout=5)
+        if p.returncode == 0 and p.stdout:
+            first_line = p.stdout.splitlines()[0] if p.stdout.splitlines() else ""
+            if first_line:
+                return first_line
+        print(f"[警告] ffmpeg -version 未返回有效输出（退出码 {p.returncode}）",
+              file=sys.stderr)
+    except FileNotFoundError:
+        print(f"[警告] ffmpeg 可执行文件不存在：{ffmpeg_path}", file=sys.stderr)
+    except subprocess.TimeoutExpired:
+        print(f"[警告] ffmpeg -version 超时（5 秒）", file=sys.stderr)
+    except Exception as e:
+        print(f"[警告] 取 ffmpeg 版本失败：{e}", file=sys.stderr)
+    return None
+
+
 def _build_run_json(info: video.VideoInfo, plan: runner.TrialPlan,
                     assay: str, skipped: dict[int, str],
-                    scored: Collection[int]) -> dict:
+                    scored: Collection[int],
+                    ffmpeg_path: str, ffmpeg_source: str,
+                    ffprobe_path: str, ffprobe_source: str) -> dict:
     """构造 run.json 数据结构（**CSV 故意不含的上下文**）。
 
     `scored` 是产出了 CSV 行的隔间号集合，必传：`chamber_validity` 只写不在 CSV 里的
@@ -147,12 +177,26 @@ def _build_run_json(info: video.VideoInfo, plan: runner.TrialPlan,
     `plan.trial_validity`，CSV 那边取的是 `TrialReport`，是**两个对象**。
     同时写就等于同一个数字有两条来路，哪天其中一条变了没人会发现（DP-054）。
     未产出数字的隔间没有 CSV 行，它的有效性只能在这里说，所以留在这里。
+
+    `ffmpeg_path`, `ffmpeg_source`, `ffprobe_path`, `ffprobe_source` 由调用方提供（H10+A4）：
+    在分析完成后才调 resolver 会导致「数字算出来了但 run.json 崩了 + CSV 也没有」，
+    所以调用方必须在分析前就获取这些信息（如果工具不存在，分析开始前就失败）。
+    两个工具各自解析一次，各有自己的 source（混着来能发生：只设 DPX_FFMPEG / 随包漏文件）。
     """
     # numpy 类型需要转成 Python int/float
     def to_native(val):
         if hasattr(val, "item"):  # numpy scalar
             return val.item()
         return val
+
+    # decoder 块：这批帧是哪个解码器解出来的（架构 §3.5，B6 审计包要印）
+    # source 由 _resolve_ffmpeg_tool 返回，不许二次推导（H9+A4）
+    # 两个工具各有自己的 path/source/version；ffprobe 决定 fps/n_frames/计分窗口边界
+    ffmpeg_version = _get_ffmpeg_version(ffmpeg_path)
+    ffprobe_version = _get_ffmpeg_version(ffprobe_path)  # ffprobe -version 格式与 ffmpeg 相同
+
+    # mixed_source: 两个工具来源不同时为 True（混着来能发生，且影响审计结论）
+    mixed_source = (ffmpeg_source != ffprobe_source)
 
     scoring_window_s = list(trial_report.ASSAY_WINDOWS[assay])
 
@@ -206,6 +250,21 @@ def _build_run_json(info: video.VideoInfo, plan: runner.TrialPlan,
         # **从 dataclass 现读，不许在这里抄一份字面量**——抄了就是第二个真值，
         # 而这些数字是「这批秒数凭什么这么算」的全部依据（B6 的报告要印 θ_mob）。
         "rules": dataclasses.asdict(rules.TstRulesParams()),
+        # decoder 块：审计包必须能回答「这批帧是哪个解码器解出来的」（B6 要印）
+        # 两个工具各有自己的 path/source/version（A4）；混着来时 mixed_source 为 True
+        "decoder": {
+            TOOL_FFMPEG: {
+                "path": ffmpeg_path,
+                "source": ffmpeg_source,    # "env" | "bundled" | "system"
+                "version": ffmpeg_version,  # None（取不到）| str（第一行）
+            },
+            TOOL_FFPROBE: {
+                "path": ffprobe_path,
+                "source": ffprobe_source,   # "env" | "bundled" | "system"
+                "version": ffprobe_version, # None（取不到）| str（第一行）
+            },
+            "mixed_source": mixed_source,   # True 时审计包需印警告：两工具来源不同
+        },
         "video": {
             "path": str(info.path.resolve()),
             "name": info.path.name,
@@ -225,6 +284,7 @@ def _build_run_json(info: video.VideoInfo, plan: runner.TrialPlan,
 
 
 def main(argv: list[str] | None = None) -> int:
+    _stdio.force_utf8()
     ap = argparse.ArgumentParser(description="录像 → trial 级 immobility 数字")
     ap.add_argument("video", type=Path)
     ap.add_argument("--assay", required=True, choices=sorted(trial_report.ASSAY_WINDOWS),
@@ -260,6 +320,15 @@ def main(argv: list[str] | None = None) -> int:
                 obj = {"ev": "progress", "frame": frame, "n": n}
                 print(json.dumps(obj, ensure_ascii=False), file=sys.stderr, flush=True)
                 last_emit[0] = now
+
+    # H10：在分析前获取 ffmpeg 信息（如果工具不存在，这里就失败，不会在分析后才崩）
+    # A4：两个工具各自解析一次，不许丢 source（混着来能发生：只设 DPX_FFMPEG / 随包漏一个文件）
+    try:
+        ffmpeg_path, ffmpeg_source = video._resolve_ffmpeg_tool(TOOL_FFMPEG)
+        ffprobe_path, ffprobe_source = video._resolve_ffmpeg_tool(TOOL_FFPROBE)
+    except video.VideoError as e:
+        print(f"[ffmpeg 工具缺失] {e}", file=sys.stderr)
+        return 1
 
     try:
         info, plan, reports, skipped = runner.analyze_video(
@@ -302,7 +371,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.run_json:
         # `reports` 的键就是「进了 CSV 的隔间」，传进去让 chamber_validity 避开它们
-        run_data = _build_run_json(info, plan, args.assay, skipped, set(reports))
+        run_data = _build_run_json(info, plan, args.assay, skipped, set(reports),
+                                    ffmpeg_path, ffmpeg_source,
+                                    ffprobe_path, ffprobe_source)
         with args.run_json.open("w", encoding="utf-8") as fh:
             json.dump(run_data, fh, indent=2, ensure_ascii=False)
         print(f"\n上下文已写：{args.run_json}")

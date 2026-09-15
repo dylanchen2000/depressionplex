@@ -26,10 +26,12 @@ from ..assay_core import rad as R
 from ..assay_core import segment as S
 from ..assay_core import silhouette as sil
 from ..assay_core import validity as V
+from . import _stdio
+from ..assay_core.segment import GATE_CONTRAST_ABS, GATE_CONTRAST_RATIO, GATE_AREA_JITTER_P90
 
-AREA_JITTER_GATE = 0.02  # 2% BL²
-CONTRAST_ABS_GATE = 100.0
-CONTRAST_RATIO_GATE = 2.0
+# RAD 残差判断动物是否在动。与 GATE_AREA_JITTER_P90 无关，别合并——
+# 两者数值撞巧相同，意义完全不同：一个量分割噪声，一个量动物运动强度。
+MOVING_RESIDUAL: float = 0.02
 
 
 def load_gray(path: Path) -> np.ndarray:
@@ -39,6 +41,8 @@ def load_gray(path: Path) -> np.ndarray:
 
 
 def main(argv: list[str] | None = None) -> int:
+    _stdio.force_utf8()
+
     ap = argparse.ArgumentParser()
     ap.add_argument("frames", nargs="+", type=Path)
     ap.add_argument("--chambers", type=int, default=4)
@@ -67,8 +71,8 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  阈值(Otsu)   {rep['threshold']:.1f}")
     print(f"  背景均值     {rep['background_mean']:.1f}")
     print(f"  暗物均值     {rep['animal_mean']:.1f}")
-    print(f"  绝对差       {rep['abs_diff']:.1f}   (门槛 ≥{CONTRAST_ABS_GATE:.0f})")
-    print(f"  比值         {rep['ratio']:.2f}x  (门槛 ≥{CONTRAST_RATIO_GATE:.1f}x)")
+    print(f"  绝对差       {rep['abs_diff']:.1f}   (门槛 ≥{GATE_CONTRAST_ABS:.0f})")
+    print(f"  比值         {rep['ratio']:.2f}x  (门槛 ≥{GATE_CONTRAST_RATIO:.1f}x)")
     print(f"  判定         {'通过' if rep['passes_gate'] else '不通过'}")
 
     chambers = S.find_chambers(grays[0])
@@ -186,10 +190,10 @@ def main(argv: list[str] | None = None) -> int:
             sanity.append(f"部分帧失败: {reasons}")
 
         # 门只在动物"较静"时才有判据意义（否则测到的是信号）。
-        moving = bool(res) and float(np.mean(res)) > 0.02
-        gate = jit_p90 <= AREA_JITTER_GATE and not sanity
+        moving = bool(res) and float(np.mean(res)) > MOVING_RESIDUAL
+        gate = jit_p90 <= GATE_AREA_JITTER_P90 and not sanity
         if moving and not gate:
-            sanity.append("动物在动（RAD 残差 > 0.02），本帧段不适合用于噪声门判定")
+            sanity.append(f"动物在动（RAD 残差 > {MOVING_RESIDUAL}），本帧段不适合用于噪声门判定")
         all_pass = all_pass and gate
         print(
             f"  隔间{k}: 可用 {len(ok)}/{len(results)} | 面积 {areas.mean():.0f}±{areas.std():.0f} px"
@@ -198,18 +202,18 @@ def main(argv: list[str] | None = None) -> int:
         print(
             f"          面积抖动 |Δ| 均值 {d_area.mean():.1f} px 最大 {d_area.max():.1f} px"
             f" → 归一化 均值 {jitter.mean():.4f} p90 {jit_p90:.4f} 最大 {jitter.max():.4f}"
-            f"  [{'通过' if gate else ('信号主导' if moving else '不通过')} 门槛 {AREA_JITTER_GATE}]"
+            f"  [{'通过' if gate else ('信号主导' if moving else '不通过')} 门槛 {GATE_AREA_JITTER_P90}]"
         )
         if res:
             print(
                 f"          RAD 关节残差 均值 {np.mean(res):.4f} 最大 {np.max(res):.4f}"
                 f"  = 合成噪声底的 {np.mean(res)/0.0103:.1f} 倍"
-                f"  → {'在动' if np.mean(res) > 0.02 else '较静'}"
+                f"  → {'在动' if np.mean(res) > MOVING_RESIDUAL else '较静'}"
             )
         if "delta_mean" in nf and bl2 == bl2:
             print(
                 f"          噪声底折算到本隔间: 均值 {nf['delta_mean']/bl2:.4f}"
-                f" 最大 {nf['delta_max']/bl2:.4f}  (门槛 {AREA_JITTER_GATE})"
+                f" 最大 {nf['delta_max']/bl2:.4f}  (门槛 {GATE_AREA_JITTER_P90})"
             )
         if flags:
             print(f"          QC 标记: {flags}")

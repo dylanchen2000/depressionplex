@@ -1,0 +1,191 @@
+name: Build Windows Installer
+
+# 手动触发 + 版本 tag 推送时自动触发
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 60  # Windows 构建较慢,给足余量
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install PySide6==6.7.3 pyinstaller numpy==1.26.4
+
+      - name: Fetch and verify ffmpeg (LGPL)
+        run: python packaging/fetch_ffmpeg.py
+
+      - name: Build GUI (PyInstaller)
+        working-directory: packaging
+        run: pyinstaller build_windows.spec
+
+      - name: Build analyzer backend (PyInstaller)
+        working-directory: packaging
+        run: pyinstaller build_analyzer_windows.spec
+
+      - name: Get version from pyproject.toml
+        id: get_version
+        shell: pwsh
+        run: |
+          $content = Get-Content -Path pyproject.toml -Raw
+          if ($content -match 'version\s*=\s*"([^"]+)"') {
+            $version = $matches[1]
+            echo "VERSION=$version" >> $env:GITHUB_OUTPUT
+            echo "Extracted version: $version"
+          } else {
+            echo "ERROR: Failed to extract version from pyproject.toml"
+            exit 1
+          }
+
+      - name: Verify tag matches version (A9b)
+        shell: pwsh
+        run: |
+          $version = "${{ steps.get_version.outputs.VERSION }}"
+
+          # 每次都跑：dispatch 时断言 version 非空，有 tag 时断言逐字相同
+          if ([string]::IsNullOrWhiteSpace($version)) {
+            echo "ERROR: Failed to extract version from pyproject.toml"
+            exit 1
+          }
+          echo "Version from pyproject.toml: $version"
+
+          # 如果是 tag 触发，校验 tag 与 version 必须逐字相同
+          $ref = "${{ github.ref }}"
+          if ($ref -like 'refs/tags/v*') {
+            $tag = $ref -replace 'refs/tags/v', ''
+            if ($tag -ne $version) {
+              echo "ERROR: Tag 'v$tag' does not match pyproject.toml version '$version'"
+              echo "A tag pushed as v$tag will produce installer named DEPRESSION-PLEX-Setup-$version.exe"
+              echo "Tag and version must match exactly (no -dev0, no build suffixes)"
+              exit 1
+            }
+            echo "✓ Tag v$tag matches version $version"
+          } else {
+            echo "✓ No tag, version validation passed (workflow_dispatch or other trigger)"
+          }
+
+      - name: Build installer (Inno Setup)
+        working-directory: packaging
+        shell: pwsh
+        run: |
+          $version = "${{ steps.get_version.outputs.VERSION }}"
+          & "C:\Program Files (x86)\Inno Setup 6\iscc.exe" /DAppVersion=$version installer.iss
+
+      - name: Smoke test - ffmpeg
+        run: |
+          vendor\ffmpeg\ffmpeg.exe -version
+          vendor\ffmpeg\ffprobe.exe -version
+
+      - name: Smoke test - backend exe
+        shell: pwsh
+        run: |
+          $exe = "packaging\dist\depression-analyzer\depression-analyzer.exe"
+
+          # 1. --help: 退出码 0，stdout 含中文「用法」（验证 force_utf8 生效）
+          Write-Host "Testing --help..."
+          $output = & $exe --help 2>&1 | Out-String
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "----- --help stdout/stderr -----"
+            Write-Host $output
+            Write-Error "FAIL: --help 退出码 $LASTEXITCODE，期望 0"
+            exit 1
+          }
+          if ($output -notmatch "用法") {
+            Write-Error "FAIL: --help 输出不含「用法」，force_utf8 可能失效。输出: $output"
+            exit 1
+          }
+          Write-Host "✓ --help 通过 (rc=0, output contains 用法)"
+
+          # 2. no args: 退出码 0
+          Write-Host "Testing no args..."
+          & $exe 2>&1 | Out-Null
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "FAIL: no args 退出码 $LASTEXITCODE，期望 0"
+            exit 1
+          }
+          Write-Host "✓ no args 通过 (rc=0)"
+
+          # 3. unknown subcommand: 退出码 2
+          Write-Host "Testing unknown subcommand..."
+          & $exe not-a-real-command 2>&1 | Out-Null
+          if ($LASTEXITCODE -ne 2) {
+            Write-Error "FAIL: unknown subcommand 退出码 $LASTEXITCODE，期望 2"
+            exit 1
+          }
+          Write-Host "✓ unknown subcommand 通过 (rc=2)"
+          exit 0
+
+      - name: Smoke test - GUI exe (offscreen)
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          packaging\dist\DEPRESSION-PLEX\DEPRESSION-PLEX.exe --self-test
+
+      - name: Record build environment
+        shell: pwsh
+        run: |
+          # iscc /? 以非零退出（它不是一次成功编译），pwsh 7 会把 LASTEXITCODE
+          # 带出步骤。关掉 native-error 映射，记完环境后显式 exit 0。
+          $PSNativeCommandUseErrorActionPreference = $false
+          # A11: 补全构建环境信息（将来会贴进论文方法学附录/客户验证报告）
+          $envFile = "packaging/build_env.txt"
+
+          # 1. Python deps
+          pip freeze | Out-File -FilePath $envFile -Encoding utf8
+
+          # 2. Python version
+          "" | Out-File -FilePath $envFile -Append -Encoding utf8
+          "# Python version" | Out-File -FilePath $envFile -Append -Encoding utf8
+          python -VV | Out-File -FilePath $envFile -Append -Encoding utf8
+
+          # 3. ffmpeg info (URL + SHA256 + 成员清单)
+          "" | Out-File -FilePath $envFile -Append -Encoding utf8
+          "# ffmpeg source" | Out-File -FilePath $envFile -Append -Encoding utf8
+          $fetchPy = Get-Content -Path packaging/fetch_ffmpeg.py -Raw
+          if ($fetchPy -match 'FFMPEG_URL\s*=\s*"([^"]+)"') {
+            "URL: $($matches[1])" | Out-File -FilePath $envFile -Append -Encoding utf8
+          }
+          if ($fetchPy -match 'FFMPEG_SHA256\s*=\s*"([^"]+)"') {
+            "SHA256: $($matches[1])" | Out-File -FilePath $envFile -Append -Encoding utf8
+          }
+          if ($fetchPy -match 'FFMPEG_BYTES\s*=\s*(\d+)') {
+            "Bytes: $($matches[1])" | Out-File -FilePath $envFile -Append -Encoding utf8
+          }
+          "Members:" | Out-File -FilePath $envFile -Append -Encoding utf8
+          Get-ChildItem vendor/ffmpeg | ForEach-Object { "  $_" } | Out-File -FilePath $envFile -Append -Encoding utf8
+
+          # 4. Inno Setup version
+          "" | Out-File -FilePath $envFile -Append -Encoding utf8
+          "# Inno Setup version" | Out-File -FilePath $envFile -Append -Encoding utf8
+          & "C:\Program Files (x86)\Inno Setup 6\iscc.exe" /? 2>&1 | Select-String "Inno Setup" | Out-File -FilePath $envFile -Append -Encoding utf8
+
+          # 5. UPX (A10: 记录 absent，因为 CI 无 upx，spec 里 upx=False)
+          "" | Out-File -FilePath $envFile -Append -Encoding utf8
+          "# UPX" | Out-File -FilePath $envFile -Append -Encoding utf8
+          "absent (upx=False in specs)" | Out-File -FilePath $envFile -Append -Encoding utf8
+
+          # 6. Git tag + commit SHA
+          "" | Out-File -FilePath $envFile -Append -Encoding utf8
+          "# Git reference" | Out-File -FilePath $envFile -Append -Encoding utf8
+          "ref: ${{ github.ref }}" | Out-File -FilePath $envFile -Append -Encoding utf8
+          "sha: ${{ github.sha }}" | Out-File -FilePath $envFile -Append -Encoding utf8
+          exit 0
+
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: DEPRESSION-PLEX-Setup-${{ steps.get_version.outputs.VERSION }}
+          path: |
+            packaging/DEPRESSION-PLEX-Setup-${{ steps.get_version.outputs.VERSION }}.exe
+            packaging/build_env.txt
+          if-no-files-found: error

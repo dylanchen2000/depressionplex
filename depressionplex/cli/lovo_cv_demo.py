@@ -27,9 +27,12 @@ import time
 from pathlib import Path
 
 from .. import lovo_cv as L
+from . import _stdio
 
 
 def main() -> int:
+    _stdio.force_utf8()
+
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--window", type=float, default=360.0,
                     help="试次窗口秒数（工具 360 s 硬收口口径）")

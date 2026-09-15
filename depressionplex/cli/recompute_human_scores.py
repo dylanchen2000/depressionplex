@@ -19,11 +19,14 @@ import sys
 from pathlib import Path
 
 from ..human_agreement import build_table, format_report, write_table_csv
+from . import _stdio
 
 ROOT = Path(__file__).resolve().parents[2]   # depressionplex/cli/x.py → 仓库根
 
 
 def main() -> int:
+    _stdio.force_utf8()
+
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("-d", "--data-dir", type=Path,
                     default=ROOT / "data" / "human_scores" / "raw")

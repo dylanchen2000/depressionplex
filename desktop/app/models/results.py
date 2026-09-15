@@ -327,7 +327,12 @@ def load_results(exp: dict, video_index: int) -> ResultsTable:
         required_top_keys = [
             "tool_version", "assay", "scoring_window_s", "rules",
             "video", "calib_indices", "chambers", "plan_warnings",
-            "chamber_validity", "not_scored"
+            "chamber_validity", "not_scored",
+            # `decoder`：这批帧是哪个解码器解出来的（DP-108 起引擎每次都写）。
+            # 它是必写键而不是可选项——审计包要回答的就是这个问题，
+            # 一份答不出来的 run.json 不该被安静地打开（缺了要当场说，
+            # 不是等报告上印一行「未知」）。
+            "decoder",
         ]
         for key in required_top_keys:
             if key not in run_data:

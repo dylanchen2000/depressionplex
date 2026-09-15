@@ -205,19 +205,27 @@ def test_paths_absolute():
             assert Path(path_val).is_absolute(), f"{arg} 的值 {path_val} 不是绝对路径"
 
     # 视频路径本身也要是绝对路径。
-    # argv 结构：[python, "-m", 模块名, 视频路径, "--assay", ...] 或 [exe, 视频路径, ...]
+    # argv 结构（A12 后）：[python, "-m", 模块名, 子命令, 视频路径, ...] 或 [exe, 视频路径, ...]
     video_arg = None
     skip_next = False
+    skipped_module = False  # 是否已跳过 -m 的模块名
     for i, arg in enumerate(argv):
         if i == 0:
             continue
         if skip_next:
             skip_next = False
+            # 如果刚跳过的是 -m 的参数（模块名），标记已跳过模块
+            if not skipped_module:
+                skipped_module = True
             continue
         if arg == "-m":
             skip_next = True
             continue
         if arg.startswith("--"):
+            continue
+        # 如果刚跳过模块名，下一个非旗标参数是子命令（纯字母，无路径分隔符）
+        if skipped_module and arg.isalpha():
+            skipped_module = False  # 已跳过子命令
             continue
         video_arg = arg
         break
