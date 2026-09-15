@@ -134,6 +134,9 @@ jobs:
       - name: Record build environment
         shell: pwsh
         run: |
+          # iscc /? 以非零退出（它不是一次成功编译），pwsh 7 会把 LASTEXITCODE
+          # 带出步骤。关掉 native-error 映射，记完环境后显式 exit 0。
+          $PSNativeCommandUseErrorActionPreference = $false
           # A11: 补全构建环境信息（将来会贴进论文方法学附录/客户验证报告）
           $envFile = "packaging/build_env.txt"
 
@@ -176,6 +179,7 @@ jobs:
           "# Git reference" | Out-File -FilePath $envFile -Append -Encoding utf8
           "ref: ${{ github.ref }}" | Out-File -FilePath $envFile -Append -Encoding utf8
           "sha: ${{ github.sha }}" | Out-File -FilePath $envFile -Append -Encoding utf8
+          exit 0
 
       - name: Upload installer artifact
         uses: actions/upload-artifact@v4
