@@ -304,8 +304,11 @@ class ResultsPage(QWidget):
                 _export_pdf(self._current_exp, self._current_video_index,
                             calib_status, tmp_pdf)
                 successes.append("PDF")
-            except FontUnavailableError:
-                failures.append("PDF 未导出：请检查中文字体安装")
+            except FontUnavailableError as e:
+                # 原文转述归因结论。"请检查中文字体安装" 是一句猜测：真实原因可能是
+                # 安装包漏了随包字体，也可能是平台插件不提供字体库——两种都跟
+                # 用户装没装字体无关，把他往那个方向引就是浪费他一个下午。
+                failures.append(f"PDF 未导出：{e}")
             except Exception as e:
                 failures.append(f"PDF 导出失败：这是软件内部错误，请把这段话发给我们: {e}")
 
@@ -325,6 +328,10 @@ class ResultsPage(QWidget):
         else:
             QMessageBox.warning(
                 self, "部分导出失败",
-                f"成功：{', '.join(successes)}\n失败（目标目录里没有这些文件）：\n"
-                + "\n".join(failures),
+                # 不许说「成功：…」：按原子性约定这几份也一起撤回了，目标目录里一个都没有。
+                # 说成功会让用户去找不存在的文件，还会让他以为那几份数据已经留档。
+                f"这次一个文件都没有导出。{'、'.join(successes)} 渲染成功了，"
+                f"但按「不留半套产物」的约定与失败的那几份一起撤回了。\n"
+                f"失败原因：\n" + "\n".join(failures)
+                + f"\n\n处理完上面的问题再导一次，目标目录仍是：{out_dir}",
             )

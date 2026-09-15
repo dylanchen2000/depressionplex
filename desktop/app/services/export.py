@@ -61,7 +61,7 @@ def _prepare_report(exp: dict, video_index: int, calib_status: CalibrationStatus
 
     report = build_report(
         results=results,
-        calib_mode=calib_status.mode.value,
+        calib_mode=calib_status.mode,
         calib_badge=calib_status.badge.value,
         calib_batch=batch,
         g7_threshold=G7_MIN_R,

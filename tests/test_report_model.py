@@ -41,19 +41,27 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "tests"))
 
+# tests/ 不受进程边界约束，可以 import 引擎包取工具名常量
+from depressionplex.video import TOOL_FFMPEG, TOOL_FFPROBE
+
 from desktop.app.models import report as report_mod
 from desktop.app.models.report import (
     DECLARATION_TEMPLATE,
     DENOMINATORS,
     Report,
-    _MODE_LABELS,
     build_report,
     render_declaration,
     _load_validation_readings,
     VALIDATION_READINGS_PATH,
 )
 from desktop.app.models.results import ResultsTable, ResultsRow, load_results
-from desktop.app.services.calibration import G7_MIN_R, G8_MAX_ABS_BIAS_S, Mode, Badge
+from desktop.app.services.calibration import (
+    G7_MIN_R,
+    G8_MAX_ABS_BIAS_S,
+    Mode,
+    Badge,
+    _MODE_LABELS,
+)
 from desktop.app.services.engine import output_paths as engine_output_paths
 
 
@@ -78,7 +86,27 @@ _DECLARATION_REQUIRED_PHRASES: list[str] = [
 # 辅助：构造合法的 run.json / experiment / ResultsTable
 # ---------------------------------------------------------------------------
 
-def _make_run_json(chambers: list[int], not_scored=None, chamber_validity=None) -> dict:
+# run.json 的 decoder 块样本，形状与 depressionplex/cli/analyze.py 写的那一份一致：
+# 每个工具各有 path / source / version，外加一个 mixed_source。
+_DECODER_BLOCK: dict = {
+    TOOL_FFMPEG: {
+        "path": "/opt/dpx/ffmpeg",
+        "source": "bundled",
+        "version": "ffmpeg version 7.1.1",
+    },
+    TOOL_FFPROBE: {
+        "path": "/opt/dpx/ffprobe",
+        "source": "bundled",
+        "version": "ffprobe version 7.1.1",
+    },
+    "mixed_source": False,
+}
+
+_UNSET = object()
+
+
+def _make_run_json(chambers: list[int], not_scored=None, chamber_validity=None,
+                   decoder=_UNSET, plan_warnings=_UNSET) -> dict:
     return {
         "schema_version": "1",
         "tool_version": "0.1.0",
@@ -93,9 +121,10 @@ def _make_run_json(chambers: list[int], not_scored=None, chamber_validity=None) 
         },
         "calib_indices": [0, 100, 200],
         "chambers": [{"index": ch} for ch in chambers],
-        "plan_warnings": [],
+        "plan_warnings": [] if plan_warnings is _UNSET else plan_warnings,
         "chamber_validity": chamber_validity or [],
         "not_scored": not_scored or [],
+        "decoder": _DECODER_BLOCK if decoder is _UNSET else decoder,
     }
 
 
@@ -145,20 +174,22 @@ def _make_csv(path: Path, chamber_ids: list[int], prefix: str = "test",
             })
 
 
-def _build_simple_report(tmp: Path, chambers: list[int] = None) -> tuple[dict, Report]:
-    """构造一个最小的 Report 用于测试。"""
+def _build_simple_report(tmp: Path, chambers: list[int] = None,
+                         **run_json_kwargs) -> tuple[dict, Report]:
+    """构造一个最小的 Report 用于测试（run.json 的字段可用关键字参数覆盖）。"""
     chambers = chambers or [1, 2, 3, 4]
     video_path = tmp / "v.mp4"
     video_path.touch()
     exp = _make_exp(tmp, video_path)
     run_json_path = tmp / "v_run.json"
-    run_json_path.write_text(json.dumps(_make_run_json(chambers)), encoding="utf-8")
+    run_json_path.write_text(
+        json.dumps(_make_run_json(chambers, **run_json_kwargs)), encoding="utf-8")
     csv_path = tmp / "v.csv"
     _make_csv(csv_path, chambers)
     results = load_results(exp, 0)
     report = build_report(
         results=results,
-        calib_mode=Mode.RESEARCH.value,
+        calib_mode=Mode.RESEARCH,
         calib_badge=Badge.YELLOW.value,
         calib_batch=None,
         g7_threshold=G7_MIN_R,
@@ -222,7 +253,7 @@ def test_compliance_phrases_consistent_with_badge() -> None:
         g7_threshold=G7_MIN_R,
         g8_threshold_s=G8_MAX_ABS_BIAS_S,
         theta_mob=0.0175,
-        mode="research",
+        mode=Mode.RESEARCH,
     )
 
     _COMPLIANCE_PHRASES = ["没有计量资质", "作为计量结果"]
@@ -238,27 +269,35 @@ def test_compliance_phrases_consistent_with_badge() -> None:
 
 
 def test_declaration_mode_research_label() -> None:
-    """mode='research' 时声明含「研究版」，不含「计量版」。"""
+    """研究版声明含判定层给的那个标签，不含另一个模式的标签。
+
+    标签从 calibration._MODE_LABELS 取——测试里重抄一遍「研究版」的话，
+    产品把映射改了测试照旧绿。值本身由 test_mode_labels_pinned 逐字钉住。
+    """
     decl = render_declaration(
         g7_threshold=G7_MIN_R,
         g8_threshold_s=G8_MAX_ABS_BIAS_S,
         theta_mob=0.0175,
-        mode="research",
+        mode=Mode.RESEARCH,
     )
-    assert "研究版" in decl, "research 模式声明应含「研究版」"
-    assert "计量版" not in decl, "research 模式声明不应含「计量版」"
+    assert _MODE_LABELS[Mode.RESEARCH] in decl, "研究版声明应含研究版标签"
+    assert _MODE_LABELS[Mode.VALIDATED] not in decl, "研究版声明不该出现计量版标签"
 
 
 def test_declaration_mode_validated_raises() -> None:
-    """mode='validated' 时抛 NotImplementedError（计量版文案未定，M3 前禁止生成）。"""
+    """Mode.VALIDATED 时抛 NotImplementedError（计量版文案未定，M3 前禁止生成）。
+
+    抛点在判定层 calibration.declaration_version_label，报告层只是把它传下去；
+    这条测试走的是产品真实路径（render_declaration），不直接点判定层。
+    """
     try:
         render_declaration(
             g7_threshold=G7_MIN_R,
             g8_threshold_s=G8_MAX_ABS_BIAS_S,
             theta_mob=0.0175,
-            mode="validated",
+            mode=Mode.VALIDATED,
         )
-        raise AssertionError("mode='validated' 应抛 NotImplementedError")
+        raise AssertionError("Mode.VALIDATED 应抛 NotImplementedError")
     except NotImplementedError as e:
         assert "计量版" in str(e) or "M3" in str(e), (
             f"NotImplementedError 消息应提到计量版/M3，实际: {e}"
@@ -280,6 +319,72 @@ def test_declaration_mode_matches_context_row() -> None:
         assert "research" in calib_row.value.lower(), (
             f"发布态行值 {calib_row.value!r} 里应含 'research'"
         )
+
+
+def test_mode_labels_pinned() -> None:
+    """两个发布态标签逐字钉住。
+
+    只断言「声明里含 _MODE_LABELS[Mode.RESEARCH]」是不够的：把标签改成空串，
+    `"" in decl` 恒真，那条守卫会变成装饰。所以值在这里逐字写死，
+    改文案必须同时改这条测试。
+    """
+    assert _MODE_LABELS == {Mode.RESEARCH: "研究版", Mode.VALIDATED: "计量版"}, (
+        f"发布态标签被改了：{_MODE_LABELS}"
+    )
+
+
+def test_report_layer_has_no_mode_branch() -> None:
+    """报告层不许自己拿模式做分支——标签和拒绝都走判定层那一个入口。
+
+    与 DP-111 的 test_no_second_mode_decision_in_desktop 同源，在这里再钉一遍是因为
+    这一处有过实际复发：C0 第一版就是把「哪个模式配哪套文案」和
+    「计量版不许出报告」写在了 report.py 里，字典派发一份、比较表达式一处。
+    判据是「任何形状」：Mode.X 属性访问与 "research"/"validated" 字面量都算。
+    """
+    report_py = ROOT / "desktop" / "app" / "models" / "report.py"
+    source = report_py.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    doc_ids = _collect_docstring_nodes(tree)
+
+    offenders: list[int] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute) and node.attr in ("RESEARCH", "VALIDATED"):
+            offenders.append(node.lineno)
+        if (isinstance(node, ast.Constant)
+                and node.value in ("research", "validated")
+                and id(node) not in doc_ids):
+            offenders.append(node.lineno)
+    assert not offenders, (
+        f"report.py 这些行自己拿模式做了分支：{sorted(set(offenders))}——"
+        "标签与拒绝都该走 calibration.declaration_version_label"
+    )
+
+    called = {n.func.id for n in ast.walk(tree)
+              if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
+    assert "declaration_version_label" in called, (
+        "report.py 没有调用判定层的 declaration_version_label——"
+        "版本标签又变成本层自己决定的了"
+    )
+
+
+def test_render_declaration_mode_is_required() -> None:
+    """render_declaration 的 mode 不许有默认值。
+
+    默认值就是一处藏在函数签名里的发布态判定：调用方漏传时静默按那个默认发布态渲染。
+    这不是假想——本文件「读数不写死」那条测试原先就在白吃这个默认值，
+    也就是说签名已经在替调用方做决定了。漏传必须当场炸。
+    """
+    report_py = ROOT / "desktop" / "app" / "models" / "report.py"
+    tree = ast.parse(report_py.read_text(encoding="utf-8"))
+    fn = next((n for n in ast.walk(tree)
+               if isinstance(n, ast.FunctionDef) and n.name == "render_declaration"), None)
+    assert fn is not None, "找不到 render_declaration——守卫写法要更新"
+    names = [a.arg for a in fn.args.args]
+    assert "mode" in names, f"render_declaration 没有 mode 参数：{names}"
+    n_required = len(names) - len(fn.args.defaults)
+    assert names.index("mode") < n_required, (
+        "render_declaration 的 mode 有默认值——漏传就会静默按那个默认发布态渲染"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -391,6 +496,7 @@ def test_declaration_numbers_from_json_not_hardcoded() -> None:
             g7_threshold=G7_MIN_R,
             g8_threshold_s=G8_MAX_ABS_BIAS_S,
             theta_mob=0.0175,
+            mode=Mode.RESEARCH,
             readings_path=copy_path,
         )
         assert "+999.99" in decl, (
@@ -524,7 +630,7 @@ def test_missing_chambers_appear_as_alarm_rows() -> None:
         results = load_results(exp, 0)
         report = build_report(
             results=results,
-            calib_mode=Mode.RESEARCH.value,
+            calib_mode=Mode.RESEARCH,
             calib_badge=Badge.YELLOW.value,
             calib_batch=None,
             g7_threshold=G7_MIN_R,
@@ -562,7 +668,7 @@ def test_blank_immobility_not_zero_in_xlsx() -> None:
         results = load_results(exp, 0)
         report = build_report(
             results=results,
-            calib_mode=Mode.RESEARCH.value,
+            calib_mode=Mode.RESEARCH,
             calib_badge=Badge.YELLOW.value,
             calib_batch=None,
             g7_threshold=G7_MIN_R,
@@ -819,22 +925,107 @@ def test_audit_zip_manifest() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 守卫 10：解码器未知不许留空
+# 守卫 10（DP-121 / DP-122）：解码器身份与计划告警印的是真值，不是「永远未知」
 # ---------------------------------------------------------------------------
 
-def test_decoder_unknown_not_empty() -> None:
-    """run.json 没有 decoder 块 → 运行上下文表里解码器字段印「未知」。"""
-    with tempfile.TemporaryDirectory() as tmpdir:
-        tmp = Path(tmpdir)
-        _, report = _build_simple_report(tmp)
+def test_decoder_identity_printed_from_run_json() -> None:
+    """报告里印的解码器身份必须是 run.json 里那一份真值。
 
-        # 找解码器行
-        decoder_rows = [r for r in report.context_rows if "解码器" in r.key]
-        assert decoder_rows, "上下文表里应有解码器行"
-        val = decoder_rows[0].value
-        assert val not in ("", None), "解码器字段不许为空"
-        assert val == "未知", (
-            f"run.json 没有 decoder 块时应印「未知」，实际是 {val!r}"
+    这条守卫的上一版断言的是「印了『未知』」——那是把缺陷钉住了：report.py 当时用
+    `getattr(results, "decoder_info", None)` 取，而全仓没有任何地方设过那个字段，
+    于是这一行**永远**印「未知」，测试也永远绿。而 DP-108 要求审计包能回答
+    「这批帧是哪个解码器解出来的」，一行「未知」答不了这个问题。
+    「不为空」不是要求，「说的是真话」才是：这里逐个断言 version / source / path
+    真的落在那一行里，期望值取自夹具那份 decoder 块，不在测试里另抄一遍。
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        _, report = _build_simple_report(Path(tmpdir))
+        rows = {r.key: r.value for r in report.context_rows}
+
+        for tool in (TOOL_FFMPEG, TOOL_FFPROBE):
+            key = f"解码器 {tool}"
+            assert key in rows, f"上下文表里没有 {key!r} 这一行：{sorted(rows)}"
+            val = rows[key]
+            expected = _DECODER_BLOCK[tool]
+            for field_name in ("version", "source", "path"):
+                assert expected[field_name] in val, (
+                    f"{key} 那一行没带上 run.json 的 {field_name}："
+                    f"期望含 {expected[field_name]!r}，实际 {val!r}"
+                )
+            assert "未知" not in val, (
+                f"{key} 印了「未知」，而 run.json 里明明有值：{val!r}"
+            )
+
+        mixed_key = "解码器来源混用（mixed_source）"
+        assert rows.get(mixed_key) == "否", (
+            f"夹具里 mixed_source=False，这一行应印「否」，实际 {rows.get(mixed_key)!r}"
+        )
+
+
+def test_decoder_bad_block_prints_unknown_with_reason() -> None:
+    """decoder 块坏掉 ⇒ 印「未知」，且报警行里留下原因（降级必须留说明）。"""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        _, report = _build_simple_report(Path(tmpdir), decoder="不是对象")
+        rows = {r.key: r.value for r in report.context_rows}
+
+        assert rows.get("解码器身份") == "未知", (
+            f"decoder 块不可读时应印「未知」，实际 {rows.get('解码器身份')!r}"
+        )
+        assert not [k for k in rows if k.startswith("解码器 ")], (
+            f"decoder 块不可读，却还印出了逐工具的解码器行：{sorted(rows)}"
+        )
+        alarms = [r.reason or "" for r in report.trial_rows if r.kind == "alarm"]
+        assert any("decoder" in a for a in alarms), (
+            f"降级成「未知」却没留下一句说明：{alarms}"
+        )
+
+
+def test_decoder_mixed_source_says_what_it_means() -> None:
+    """两个工具来源不同时那一行必须说人话，不许把 JSON 的 True 原样印给用户。"""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        block = dict(_DECODER_BLOCK)
+        block[TOOL_FFPROBE] = dict(block[TOOL_FFPROBE], source="system")
+        block["mixed_source"] = True
+        _, report = _build_simple_report(Path(tmpdir), decoder=block)
+        rows = {r.key: r.value for r in report.context_rows}
+
+        val = rows.get("解码器来源混用（mixed_source）")
+        assert val is not None, "上下文表里没有 mixed_source 行"
+        assert val.startswith("是"), f"mixed_source=True 时应印「是……」，实际 {val!r}"
+        assert val not in ("True", "true"), "不许把 JSON 的布尔值原样印给用户"
+
+
+def test_plan_warnings_printed_not_swallowed() -> None:
+    """引擎给了计划告警，报告必须原文印出来，不许印「（无）」。
+
+    与解码器那一行是同一个病的第二个器官：report.py 当时用
+    `getattr(results, "plan_warnings", None)` 取一个 `ResultsTable` 从来没有过的
+    字段，所以这一行**永远**是「（无）」，而 run.json 里 `plan_warnings`
+    从 DP-108 起就是必写键，数据一直都在。
+    """
+    warnings = ["隔间 3 的校准帧只有 2 帧", "隔间 4 几乎全程无占据"]
+    with tempfile.TemporaryDirectory() as tmpdir:
+        _, report = _build_simple_report(Path(tmpdir), plan_warnings=warnings)
+        rows = {r.key: r.value for r in report.context_rows}
+
+        val = rows.get("plan_warnings")
+        assert val is not None, "上下文表里没有 plan_warnings 行"
+        for w in warnings:
+            assert w in val, f"plan_warnings 丢了一条：{w!r}（实际 {val!r}）"
+        assert "（无）" not in val, "引擎明明告警了，这一行却写着「（无）」"
+
+
+def test_plan_warnings_unreadable_is_not_folded_into_empty() -> None:
+    """plan_warnings 读不出来 ⇒「未知」，不许折成「（无）」。
+
+    「引擎说没有告警」和「这个字段坏了」是两件事。印成同一句话的后果是：
+    看报告的人以为引擎放行了这批数据。
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        _, report = _build_simple_report(Path(tmpdir), plan_warnings="不是列表")
+        rows = {r.key: r.value for r in report.context_rows}
+        assert rows.get("plan_warnings") == "未知", (
+            f"plan_warnings 不可读时应印「未知」，实际 {rows.get('plan_warnings')!r}"
         )
 
 
@@ -898,44 +1089,323 @@ def test_pdf_select_font_case_insensitive() -> None:
 
 
 def test_pdf_check_font_internal_exception_propagated() -> None:
-    """_check_font_renders 的内部异常内容必须出现在 FontUnavailableError 消息里。
+    """Qt 在 _check_font_renders 里抛的异常内容，必须原样出现在 FontUnavailableError 里。
 
-    用 monkeypatch 替换 QRawFont，注入一个 AttributeError，
-    验证 FontUnavailableError.args[0] 里含原始异常内容。
+    上一版是**一条断言自己 mock 的测试**：它把 `ep._check_font_renders` 整个换成一个
+    抛 AttributeError 的假函数，然后断言这个假函数抛了 AttributeError，接着改去测
+    `select_cjk_font([])`（和上面那条重复）。产品那段 try/except 一行都没跑到。
+    这一版换掉的是**依赖**（Qt），跑的是产品本体：沙箱里没有 PySide6，
+    所以往 sys.modules 塞一个只有 QFont/QRawFont 的假 QtGui，用完精确还原
+    （CI 上是有真 PySide6 的，不还原会影响后面的用例）。
     """
-    import unittest.mock as mock
+    import sys as _sys
+    import types
     from desktop.app.services import export_pdf as ep
 
-    original_check = ep._check_font_renders
+    sentinel = "INJECTED_SENTINEL_ERROR_12345"
 
-    sentinel_msg = "INJECTED_SENTINEL_ERROR_12345"
+    class _FakeRawFont:
+        @staticmethod
+        def fromFont(_font):
+            raise AttributeError(sentinel)
 
-    def fake_check(family: str) -> bool:
-        raise AttributeError(sentinel_msg)
+    fake_qtgui = types.ModuleType("PySide6.QtGui")
+    fake_qtgui.QRawFont = _FakeRawFont
+    fake_qtgui.QFont = lambda family: family
+    fake_pyside = types.ModuleType("PySide6")
+    fake_pyside.QtGui = fake_qtgui
 
+    saved = {name: _sys.modules.get(name) for name in ("PySide6", "PySide6.QtGui")}
     try:
-        ep._check_font_renders = fake_check
+        _sys.modules["PySide6"] = fake_pyside
+        _sys.modules["PySide6.QtGui"] = fake_qtgui
+
         try:
             ep._check_font_renders("SomeFont")
-            raise AssertionError("应该抛出 AttributeError")
-        except AttributeError as e:
-            # _check_font_renders 的 AttributeError 应该被 _get_renderable_families 吞掉
-            # 但如果直接调用，原始实现应该把 AttributeError 包成 FontUnavailableError
-            pass
-        # 测试真实的实现：注入会抛 AttributeError 的 QRawFont
-        # 由于沙箱没有 PySide6，我们直接测试 select_cjk_font 的异常传播
-        # 改为测试 select_cjk_font(空列表) 的错误消息包含有用信息
-        from desktop.app.services.export_pdf import select_cjk_font, FontUnavailableError
-        try:
-            select_cjk_font([])
-        except FontUnavailableError as e:
+        except ep.FontUnavailableError as e:
             msg = str(e)
-            # 消息应提到字体缺失
-            assert "字体" in msg or "CJK" in msg or "中文" in msg, (
-                f"FontUnavailableError 消息应提到字体相关信息，实际: {msg!r}"
+            assert sentinel in msg, (
+                f"Qt 的原始异常内容被吞了，报错里查不到它：{msg!r}"
             )
+            assert "SomeFont" in msg, f"报错没说是哪个字体：{msg!r}"
+            assert isinstance(e.__cause__, AttributeError), (
+                f"原异常没挂在 __cause__ 上，traceback 会断：{e.__cause__!r}"
+            )
+        else:
+            raise AssertionError("Qt 抛 AttributeError 时应该包成 FontUnavailableError")
+
+        # 同一个异常在「逐个筛一批字体」的路径上必须被吞掉：
+        # 一个字体探测失败不该让整次导出失败，「一个都没有」才是失败。
+        assert ep._renders_ok("SomeFont") is False, (
+            "_renders_ok 应该吞掉单个字体的探测异常并当它不可渲"
+        )
     finally:
-        ep._check_font_renders = original_check
+        for name, mod in saved.items():
+            if mod is None:
+                _sys.modules.pop(name, None)
+            else:
+                _sys.modules[name] = mod
+
+
+# ---------------------------------------------------------------------------
+# 守卫 13（DP-110）：随包中文字体——常量钉死、进打包清单、报错能归因、不进 git
+#
+# 这一节放在本文件而不是 test_packaging_contract.py：随包字体是 PDF 导出契约的一部分
+# （没有它 windows 上根本导不出 PDF），而 test_packaging_contract.py 正被 DP-108 分支
+# 同时改，避开撞车。
+# ---------------------------------------------------------------------------
+
+_FETCH_FONT = ROOT / "packaging" / "fetch_font.py"
+
+
+def _fetch_font_constants() -> dict:
+    """把 packaging/fetch_font.py 的模块级常量取出来（不 import 那个文件）。
+
+    不 import 的两个理由：`packaging` 这个顶层名字和 PyPI 上的 packaging 包撞车，
+    仓里也没有 `packaging/__init__.py`；已有的 fetch_ffmpeg 守卫也是读源码。
+    只 exec 值是字面量或 f-string 的赋值语句——`VENDOR_DIR = Path(...)` 那种带调用的
+    跳过（本测试不需要它，exec 它还要先造出 Path）。
+    """
+    import ast as _ast
+    src = _FETCH_FONT.read_text(encoding="utf-8")
+    tree = _ast.parse(src)
+    keep = [n for n in tree.body
+            if isinstance(n, _ast.Assign)
+            and isinstance(n.value, (_ast.Constant, _ast.JoinedStr))]
+    ns: dict = {}
+    exec(compile(_ast.Module(body=keep, type_ignores=[]), str(_FETCH_FONT), "exec"), ns)
+    return ns
+
+
+def test_bundled_font_constants_pinned() -> None:
+    """字体的 URL / 字节数 / sha256 逐字钉死，且与 export_pdf 的文件名对得上。
+
+    钉死的理由：这份文件是**可执行的法律与技术前提**——OFL 授权的是这一份文件，
+    「能渲中文」也是对这一份文件实测出来的（8331336 字节 / family "Noto Sans SC" /
+    cmap 里有 U+4E2D）。换了文件就要重新实测、重新看许可，不许悄悄换。
+    URL 必须钉在 tag 上：raw.githubusercontent 的 main 分支上文件会变，哈希会失效。
+    """
+    ns = _fetch_font_constants()
+
+    assert ns["FONT_BYTES"] == 8331336, f"字体字节数被改了：{ns['FONT_BYTES']}"
+    assert ns["FONT_SHA256"] == (
+        "faa6c9df652116dde789d351359f3d7e5d2285a2b2a1f04a2d7244df706d5ea9"
+    ), f"字体 sha256 被改了：{ns['FONT_SHA256']}"
+    assert ns["FONT_URL"] == (
+        "https://raw.githubusercontent.com/notofonts/noto-cjk/Sans2.004"
+        "/Sans/SubsetOTF/SC/NotoSansSC-Regular.otf"
+    ), f"字体下载地址被改了：{ns['FONT_URL']}"
+
+    assert ns["LICENSE_BYTES"] == 4301, f"许可字节数被改了：{ns['LICENSE_BYTES']}"
+    assert ns["LICENSE_SHA256"] == (
+        "6a73f9541c2de74158c0e7cf6b0a58ef774f5a780bf191f2d7ec9cc53efe2bf2"
+    ), f"许可 sha256 被改了：{ns['LICENSE_SHA256']}"
+
+    for key in ("FONT_URL", "LICENSE_URL"):
+        for moving in ("/main/", "/master/", "/latest/"):
+            assert moving not in ns[key], (
+                f"{key} 指到了滚动分支 {moving}——上游一改文件哈希就失效，必须钉 tag"
+            )
+
+    # 与消费方对齐：文件名只许有一份真值
+    from desktop.app.services.export_pdf import BUNDLED_FONT_FAMILY
+    # 文件名与包内目录名从 utils/paths.py 拿（单一来源）。故意不从 export_pdf 转手：
+    # 那样 export_pdf 里再写死一份同名常量也能让这条守卫过去。
+    from desktop.app.utils.paths import BUNDLED_FONT_FILENAME, BUNDLED_FONT_SUBDIR
+    assert ns["FONT_FILENAME"] == BUNDLED_FONT_FILENAME, (
+        f"fetch_font 落的文件名 {ns['FONT_FILENAME']!r} 与 export_pdf 找的 "
+        f"{BUNDLED_FONT_FILENAME!r} 不一致——拉下来也用不上"
+    )
+    # family 名是 Qt 注册后报出来的那个，**不是** "Noto Sans CJK SC"（Linux 系统包才叫那个）
+    assert BUNDLED_FONT_FAMILY == "Noto Sans SC", (
+        f"随包字体的 family 名被改了：{BUNDLED_FONT_FAMILY!r}"
+    )
+    assert BUNDLED_FONT_SUBDIR == "fonts", (
+        f"包内字体目录名被改了：{BUNDLED_FONT_SUBDIR!r}（要与 spec 的 datas 目标一致）"
+    )
+
+
+def test_bundled_font_in_installer_spec() -> None:
+    """GUI 的 PyInstaller spec 必须把字体**和许可**都打进包里的 fonts/ 目录。
+
+    漏了字体：客户机上 PDF 直接拒绝导出（不是降级，是拒绝）。
+    漏了许可：OFL 1.1 要求再分发时带许可正文，那是法律边界。
+    路径与目标目录都从常量推出来，不在这里另抄一遍。
+    """
+    import ast as _ast
+    from desktop.app.utils.paths import BUNDLED_FONT_FILENAME, BUNDLED_FONT_SUBDIR
+
+    spec = ROOT / "packaging" / "build_windows.spec"
+    tree = _ast.parse(spec.read_text(encoding="utf-8"))
+    datas = None
+    for node in _ast.walk(tree):
+        if isinstance(node, _ast.keyword) and node.arg == "datas":
+            datas = [tuple(_ast.literal_eval(e)) for e in node.value.elts]
+    assert datas is not None, "build_windows.spec 里找不到 datas=（守卫写法要更新）"
+
+    ns = _fetch_font_constants()
+    # spec 里的相对路径以 packaging/ 为基准（dark.qss 那两条就是这个写法）
+    want = [
+        (f"../vendor/{BUNDLED_FONT_SUBDIR}/{BUNDLED_FONT_FILENAME}", BUNDLED_FONT_SUBDIR),
+        (f"../vendor/{BUNDLED_FONT_SUBDIR}/{ns['LICENSE_FILENAME']}", BUNDLED_FONT_SUBDIR),
+    ]
+    for entry in want:
+        assert entry in datas, f"spec 的 datas 里缺 {entry}，实际：{datas}"
+
+
+def test_font_failure_message_distinguishes_three_causes() -> None:
+    """拒绝导出时那句话必须说清是三种原因里的哪一种。
+
+    旧文案把「一个字体都没枚举到」和「机器上没有中文字体」说成同一句，于是 CI 上
+    印出来的「本机缺中文字体，已枚举 0 个字体均不可渲中文」是**一句关于机器的假话**：
+    同一台 windows runner 上 msyh.ttc 在位、换原生插件能枚举到 154 个（24 个能渲「中」），
+    真正的原因是 offscreen 平台插件不提供字体库（实测 run 34932358712）。
+    报错文案本身就是归因结论，含混的文案会把下一个人的排查带偏一整天。
+    """
+    from desktop.app.services.export_pdf import _font_failure_message
+    from desktop.app.utils.paths import BUNDLED_FONT_FILENAME
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        present = Path(tmpdir) / BUNDLED_FONT_FILENAME
+        present.write_bytes(b"not a real font, only needs to exist")
+        absent = Path(tmpdir) / "nowhere" / BUNDLED_FONT_FILENAME
+
+        missing_msg = _font_failure_message(absent, 0)
+        plugin_msg = _font_failure_message(present, 0)
+        no_cjk_msg = _font_failure_message(present, 154)
+
+        # 1) 随包字体不在位 ⇒ 说是打包/部署漏了，且明确否掉「机器没字体」
+        assert str(absent) in missing_msg, f"没说缺的是哪个文件：{missing_msg!r}"
+        assert "不是这台机器缺字体" in missing_msg, (
+            f"文件都不在位却没否掉「机器没字体」这个误判：{missing_msg!r}"
+        )
+
+        # 2) 在位但注册失败 + 枚举到 0 个 ⇒ 归因到平台插件，**不许**说机器没字体
+        assert "平台插件" in plugin_msg, f"枚举到 0 个时没归因到平台插件：{plugin_msg!r}"
+        assert "不等于这台机器没有中文字体" in plugin_msg, (
+            f"枚举到 0 个时说成了机器没字体（那是假话）：{plugin_msg!r}"
+        )
+        assert "确实缺中文字体" not in plugin_msg, (
+            f"枚举到 0 个时不许断言机器确实缺字体：{plugin_msg!r}"
+        )
+
+        # 3) 枚举到 N>0 但无一可渲 ⇒ 这才是「机器确实缺中文字体」
+        assert "确实缺中文字体" in no_cjk_msg, (
+            f"枚举到 154 个都不能渲中文，这时才该说机器缺字体：{no_cjk_msg!r}"
+        )
+        assert "154" in no_cjk_msg, f"没带上枚举总数这个证据：{no_cjk_msg!r}"
+        assert "平台插件" not in no_cjk_msg, (
+            f"枚举正常却把锅推给平台插件：{no_cjk_msg!r}"
+        )
+
+        msgs = [missing_msg, plugin_msg, no_cjk_msg]
+        assert len(set(msgs)) == 3, f"三种原因印出了同一句话：{msgs}"
+        for m in msgs:
+            assert "xlsx" in m and "审计包" in m, (
+                f"拒绝导出 PDF 时要告诉用户另外两样不受影响：{m!r}"
+            )
+
+
+def test_vendor_binaries_not_committed() -> None:
+    """vendor/ 必须被 .gitignore 挡住——字体和 ffmpeg 都是下载得到的，不进仓。
+
+    这一条不是新规矩（大文件不进仓是项目硬规矩），是把它真的钉上：
+    在本轮之前 .gitignore 里**没有** vendor/，那 80 MB 的 ffmpeg 和 8.3 MB 的字体
+    一直都是能被 commit 进去的，只是碰巧没人 add。
+    """
+    lines = [ln.strip() for ln in
+             (ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()]
+    assert "vendor/" in lines, (
+        ".gitignore 里没有 vendor/ —— 随包二进制（ffmpeg 80 MB、字体 8.3 MB）会被 commit 进仓"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 守卫 14（DP-110 C12）：部分失败时的弹窗不许说「成功」——那几份也撤回了
+#
+# 沙箱与 3.9 都 import 不了 pages/（要 PySide6），所以只能 AST 读。
+# 这不是「测不到」：这条守卫盯的是**文案说的是不是真话**，而文案是源码里的字面量。
+# ---------------------------------------------------------------------------
+
+_RESULTS_PAGE = ROOT / "desktop" / "app" / "pages" / "results.py"
+
+
+def _on_export_ast() -> "ast.FunctionDef":
+    tree = ast.parse(_RESULTS_PAGE.read_text(encoding="utf-8"))
+    fn = next((n for n in ast.walk(tree)
+               if isinstance(n, ast.FunctionDef) and n.name == "_on_export"), None)
+    assert fn is not None, "pages/results.py 里找不到 _on_export（守卫写法要更新）"
+    return fn
+
+
+def _string_pieces(node) -> list[str]:
+    """节点里所有中文/英文字面量片段（f-string 的常量段也算）。"""
+    out: list[str] = []
+    for sub in ast.walk(node):
+        if isinstance(sub, ast.Constant) and isinstance(sub.value, str):
+            out.append(sub.value)
+    return out
+
+
+def test_partial_export_dialog_does_not_claim_success() -> None:
+    """部分导出失败时不许宣称「成功：xlsx, 审计包」。
+
+    原子性契约是「任何一份失败则整体不留」，代码本身是对的（三份先渲染到临时目录，
+    全成功才移动）。错的是那句话——用户读到「成功：xlsx, 审计包」会去目标目录找那两个
+    文件，那里一个都没有；更糟的是他会以为那两份数据已经留档了。
+    「不为空」不是要求，「说的是真话」才是。
+    """
+    pieces = _string_pieces(_on_export_ast())
+    joined = "\n".join(pieces)
+
+    for claim in ("成功：", "成功:"):
+        offenders = [p for p in pieces if claim in p]
+        assert not offenders, (
+            f"导出弹窗里出现了 {claim!r} 式的成功清单：{offenders}——"
+            "部分失败时那几份也一起撤回了，目标目录里没有它们"
+        )
+    assert "一个文件都没有导出" in joined, (
+        "部分失败的弹窗里没有明说「一个文件都没有导出」，用户会去找不存在的文件"
+    )
+    assert "撤回" in joined, (
+        "部分失败的弹窗里没说成功渲染的那几份也撤回了（原子性约定要说给用户听）"
+    )
+
+
+def test_font_failure_dialog_quotes_the_reason() -> None:
+    """字体那条弹窗必须把 FontUnavailableError 的原文带上，不许换成一句猜测。
+
+    原来写的是「PDF 未导出：请检查中文字体安装」——那是**猜**出来的原因：真实原因可能是
+    安装包漏了随包字体，也可能是平台插件不提供字体库（实测 run 34932358712），
+    两种都跟用户装没装字体无关。归因结论已经写在异常消息里了
+    （见 export_pdf._font_failure_message 的三条分支），这里只需原文转述。
+    """
+    fn = _on_export_ast()
+    handlers = [h for h in ast.walk(fn)
+                if isinstance(h, ast.ExceptHandler)
+                and isinstance(h.type, ast.Name)
+                and h.type.id == "FontUnavailableError"]
+    assert len(handlers) == 1, (
+        f"_on_export 里 FontUnavailableError 的 except 分支有 {len(handlers)} 个，期望 1 个"
+    )
+    handler = handlers[0]
+    assert handler.name, (
+        "except FontUnavailableError 没有 as e —— 拿不到异常就不可能转述它的归因结论"
+    )
+    exc_name = handler.name
+
+    interpolated = [
+        node for node in ast.walk(handler)
+        if isinstance(node, ast.JoinedStr)
+        and any(isinstance(v, ast.FormattedValue)
+                and isinstance(v.value, ast.Name)
+                and v.value.id == exc_name
+                for v in node.values)
+    ]
+    assert interpolated, (
+        f"字体失败那条消息里没有把 {exc_name} 插进去——"
+        "三种原因（打包漏了 / 平台插件不给字体库 / 机器真没字体）会退回成一句猜测"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -991,7 +1461,7 @@ def test_end_to_end_with_real_engine_output() -> None:
 
         report = build_report(
             results=results,
-            calib_mode=Mode.RESEARCH.value,
+            calib_mode=Mode.RESEARCH,
             calib_badge=Badge.YELLOW.value,
             calib_batch=None,
             g7_threshold=G7_MIN_R,
@@ -1074,7 +1544,7 @@ def test_bad_context_fields_print_as_unknown() -> None:
 
         report = build_report(
             results=results,
-            calib_mode=Mode.RESEARCH.value,
+            calib_mode=Mode.RESEARCH,
             calib_badge=Badge.YELLOW.value,
             calib_batch=None,
             g7_threshold=G7_MIN_R,
@@ -1191,7 +1661,7 @@ def test_audit_manifest_records_missing_engine_outputs() -> None:
 
         report = build_report(
             results=results,
-            calib_mode=Mode.RESEARCH.value,
+            calib_mode=Mode.RESEARCH,
             calib_badge=Badge.YELLOW.value,
             calib_batch=None,
             g7_threshold=G7_MIN_R,

@@ -20,6 +20,13 @@ a = Analysis(
         # VI 深色皮肤（已于 2026-09-13 搬入本仓）
         ("../desktop/app/styles/dark.qss", "desktop/app/styles"),
         ("../desktop/app/styles/colors.py", "desktop/app/styles"),
+        # 随包中文字体（DP-110）。offscreen 平台插件在 Windows 上枚举到 0 个系统字体
+        # （实测 run 34932358712），随包 + addApplicationFont 是唯一普适的机制。
+        # 目标目录名 fonts 必须与 export_pdf.BUNDLED_FONT_SUBDIR 一致。
+        # 先跑 python3 packaging/fetch_font.py 把这两个文件拉到位，否则 PyInstaller 报错。
+        ("../vendor/fonts/NotoSansSC-Regular.otf", "fonts"),
+        # OFL 1.1 正文：再分发必须带许可（法律边界，不是可选项）
+        ("../vendor/fonts/LICENSE-NotoSansSC.txt", "fonts"),
     ],
     hiddenimports=[
         "desktop.app",

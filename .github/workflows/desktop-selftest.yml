@@ -31,6 +31,11 @@ jobs:
         run: pip install PySide6==6.7.3
       - name: Install openpyxl (export render step)
         run: pip install openpyxl==3.1.5
+      # 随包中文字体（DP-110）。不拉的话 windows 上 PDF 一定导不出来——
+      # offscreen 平台插件在 windows 上枚举到 0 个系统字体（实测 run 34932358712）。
+      # 脚本自己校验字节数 + sha256，拉错了当场非零退出。
+      - name: Fetch bundled CJK font (Noto Sans SC)
+        run: python packaging/fetch_font.py
       - name: Test PySide6 offscreen startup
         run: |
           python -c "
@@ -63,7 +68,9 @@ jobs:
           from desktop.app.models.results import ResultsTable, ResultsRow, load_results
           from desktop.app.models.report import build_report
           from desktop.app.services.export_xlsx import render_xlsx
-          from desktop.app.services.export_pdf import render_pdf, _build_html
+          from desktop.app.services.export_pdf import (
+              render_pdf, _build_html, _select_font_with_qt, BUNDLED_FONT_FAMILY)
+          from desktop.app.utils.paths import BUNDLED_FONT_FILENAME, bundled_font_dir
 
           with tempfile.TemporaryDirectory() as tmpdir:
               tmp = Path(tmpdir)
@@ -83,6 +90,17 @@ jobs:
                             'frame_count_source': 'packets'},
                   'calib_indices': [], 'chambers': [{'index': 1}],
                   'plan_warnings': [], 'chamber_validity': [], 'not_scored': [],
+                  # decoder 是必写键（DP-108）：审计包要能回答「这批帧是哪个解码器解的」。
+                  # 工具名在这里手写，是因为本 workflow 不装引擎依赖、import 不了
+                  # depressionplex.video 的常量；两边对不上的守卫在
+                  # tests/test_report_model.py（那边是真 import 常量的）。
+                  'decoder': {
+                      'ffmpeg': {'path': '/opt/dpx/ffmpeg', 'source': 'bundled',
+                                 'version': 'ffmpeg version 7.1.1'},
+                      'ffprobe': {'path': '/opt/dpx/ffprobe', 'source': 'bundled',
+                                  'version': 'ffprobe version 7.1.1'},
+                      'mixed_source': False,
+                  },
               }
               (tmp / 'v_run.json').write_text(json.dumps(run_data), encoding='utf-8')
               from desktop.app.models.results import CSV_FIELDS_EXPECTED
@@ -101,7 +119,7 @@ jobs:
                   })
               results = load_results(exp, 0)
               report = build_report(
-                  results=results, calib_mode=Mode.RESEARCH.value,
+                  results=results, calib_mode=Mode.RESEARCH,
                   calib_badge=Badge.YELLOW.value, calib_batch=None,
                   g7_threshold=G7_MIN_R, g8_threshold_s=G8_MAX_ABS_BIAS_S,
               )
@@ -130,6 +148,17 @@ jobs:
               pdf_path = tmp / 'out.pdf'
               from PySide6.QtWidgets import QApplication
               app = QApplication.instance() or QApplication(sys.argv)
+
+              # 先断言选中的**就是随包那一份**：两个平台都该走这条路。
+              # 只断言「render_pdf 没抛异常」是不够的——那句话在系统字体兜底时也成立。
+              font_file = bundled_font_dir() / BUNDLED_FONT_FILENAME
+              assert font_file.is_file(), f'随包字体没拉到位: {font_file}'
+              chosen = _select_font_with_qt()
+              print(f'选中字体: {chosen}')
+              assert chosen == BUNDLED_FONT_FAMILY, (
+                  f'没选中随包字体，实际 {chosen!r}——随包分支坏了，'
+                  f'客户机器上就只能靠碰巧装了中文字体')
+
               render_pdf(report, pdf_path)
               assert pdf_path.exists(), 'PDF 文件不存在'
               pdf_size = pdf_path.stat().st_size
@@ -139,5 +168,55 @@ jobs:
               print(f'PDF OK: {pdf_size} bytes, header={header}')
               app.quit()
               print('Export render smoke test PASSED')
+          "
+      # 逼掉随包分支（指一个空目录），看两件事：系统兜底在不在，报错归因对不对。
+      # 实测（run 34932358712）：ubuntu offscreen 枚举到 36 个 family、15 个能渲「中」；
+      # windows offscreen 枚举到 **0** 个（同一台机器 msyh.ttc 在位、原生插件能枚举到 154 个）。
+      # 所以 ubuntu 必须靠系统字体成功，windows 必须失败**且说清是平台插件的事**。
+      # 哪天 Qt 修了 offscreen 的字体枚举，这条会红在 windows 上——那是该红的，改这里之前先看数。
+      - name: Font attribution smoke (forced empty bundled dir)
+        env:
+          SMOKE_RUNNER_OS: ${{ runner.os }}
+        run: |
+          python -c "
+          import os, sys, tempfile
+          from pathlib import Path
+
+          sys.path.insert(0, '.')
+          from PySide6.QtWidgets import QApplication
+          from PySide6.QtGui import QFontDatabase
+          from desktop.app.services.export_pdf import (
+              _select_font_with_qt, FontUnavailableError)
+          from desktop.app.utils.paths import BUNDLED_FONT_FILENAME, bundled_font_dir
+
+          app = QApplication.instance() or QApplication(sys.argv)
+          assert (bundled_font_dir() / BUNDLED_FONT_FILENAME).is_file(), '随包字体没拉到位'
+
+          n = len(QFontDatabase.families())
+          runner_os = os.environ['SMOKE_RUNNER_OS']
+          print(f'{runner_os}: 平台插件枚举到 {n} 个 family')
+          expect_system_fallback = (runner_os == 'Linux')
+
+          with tempfile.TemporaryDirectory() as d:
+              empty = Path(d)   # 空目录 ⇒ 随包分支必然走不通
+              try:
+                  fam = _select_font_with_qt(empty)
+              except FontUnavailableError as e:
+                  got = str(e)
+                  print('拒绝导出：' + got)
+                  assert not expect_system_fallback, (
+                      f'{runner_os} 上装了中文字体（枚举 {n} 个）却没兜住：{got}')
+                  assert n == 0, (
+                      f'{runner_os} 现在枚举到 {n} 个 family 了，offscreen 的字体库行为变了，'
+                      f'先看数再改这条守卫')
+                  assert '平台插件' in got, f'没归因到平台插件：{got}'
+                  assert '不等于这台机器没有中文字体' in got, f'把锅推给机器了：{got}'
+                  print('归因文案 OK（平台插件不给字体库，不是机器没字体）')
+              else:
+                  print('系统字体兜底选中: ' + fam)
+                  assert expect_system_fallback, (
+                      f'{runner_os} 上本该没有可用系统字体，却选中了 {fam}——先看数再改守卫')
+              app.quit()
+          print('Font attribution smoke PASSED')
           "
 

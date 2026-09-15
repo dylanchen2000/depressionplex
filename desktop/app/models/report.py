@@ -16,6 +16,9 @@ from typing import Any
 
 # 直接 import B4 的 DENOMINATORS，不许再抄一份（派工单 §3 第 6 条守卫）
 from desktop.app.models.results import DENOMINATORS, ResultsTable, ResultsRow
+# 发布态标签与「计量版拒绝」都在判定层（DP-111：desktop/ 里只有 calibration.py
+# 能拿模式做分支）；本层只负责把判定层给出的标签摆进模板。
+from desktop.app.services.calibration import Mode, declaration_version_label
 
 # 找到 data/validation_readings.json 的路径（相对仓根）
 # 本文件在 desktop/app/models/report.py，parents[3] 是仓根
@@ -27,12 +30,6 @@ VALIDATION_READINGS_PATH = _REPO_ROOT / "data" / "validation_readings.json"
 # 守卫要断言：模板文本里不出现那些读数的数字——改了 JSON 声明照旧印旧数是最难发现的错法。
 # 三处（xlsx / PDF / 审计包）都从这个常量取同一份字符串。
 # ---------------------------------------------------------------------------
-
-# 发布态标签映射（唯一来源）。计量版文案未定，M3 前禁止生成。
-_MODE_LABELS: dict[str, str] = {
-    "research":  "研究版",
-    "validated": "计量版",
-}
 
 DECLARATION_TEMPLATE = """\
 ### 研究用途声明
@@ -92,28 +89,25 @@ def render_declaration(
     g7_threshold: Any,
     g8_threshold_s: Any,
     theta_mob: Any,
-    mode: str = "research",
+    mode: Mode,
     readings_path: "Path | None" = None,
 ) -> str:
     """用运行时读数填充声明模板，返回最终声明文本。
 
     g7_threshold / g8_threshold_s：来自 calibration.py 的门槛值
     theta_mob：来自本次 run.json 的 rules.theta_mob
-    mode：发布态（"research" 或 "validated"）；validated 时抛 NotImplementedError
+    mode：发布态枚举 calibration.Mode；计量版由判定层 declaration_version_label 拒绝
     readings_path：显式指定验证读数 JSON 路径（None = VALIDATION_READINGS_PATH）
 
     G11 门槛 None ⇒ 印「未定」。
     """
-    if mode == "validated":
-        raise NotImplementedError(
-            "计量版声明文案未定，M3 前不许生成计量版报告"
-        )
     readings = _load_validation_readings(readings_path=readings_path)
     ctx = dict(readings)
     ctx["g7_threshold"] = g7_threshold
     ctx["g8_threshold_s"] = g8_threshold_s
     ctx["theta_mob"] = theta_mob if theta_mob is not None else "未知"
-    ctx["version_label"] = _MODE_LABELS.get(mode, mode)
+    # 标签与「计量版拒绝」都由判定层给（DP-111 单一判定点）
+    ctx["version_label"] = declaration_version_label(mode)
     return DECLARATION_TEMPLATE.format(**ctx)
 
 
@@ -286,7 +280,6 @@ def _build_context_rows(
     calib_batch: str | None,
     g7_threshold: Any,
     g8_threshold_s: Any,
-    decoder_info: str | None,
 ) -> list[ContextTableEntry]:
     """构造运行上下文表（来自 run.json + calibration，不重算任何科学量）。"""
     rows: list[ContextTableEntry] = []
@@ -323,16 +316,35 @@ def _build_context_rows(
 
     add("帧数来源（frame_count_source）", results.frame_count_source)
 
-    # plan_warnings 在 ResultsTable 不直接存储，但架构规定要印
-    # 这里通过对象字段获取（B4 的 ResultsTable 暂不含此字段，留 TODO）
-    plan_warnings = getattr(results, "plan_warnings", None)
-    if plan_warnings:
-        add("plan_warnings", "; ".join(plan_warnings))
+    # plan_warnings 三态：读不出来 ⇒「未知」，引擎确实没告警 ⇒「（无）」，
+    # 有告警 ⇒ 原文。前两者印成同一句话，等于把引擎的告警吞掉。
+    if results.plan_warnings is None:
+        add("plan_warnings", None)
+    elif results.plan_warnings:
+        add("plan_warnings", "; ".join(results.plan_warnings))
     else:
         add("plan_warnings", "（无）")
 
-    # 解码器身份（B10 会加 decoder 块，现在可能未知）
-    add("解码器身份", decoder_info if decoder_info else "未知")
+    # 解码器身份（DP-121）：每个工具一行，印 run.json 里那份真值。
+    # 这一行的用途是让审计者能回答「这批帧是哪个解码器解出来的」——
+    # 一行「未知」答不了这个问题。
+    if results.decoder_tools:
+        for tool, entry in sorted(results.decoder_tools.items()):
+            add(f"解码器 {tool}", "｜".join([
+                entry.get("version") or "版本未知",
+                f"来源 {entry.get('source') or '未知'}",
+                entry.get("path") or "路径未知",
+            ]))
+    else:
+        add("解码器身份", None)
+
+    if results.decoder_mixed_source is True:
+        add("解码器来源混用（mixed_source）",
+            "是——两个工具不是同一来源，核对版本一致性后再引用这批秒数")
+    elif results.decoder_mixed_source is False:
+        add("解码器来源混用（mixed_source）", "否")
+    else:
+        add("解码器来源混用（mixed_source）", None)
 
     add("发布态", calib_mode)
     add("徽章", calib_badge)
@@ -386,7 +398,7 @@ def _build_validation_rows(
 
 def build_report(
     results: ResultsTable,
-    calib_mode: str,
+    calib_mode: Mode,
     calib_badge: str,
     calib_batch: str | None,
     g7_threshold: Any,
@@ -399,7 +411,7 @@ def build_report(
 
     Args:
         results: B4 的 load_results() 返回的 ResultsTable
-        calib_mode: calibration.Mode.value（"research" 或 "validated"）
+        calib_mode: calibration.Mode（发布态枚举本身，不是它的 .value 字符串）
         calib_badge: calibration.Badge.value（"yellow" / "green" / "red"）
         calib_batch: 标定批次号（研究版为 None）
         g7_threshold: 来自 calibration.G7_MIN_R
@@ -416,9 +428,6 @@ def build_report(
     # 从 run.json 取 theta_mob（不许写死）
     theta_mob = results.theta_mob
 
-    # 从 run.json 取 decoder 块（B10 还没加，容忍缺失）
-    decoder_info: str | None = getattr(results, "decoder_info", None)
-
     # 声明文本（模板填充）
     declaration = render_declaration(
         g7_threshold=g7_threshold,
@@ -434,12 +443,11 @@ def build_report(
     # 运行上下文表
     context_rows = _build_context_rows(
         results=results,
-        calib_mode=calib_mode,
+        calib_mode=calib_mode.value,
         calib_badge=calib_badge,
         calib_batch=calib_batch,
         g7_threshold=g7_threshold,
         g8_threshold_s=g8_threshold_s,
-        decoder_info=decoder_info,
     )
 
     # 发布态与验证读数表
@@ -456,7 +464,7 @@ def build_report(
         context_rows=context_rows,
         validation_rows=validation_rows,
         tool_version=results.tool_version,
-        export_mode=calib_mode,
+        export_mode=calib_mode.value,
         badge=calib_badge,
         video_name=results.video_name,
         assay=results.assay,

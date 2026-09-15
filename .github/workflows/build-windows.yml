@@ -25,6 +25,12 @@ jobs:
       - name: Fetch and verify ffmpeg (LGPL)
         run: python packaging/fetch_ffmpeg.py
 
+      # 随包中文字体（DP-110）。GUI spec 的 datas 引了 vendor/fonts/ 下两个文件，
+      # 不先拉下来 PyInstaller 会在「找不到 datas 源文件」上直接失败。
+      # 与 ffmpeg 同一个模式：URL + 字节数 + sha256 钉死，二进制不进 git。
+      - name: Fetch and verify bundled CJK font (Noto Sans SC, OFL)
+        run: python packaging/fetch_font.py
+
       - name: Build GUI (PyInstaller)
         working-directory: packaging
         run: pyinstaller build_windows.spec
@@ -126,10 +132,37 @@ jobs:
           exit 0
 
       - name: Smoke test - GUI exe (offscreen)
+        shell: pwsh
         env:
           QT_QPA_PLATFORM: offscreen
         run: |
-          packaging\dist\DEPRESSION-PLEX\DEPRESSION-PLEX.exe --self-test
+          # **不许直接 `& $exe --self-test`。** GUI exe 是 windowed 子系统
+          # （build_windows.spec 里 console=False），pwsh 调它**不会等**，
+          # $LASTEXITCODE 恒为 0：run 34930864774 的第 13 步日志里明明打着
+          # 「自检不通过：皮肤缺失…SELF-TEST FAILED」，步骤却报 success，
+          # 于是三次「构建成功」全是假的。必须 -Wait -PassThru 拿真实退出码。
+          $exe = "packaging\dist\DEPRESSION-PLEX\DEPRESSION-PLEX.exe"
+          $outFile = "packaging/selftest_stdout.txt"
+          $errFile = "packaging/selftest_stderr.txt"
+          $p = Start-Process -FilePath $exe -ArgumentList "--self-test" `
+                 -NoNewWindow -Wait -PassThru `
+                 -RedirectStandardOutput $outFile -RedirectStandardError $errFile
+          $out = if (Test-Path $outFile) { Get-Content $outFile -Raw } else { "" }
+          $err = if (Test-Path $errFile) { Get-Content $errFile -Raw } else { "" }
+          Write-Host "--- stdout ---"; Write-Host $out
+          Write-Host "--- stderr ---"; Write-Host $err
+          Write-Host "GUI --self-test ExitCode = $($p.ExitCode)"
+          if ($p.ExitCode -ne 0) {
+            throw "FAIL: GUI 自检退出码 $($p.ExitCode)，期望 0（rc=2 = 自检不通过，看上面 stderr 的「自检不通过：」行）"
+          }
+          # 退出码 0 还不够：rc 只说「没有 problems」，说不出皮肤到底加载了没有。
+          # 这两条断言盯的是自检自己打出来的事实（ASCII 片段，避开 CI 上的编码坑）。
+          if ($out -notmatch "SELF-TEST OK") {
+            throw "FAIL: 自检 stdout 里没有 'SELF-TEST OK'（rc=0 但没走到成功那一行？）"
+          }
+          if ($out -notmatch "app/styles/dark\.qss") {
+            throw "FAIL: 自检没打出已加载 app/styles/dark.qss —— 冻结后皮肤没被 datas 带进来"
+          }
 
       - name: Record build environment
         shell: pwsh

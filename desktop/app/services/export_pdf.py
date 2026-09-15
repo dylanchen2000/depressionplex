@@ -1,9 +1,12 @@
 """PDF 渲染器（B6，DP-110）。
 
 架构约束（派工单 §0.5）：
-- 渲染前按 微软雅黑 → 宋体 → Noto Sans CJK SC 顺序找字体，
-  用 QRawFont 实测一个汉字能不能渲。
-- 三个都不行 ⇒ **拒绝导出 PDF**，不生成任何 .pdf 文件。
+- 渲染前必须找到能渲一个汉字的字体，顺序是 **随包字体 → 系统字体 → 报错**。
+  随包在前：它是唯一我们能保证在客户机器上存在、且不依赖平台插件的那一份。
+  系统字体按 微软雅黑 → 宋体 → Noto Sans CJK SC 优先，用 QRawFont 实测能不能渲。
+- 都不行 ⇒ **拒绝导出 PDF**，不生成任何 .pdf 文件；报错文案必须说清是三种原因里的
+  哪一种（随包漏了 / 平台插件不给字体库 / 这台机器真没中文字体），见
+  _font_failure_message()。把三件事说成一句话是最难查的一类失败。
 - 字体决策放在纯函数 select_cjk_font() 里（输入「哪些字体可用」，
   输出「用哪个或拒绝」），Qt 只负责问系统；这样没有 PySide6 的沙箱
   也能测这个纯函数（派工单 §3 第 11 条）。
@@ -18,6 +21,7 @@ from pathlib import Path
 from typing import Sequence
 
 from desktop.app.models.report import Report, DENOMINATORS
+from desktop.app.utils.paths import BUNDLED_FONT_FILENAME, bundled_font_dir
 
 # ---------------------------------------------------------------------------
 # 字体决策（纯函数，沙箱可测，不 import Qt）
@@ -30,6 +34,15 @@ CJK_FONT_CANDIDATES: tuple[str, ...] = (
 )
 
 _TEST_CHAR = "中"  # 用来测字体能不能渲中文
+
+# 随包中文字体（DP-110）。文件与许可由 packaging/fetch_font.py 拉到 vendor/fonts/，
+# 由 packaging/build_windows.spec 的 datas 打进 <bundle>/fonts/。
+# 二进制不进 git，所以源码运行前要先跑一次 fetch_font.py。
+# 文件名与目录名在 utils/paths.py（那边是 PyInstaller 内部 API 的唯一入口点），
+# 这里只留 family 名——它是**字体文件里的元数据**，不是路径。
+# 注册后 Qt 报出来的 family 名是 "Noto Sans SC"（fontTools 实测），
+# **不是** CJK_FONT_CANDIDATES 里那个 "Noto Sans CJK SC"（那是 Linux 上系统包的名字）。
+BUNDLED_FONT_FAMILY = "Noto Sans SC"
 
 
 class FontUnavailableError(RuntimeError):
@@ -62,21 +75,28 @@ def _check_font_renders(family: str) -> bool:
         ) from e
 
 
+def _renders_ok(family: str) -> bool:
+    """_check_font_renders 的吞异常版：单个字体检查内部出错 ⇒ 当它不可渲，跳过。
+
+    只用在「逐个筛一批字体」的场合。一个字体探测失败不该让整次导出失败——
+    最终「一个都没有」才是失败，那一步由调用方判定并给出归因文案。
+    """
+    try:
+        return _check_font_renders(family)
+    except FontUnavailableError:
+        return False
+
+
 def _get_renderable_families() -> list[str]:
     """枚举系统全部 family，过滤出通过 _check_font_renders 的那些。
 
     Returns:
-        能渲中文的 family 名列表（空列表 = 本机没有中文字体）
+        能渲中文的 family 名列表。空列表有两种可能——本机真没有中文字体，
+        或者平台插件根本不提供字体库（offscreen 在 Windows 上实测枚举到 0 个）。
+        **这两件事必须由调用方分开报**，见 _font_failure_message()。
     """
     from PySide6.QtGui import QFontDatabase
-    renderable: list[str] = []
-    for f in QFontDatabase.families():
-        try:
-            if _check_font_renders(f):
-                renderable.append(f)
-        except FontUnavailableError:
-            pass  # 内部错误，跳过这个字体
-    return renderable
+    return [f for f in QFontDatabase.families() if _renders_ok(f)]
 
 
 def select_cjk_font(renderable_families: Sequence[str]) -> str:
@@ -108,17 +128,86 @@ def select_cjk_font(renderable_families: Sequence[str]) -> str:
     return renderable_families[0]
 
 
-def _select_font_with_qt() -> str:
-    """枚举可渲中文的字体，再选优先级最高的。失败抛 FontUnavailableError（含枚举总数）。"""
+def _register_bundled_font(font_path: Path) -> list[str]:
+    """把随包字体注册进 Qt，返回其中实测能渲中文的 family 名（失败返回空列表）。
+
+    走 addApplicationFont 而不是靠系统字体，是因为实测（run 34932358712）
+    Qt 6.7.3 的 offscreen 平台插件在 windows-latest 上 QFontDatabase.families()
+    返回 **0** 个——而那台机器上 msyh.ttc 明明在位、原生 windows 插件能枚举到 154 个。
+    同样条件下 addApplicationFont 返回 id 0、注册出 2 个 family、两个都能渲「中」。
+    所以这是唯一不依赖平台插件字体库的机制。
+
+    返回顺序里把 BUNDLED_FONT_FAMILY 排在最前：同一份字体文件下，
+    PDF 里写的 font-family 必须是确定的，不许随枚举顺序变。
+    """
     from PySide6.QtGui import QFontDatabase
-    all_families = list(QFontDatabase.families())
-    renderable = _get_renderable_families()
-    if not renderable:
-        raise FontUnavailableError(
-            f"本机缺中文字体，已枚举 {len(all_families)} 个字体均不可渲中文；"
+    if not font_path.is_file():
+        return []
+    font_id = QFontDatabase.addApplicationFont(str(font_path))
+    if font_id < 0:
+        return []
+    families = [f for f in QFontDatabase.applicationFontFamilies(font_id)
+                if _renders_ok(f)]
+    families.sort(key=lambda f: (f != BUNDLED_FONT_FAMILY, f))
+    return families
+
+
+def _font_failure_message(font_path: Path, enumerated_count: int) -> str:
+    """三种失败原因分开说（纯函数，无 Qt，可在沙箱里测）。
+
+    旧版把「一个字体都没枚举到」和「没有中文字体」说成同一句话，于是 CI 上那条
+    「本机缺中文字体，已枚举 0 个」是**一句关于机器的假话**：机器上有字体，
+    是平台插件不给字体库。报错文案本身就是归因结论，含混的文案会把排查带偏。
+
+    Args:
+        font_path: 随包字体**应该**在的位置
+        enumerated_count: Qt 这次枚举到的系统 family 总数
+    """
+    if not font_path.is_file():
+        return (
+            f"随包中文字体不在位：{font_path}——这是打包或部署漏了文件，"
+            "不是这台机器缺字体（源码运行时先跑一次 python3 packaging/fetch_font.py）；"
             "xlsx 与审计包不受影响，可以先导那两个。"
         )
-    return select_cjk_font(renderable)
+    if enumerated_count == 0:
+        return (
+            f"随包中文字体 {font_path.name} 在位但注册失败，且 Qt 一个系统字体都没枚举到"
+            "（0 个）——这通常是**平台插件不提供字体库**（offscreen 在 Windows 上实测就是"
+            "0 个），**不等于这台机器没有中文字体**；请换原生平台插件重试，"
+            "或检查该字体文件是否损坏。xlsx 与审计包不受影响，可以先导那两个。"
+        )
+    return (
+        f"随包中文字体 {font_path.name} 注册失败，且已枚举的 {enumerated_count} 个系统字体"
+        "没有一个能渲中文——**这台机器确实缺中文字体**。"
+        "xlsx 与审计包不受影响，可以先导那两个。"
+    )
+
+
+def _select_font_with_qt(font_dir: Path | None = None) -> str:
+    """选一个能渲中文的字体：随包 → 系统实测 → 报错。
+
+    Args:
+        font_dir: 随包字体所在目录；None ⇒ bundled_font_dir()。
+            留这个入参是为了让 CI 能真的走到「随包字体不在位」那条分支
+            （指一个空目录），而不是把那条分支写成可跳过的测试。
+
+    Raises:
+        FontUnavailableError: 三条路都不通，消息说清是哪一种原因
+    """
+    from PySide6.QtGui import QFontDatabase
+    if font_dir is None:
+        font_dir = bundled_font_dir()
+    font_path = font_dir / BUNDLED_FONT_FILENAME
+
+    bundled = _register_bundled_font(font_path)
+    if bundled:
+        return bundled[0]
+
+    enumerated = list(QFontDatabase.families())
+    renderable = _get_renderable_families()
+    if renderable:
+        return select_cjk_font(renderable)
+    raise FontUnavailableError(_font_failure_message(font_path, len(enumerated)))
 
 
 def _build_html(report: Report) -> str:
@@ -231,7 +320,7 @@ def _build_html(report: Report) -> str:
     return "\n".join(lines)
 
 
-def render_pdf(report: Report, out_path: Path) -> None:
+def render_pdf(report: Report, out_path: Path, font_dir: Path | None = None) -> None:
     """把 Report 渲染到 PDF 文件（需要 PySide6）。
 
     §0.5：渲染前必须找到可渲中文的字体，否则拒绝生成。
@@ -239,12 +328,14 @@ def render_pdf(report: Report, out_path: Path) -> None:
     Args:
         report: 内容层 Report 对象
         out_path: 输出路径
+        font_dir: 随包字体目录；None ⇒ 用 bundled_font_dir()。产品调用不传，
+            只有 CI 的冒烟测试会传一个空目录来逼出系统字体那条分支。
 
     Raises:
-        FontUnavailableError: 本机缺中文字体（不生成任何 .pdf 文件）
+        FontUnavailableError: 找不到可渲中文的字体（不生成任何 .pdf 文件）
     """
     # 字体检查（拒绝生成，不降级）
-    font_family = _select_font_with_qt()  # 缺字体时直接抛异常
+    font_family = _select_font_with_qt(font_dir)  # 缺字体时直接抛异常
 
     from PySide6.QtCore import QMarginsF, QSizeF
     from PySide6.QtGui import QPageSize, QPdfWriter, QTextDocument

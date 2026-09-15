@@ -31,6 +31,11 @@ outputs/
 !data/frozen/
 !data/validation_readings.json
 
+# 随包第三方二进制（下载+校验得到，不进仓）
+# ffmpeg 由 packaging/fetch_ffmpeg.py 拉（80 MB），中文字体由 packaging/fetch_font.py 拉（8.3 MB）。
+# 两个脚本都钉了 URL + 字节数 + sha256，任何人都能一条命令复现同一份文件。
+vendor/
+
 # Python
 __pycache__/
 *.py[cod]

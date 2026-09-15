@@ -49,6 +49,29 @@ class Mode(str, Enum):
     VALIDATED = "validated"
 
 
+# 发布态在报告里的中文版本标签——**唯一来源**。
+# 放在本模块而不是报告层：DP-111 守卫 test_no_second_mode_decision_in_desktop
+# 只放行本文件拿模式做分支，而「哪个模式配哪套文案」本身就是一次资质判定。
+# 字典派发同样是分支（B8 复核 R3 实测过这种绕法能骗过 12 条守卫），
+# 所以这张表也必须待在判定层里。
+_MODE_LABELS: dict[Mode, str] = {
+    Mode.RESEARCH:  "研究版",
+    Mode.VALIDATED: "计量版",
+}
+
+
+def declaration_version_label(mode: Mode) -> str:
+    """报告声明里那个版本标签；计量版文案未定 ⇒ 拒绝出报告。
+
+    「计量版声明该怎么写」在 M3 定标之前没有答案。**拒绝**比印一份措辞未定的
+    计量版声明安全——理由与本模块开头第 3 条同源：模式只许被降级，
+    不许被任何入参抬高，也不许被一份还没写好的文案偷偷代表。
+    """
+    if mode is Mode.VALIDATED:
+        raise NotImplementedError("计量版声明文案未定，M3 前不许生成计量版报告")
+    return _MODE_LABELS[mode]
+
+
 class Badge(str, Enum):
     YELLOW = "yellow"   # 研究用途 · 未计量标定
     GREEN = "green"     # 计量模式

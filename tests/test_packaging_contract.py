@@ -87,6 +87,83 @@ def test_gui_spec_excludes_engine():
         f"GUI spec 的 excludes 里没有 'depressionplex'，实际为 {excludes_list}"
 
 
+# ---------------------------------------------------------------------------
+# 守卫 7/8（DP-123 / DP-110）：冻结后的 GUI 自检是 M2 的验收门，门本身得是真的
+#
+# 起因是一次实测：run 34930864774 的第 13 步日志里明明打着
+#   自检不通过：皮肤缺失：D:\a\...\_internal\app\styles\dark.qss
+#   SELF-TEST FAILED pages=7 total_ms=23.82
+# 而这一步的 conclusion 是 **success**，整个工作流也 success，连着三次「构建成功」。
+# 根因：GUI exe 是 windowed 子系统（build_windows.spec 里 console=False），
+# pwsh 直接 `& $exe` **不会等它结束**，$LASTEXITCODE 恒为 0。
+# 「能启动」被当成通过，正是 desktop/main.py 自检 docstring 里点名要防的那种失败——
+# 结果防线自己被流水线的调用方式架空了。
+# ---------------------------------------------------------------------------
+
+_BUILD_WF = ROOT / ".github" / "workflows" / "build-windows.yml"
+
+
+def _wf_step(name: str) -> str:
+    """按 `- name: <name>` 切出这一步的原文（到下一个同级 `- name:` / `- uses:` 为止）。
+
+    故意不用 pyyaml：本仓测试只许标准库（沙箱里必须跑得起来），而要看的是
+    `run:` 里的 pwsh 原文，文本切片就够。
+    """
+    lines = _BUILD_WF.read_text(encoding="utf-8").splitlines()
+    heads = [i for i, ln in enumerate(lines)
+             if ln.startswith("      - name:") or ln.startswith("      - uses:")]
+    for idx, i in enumerate(heads):
+        if lines[i].strip() == f"- name: {name}":
+            end = heads[idx + 1] if idx + 1 < len(heads) else len(lines)
+            return "\n".join(lines[i:end])
+    raise AssertionError(f"build-windows.yml 里找不到步骤 {name!r}（守卫写法要更新）")
+
+
+def test_gui_selftest_step_gets_real_exit_code():
+    """守卫 7：GUI 冻结自检必须 -Wait -PassThru 取退出码，并断言皮肤真的加载了。
+
+    只断言「命令跑过」等于没有门（实测已经骗过三次）。这条守卫要的是三样东西：
+    真实退出码、`SELF-TEST OK` 这行真的出现、皮肤那行真的印了 `app/styles/dark.qss`。
+    退出码 0 只说「problems 是空的」，说不出皮肤加载了没有——rc 与内容都要查。
+    """
+    step = _wf_step("Smoke test - GUI exe (offscreen)")
+
+    # 1. 不许出现「裸调 exe」那一行（就是被骗那次的写法）
+    for line in step.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("packaging\\dist") and stripped.endswith("--self-test"):
+            raise AssertionError(
+                "GUI 自检还是裸调 exe：windowed 子系统下 pwsh 不等它结束，"
+                "退出码恒为 0（run 34930864774 实测）。要用 Start-Process -Wait -PassThru"
+            )
+
+    # 2. 必须显式指定 pwsh（默认 shell 变了这条门的行为就变了）
+    assert "shell: pwsh" in step, "GUI 自检那一步没写 shell: pwsh"
+
+    # 3. 必须真的等 + 真的取退出码 + 非 0 要炸
+    for token in ("Start-Process", "-Wait", "-PassThru", "ExitCode", "throw"):
+        assert token in step, f"GUI 自检那一步缺 {token!r}——拿不到真实退出码或者拿到了不炸"
+
+    # 4. 必须断言自检自己打出来的事实，而不只是退出码
+    assert "SELF-TEST OK" in step, "GUI 自检没断言 stdout 里有 'SELF-TEST OK'"
+    assert "app/styles/dark.qss" in step, (
+        "GUI 自检没断言皮肤那一行——冻结后 datas 目标目录写错时 rc 也可能是 0"
+    )
+
+
+def test_build_workflow_fetches_bundled_font():
+    """守卫 8：构建流水线必须先拉随包中文字体，否则 GUI spec 的 datas 引不到文件。
+
+    字体 8.3 MB，不进 git（`.gitignore` 里的 `vendor/`），所以「仓库里有」不等于
+    「构建机上有」。这条守卫和 `test_bundled_font_in_installer_spec` 是一件事的两头：
+    一头保证 spec 引它，一头保证构建时它在。
+    """
+    wf = _BUILD_WF.read_text(encoding="utf-8")
+    assert "packaging/fetch_font.py" in wf, (
+        "build-windows.yml 里没有拉随包字体的步骤，PyInstaller 会在 datas 源文件缺失上失败"
+    )
+
+
 def test_backend_spec_excludes_pyside6():
     """守卫 3：后端 spec 必须 excludes 掉 PySide6。"""
     spec_path = ROOT / "packaging" / "build_analyzer_windows.spec"
@@ -510,7 +587,7 @@ def test_cli_encoding_reconfigure_single_source():
     **单一来源原则**：
     1. 每个 CLI main() 的第一条可执行语句必须是 _stdio.force_utf8() 调用
     2. depressionplex/ 和 packaging/ 里除 _stdio.py 外不许出现 .reconfigure(
-    3. packaging/fetch_ffmpeg.py 必须用内联的防御式 reconfigure（它 import 不到 depressionplex）
+    3. packaging/ 下的下载脚本必须用内联的防御式 reconfigure（它们 import 不到 depressionplex）
     4. 外壳（desktop/main.py）的 TextIOWrapper 是唯一例外（errors="replace" 是刻意的，
        自检宁可打出乱码页名也不许崩；而引擎要的是真报错。外壳不许 import 引擎，所以
        两边不可能共用代码）
@@ -572,11 +649,13 @@ def test_cli_encoding_reconfigure_single_source():
                 )
 
     # 2. 检查 depressionplex/ 和 packaging/ 里除白名单外不许出现 .reconfigure(
-    # 白名单：depressionplex/cli/_stdio.py（定义处）、packaging/fetch_ffmpeg.py（import 不到时内联）
-    whitelist = {
-        ROOT / "depressionplex" / "cli" / "_stdio.py",
+    # 白名单：depressionplex/cli/_stdio.py（定义处）+ packaging/ 下的下载脚本（import 不到时内联）。
+    # 白名单每多一个文件，下面第 3 步就多验一份它真的用了防御式写法——加进来是要付代价的。
+    inline_scripts = [
         ROOT / "packaging" / "fetch_ffmpeg.py",
-    }
+        ROOT / "packaging" / "fetch_font.py",
+    ]
+    whitelist = {ROOT / "depressionplex" / "cli" / "_stdio.py", *inline_scripts}
 
     for base_dir in [ROOT / "depressionplex", ROOT / "packaging"]:
         for py_file in base_dir.rglob("*.py"):
@@ -590,16 +669,19 @@ def test_cli_encoding_reconfigure_single_source():
                     f"全仓只许 _stdio.py 和 fetch_ffmpeg.py（内联）使用"
                 )
 
-    # 3. 检查 packaging/fetch_ffmpeg.py 里必须有防御式 reconfigure
-    fetch_ffmpeg_path = ROOT / "packaging" / "fetch_ffmpeg.py"
-    fetch_src = fetch_ffmpeg_path.read_text(encoding="utf-8")
-    # 必须包含 getattr(stream, "reconfigure", None) 的防御式调用
-    if 'getattr(stream, "reconfigure", None)' not in fetch_src and \
-       "getattr(stream, 'reconfigure', None)" not in fetch_src:
-        violations.append(
-            "packaging/fetch_ffmpeg.py::main() 缺少防御式 reconfigure "
-            "（它 import 不到 depressionplex，必须内联）"
-        )
+    # 3. 白名单里的每个下载脚本都必须有防御式 reconfigure（而不是裸调）
+    for script in inline_scripts:
+        if not script.is_file():
+            violations.append(f"{script.relative_to(ROOT)} 不存在（守卫的白名单要更新）")
+            continue
+        fetch_src = script.read_text(encoding="utf-8")
+        # 必须包含 getattr(stream, "reconfigure", None) 的防御式调用
+        if 'getattr(stream, "reconfigure", None)' not in fetch_src and \
+           "getattr(stream, 'reconfigure', None)" not in fetch_src:
+            violations.append(
+                f"{script.relative_to(ROOT)}::main() 缺少防御式 reconfigure "
+                "（它 import 不到 depressionplex，必须内联）"
+            )
 
     assert not violations, (
         "Windows 编码归一化违反单一来源原则：\n" + "\n".join(violations)
