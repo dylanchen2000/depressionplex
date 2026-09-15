@@ -8,6 +8,8 @@
 - 不自己算科学量（含 px 换算），所有数字从 AcqCheckResult 读
 - 门槛字面量不许出现在本文件（用 result.xxx_threshold 属性）
 - 参考值只从 JSON 里读（不许写死），参考列表头 = 「参考素材（2026-08-24 实测）」
+- 不自己拼 argv（`engine.acq_check_argv`）、不自己判退出码（`result_from_process`）：
+  本文件在沙箱里跑不起来，写进来的判断没有守卫看着（DP-120）
 """
 
 from __future__ import annotations
@@ -15,11 +17,16 @@ from __future__ import annotations
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QFileDialog, QTableWidget, QTableWidgetItem,
-    QGroupBox, QScrollArea, QFrame,
+    QGroupBox, QScrollArea, QFrame, QSpinBox,
 )
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QProcess
 
-from desktop.app.models.self_test import AcqCheckResult, AcqCheckError, conclusion_lines
+from desktop.app.models.self_test import (
+    AcqCheckResult, AcqCheckError, conclusion_lines,
+    result_from_process, engine_error_text,
+)
+from desktop.app.services import engine
+from desktop.app.services import progress as prog
 
 
 class AcqCheckPage(QWidget):
@@ -28,6 +35,15 @@ class AcqCheckPage(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._result: AcqCheckResult | None = None
+
+        # 自检子进程（DP-120）。页面只搬运：argv 在 services/engine.py 里拼、
+        # 退出码在 models/self_test.py 里判、进度行在 services/progress.py 里变人话。
+        self._process: QProcess | None = None
+        self._pump: prog.StderrPump | None = None
+        self._stdout_chunks: list[bytes] = []
+        self._stderr_chunks: list[bytes] = []
+        self._cancel_requested = False
+        self._kill_timer_id: int | None = None
 
         root_layout = QVBoxLayout(self)
         root_layout.setContentsMargins(16, 16, 16, 16)
@@ -50,8 +66,29 @@ class AcqCheckPage(QWidget):
         self._run_btn = QPushButton("选择视频并自检…")
         self._run_btn.clicked.connect(self._on_run)
         ctrl.addWidget(self._run_btn)
+
+        self._cancel_btn = QPushButton("取消")
+        self._cancel_btn.setEnabled(False)
+        self._cancel_btn.clicked.connect(self._on_cancel)
+        ctrl.addWidget(self._cancel_btn)
+
+        # 隔间数是自检子命令的必填参数。范围与新建实验向导同一份（1–100，默认 4），
+        # 这不是门槛、是输入范围——门槛一律从 result 的属性读。
+        ctrl.addWidget(QLabel("隔间数："))
+        self._chambers_spin = QSpinBox()
+        self._chambers_spin.setMinimum(1)
+        self._chambers_spin.setMaximum(100)
+        self._chambers_spin.setValue(4)
+        ctrl.addWidget(self._chambers_spin)
+
         ctrl.addStretch()
         root_layout.addLayout(ctrl)
+
+        # 状态行：进度、取消、报错都摆这儿；「人话结论」摆下面的 conclusion_label
+        self._status_label = QLabel("")
+        self._status_label.setWordWrap(True)
+        self._status_label.setObjectName("acqCheckStatus")
+        root_layout.addWidget(self._status_label)
 
         # ── 门判定表（三行门 + 参考列）────────────────────────────────────────
         gate_group = QGroupBox("门判定")
@@ -89,15 +126,164 @@ class AcqCheckPage(QWidget):
     # ── 事件处理 ──────────────────────────────────────────────────────────────
 
     def _on_run(self) -> None:
-        """选择视频、弹出自检进度（占位，实际运行由 QueuePage 机制在 B10+ 完善）。"""
-        # TODO B10+：用 engine.acq_check_argv 起子进程，用进度 NDJSON 更新 UI。
-        # 此处占位，仅演示 UI 路径。
+        """选视频 → 起自检子进程（DP-120）。
+
+        页面在这里只做三件事：拿路径、把 argv 交给 engine 拼、起进程。
+        判断一件都不在这儿——沙箱里没有 PySide6，本文件在本地只被 AST 解析，
+        判断写进来就等于没有守卫看着它。
+        """
+        if self._process is not None:
+            return  # 已经有一次自检在跑
         path, _ = QFileDialog.getOpenFileName(
             self, "选择视频文件", "", "视频文件 (*.mp4 *.avi *.mov *.mkv)"
         )
         if not path:
             return
-        self._conclusion_label.setText(f"已选择：{path}\n（自检进程集成待 B10 完成）")
+
+        try:
+            argv = engine.acq_check_argv(path, self._chambers_spin.value())
+        except (ValueError, FileNotFoundError) as exc:
+            self._status_label.setText(f"起不了自检：{exc}")
+            return
+
+        # 上一次的读数先清掉：报错旁边留着上一段素材的数字，
+        # 是最容易被当成本次结果的东西。
+        self._clear_readings()
+
+        self._pump = prog.StderrPump()
+        self._stdout_chunks = []
+        self._stderr_chunks = []
+        self._cancel_requested = False
+
+        proc = QProcess(self)
+        self._process = proc
+        proc.readyReadStandardOutput.connect(self._on_stdout_ready)
+        proc.readyReadStandardError.connect(self._on_stderr_ready)
+        proc.finished.connect(self._on_process_finished)
+        proc.errorOccurred.connect(self._on_process_error)
+
+        cwd = engine.get_cwd()
+        if cwd is not None:
+            proc.setWorkingDirectory(str(cwd))
+
+        self._set_running(True)
+        self._status_label.setText(f"正在自检：{path}")
+        proc.start(argv[0], argv[1:])
+
+    # ── 子进程事件 ────────────────────────────────────────────────────────────
+
+    def _on_stdout_ready(self) -> None:
+        """stdout 是唯一的数字出口（一整份 JSON）：只攒着，结束时交给模型层解。"""
+        if self._process is None:
+            return
+        self._stdout_chunks.append(bytes(self._process.readAllStandardOutput().data()))
+
+    def _on_stderr_ready(self) -> None:
+        """stderr 是进度与报错：喂进 StderrPump，人话摆到状态行。
+
+        原始字节一并留着——结束时要把引擎自己那句报错原文带给用户。
+        """
+        if self._process is None or self._pump is None:
+            return
+        chunk = bytes(self._process.readAllStandardError().data())
+        if not chunk:
+            return
+        self._stderr_chunks.append(chunk)
+        for event in self._pump.feed(chunk):
+            if isinstance(event, prog.LogLine):
+                self._status_label.setText(prog.status_text(event))
+            elif isinstance(event, prog.ProgressEvent):
+                pct = prog.percent(event.frame, event.n)
+                self._status_label.setText(
+                    f"解码中 第 {event.frame} 帧" if pct is None
+                    else f"解码中 {pct:.0f}%"
+                )
+
+    def _on_process_error(self, error) -> None:
+        """进程级错误。**只有 FailedToStart 要在这里收摊**——那种情形 finished 不会来，
+        不自己收就会留下一个永远转不完、按钮永远灰着的页面。
+        """
+        if error == QProcess.ProcessError.FailedToStart:
+            self._status_label.setText(
+                "自检进程起不来（找到了引擎，但没能把它跑起来）。"
+                "请把这句话连同安装目录一起报给我们。"
+            )
+            self._teardown()
+
+    def _on_process_finished(self, exit_code: int, exit_status) -> None:
+        """子进程结束：读干管子 → 交模型层判 → 摆结果或摆人话。"""
+        if self._process is None:
+            return
+        # finished 之后管子里可能还剩没读的，先读干
+        self._stdout_chunks.append(bytes(self._process.readAllStandardOutput().data()))
+        self._on_stderr_ready()
+
+        stdout = b"".join(self._stdout_chunks).decode("utf-8", errors="replace")
+        stderr = b"".join(self._stderr_chunks).decode("utf-8", errors="replace")
+        cancelled = self._cancel_requested
+        crashed = exit_status == QProcess.ExitStatus.CrashExit
+        self._teardown()
+
+        if cancelled:
+            self._status_label.setText("已取消。这一次没有读数——取消不产出任何数字。")
+            return
+
+        if crashed:
+            self._status_label.setText(
+                "自检进程异常退出（不是它自己 return 的）。"
+                f"引擎最后一句：{engine_error_text(stderr)}"
+            )
+            return
+
+        try:
+            result = result_from_process(exit_code, stdout, stderr)
+        except AcqCheckError as exc:
+            self._status_label.setText(f"这一段没测出结果：{exc}")
+            return
+
+        self._status_label.setText("自检完成")
+        self.load_result(result)
+
+    def _on_cancel(self) -> None:
+        """取消 = 杀进程（与 QueuePage 同一条路子：先 terminate，3 秒后 kill）。"""
+        if self._process is None:
+            return
+        self._cancel_requested = True
+        self._status_label.setText("正在取消…")
+        self._process.terminate()
+        self._kill_timer_id = self.startTimer(3000)
+
+    def timerEvent(self, event) -> None:
+        """terminate 超时后 kill（照 QueuePage）。"""
+        if self._kill_timer_id is not None and event.timerId() == self._kill_timer_id:
+            if self._process is not None:
+                self._process.kill()
+            self.killTimer(self._kill_timer_id)
+            self._kill_timer_id = None
+
+    # ── 运行状态 ──────────────────────────────────────────────────────────────
+
+    def _set_running(self, running: bool) -> None:
+        self._run_btn.setEnabled(not running)
+        self._chambers_spin.setEnabled(not running)
+        self._cancel_btn.setEnabled(running)
+
+    def _teardown(self) -> None:
+        if self._kill_timer_id is not None:
+            self.killTimer(self._kill_timer_id)
+            self._kill_timer_id = None
+        self._process = None
+        self._pump = None
+        self._set_running(False)
+
+    def _clear_readings(self) -> None:
+        """清掉上一次的读数（三行门的读数列、诊断表、结论）。"""
+        self._result = None
+        for row in range(self._gate_table.rowCount()):
+            for col in range(1, self._gate_table.columnCount()):
+                self._gate_table.setItem(row, col, QTableWidgetItem(""))
+        self._diag_table.setRowCount(0)
+        self._conclusion_label.setText("")
 
     def load_result(self, result: AcqCheckResult) -> None:
         """加载一次自检结果并刷新页面。

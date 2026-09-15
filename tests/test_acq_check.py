@@ -105,9 +105,17 @@ def _patch_video(frames: list[np.ndarray], n_frames: int | None = None):
     return _ctx()
 
 
-def _run_main(frames: list[np.ndarray], extra_argv: list[str] | None = None,
-              n_frames: int | None = None) -> tuple[int, str]:
-    """跑一次 acq_check.main，返回 (rc, stdout_text)。stderr 被丢弃（进度 NDJSON）。"""
+def _run_main_streams(frames: list[np.ndarray], extra_argv: list[str] | None = None,
+                     n_frames: int | None = None,
+                     probe_exc: BaseException | None = None) -> tuple[int, str, str]:
+    """跑一次 acq_check.main，返回 (rc, stdout, stderr)。
+
+    stderr 也留着：DP-120 之后外壳要拿它取引擎自己那句报错原文，
+    「引擎说了什么」本身就是被守卫盯的东西。
+
+    probe_exc 不为 None 时把 `video.probe` 换成抛这个异常的版本——
+    那是引擎 rc=1（解码失败）唯一的真实入口，不许拿手写 stderr 冒充。
+    """
     from depressionplex.cli import acq_check
 
     argv = ["--video", "/synth.mp4", "--chambers", str(N_CH)]
@@ -116,18 +124,32 @@ def _run_main(frames: list[np.ndarray], extra_argv: list[str] | None = None,
 
     old_stdout = sys.stdout
     old_stderr = sys.stderr
-    buf = io.StringIO()
-    sys.stdout = buf
-    sys.stderr = io.StringIO()  # 丢弃进度输出
+    out_buf = io.StringIO()
+    err_buf = io.StringIO()
+    sys.stdout = out_buf
+    sys.stderr = err_buf
     try:
         with _patch_video(frames, n_frames):
+            if probe_exc is not None:
+                from depressionplex import video as V
+
+                def _raise(path):
+                    raise probe_exc
+
+                V.probe = _raise      # _patch_video 的 finally 会还原
             rc = acq_check.main(argv)
-        output = buf.getvalue()
     finally:
         sys.stdout = old_stdout
         sys.stderr = old_stderr
 
-    return rc, output
+    return rc, out_buf.getvalue(), err_buf.getvalue()
+
+
+def _run_main(frames: list[np.ndarray], extra_argv: list[str] | None = None,
+              n_frames: int | None = None) -> tuple[int, str]:
+    """跑一次 acq_check.main，返回 (rc, stdout_text)。stderr 丢弃（老调用方用这个）。"""
+    rc, out, _err = _run_main_streams(frames, extra_argv, n_frames)
+    return rc, out
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1112,3 +1134,259 @@ def test_no_orphan_placeholder_pages() -> None:
         + "\n".join(f"  {name}" for name in orphans)
         + "\n七页名册只许有一份，占位类是名册外的第二个答案。"
     )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 守卫 12–18（DP-120）：自检页接真子进程
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def test_acq_check_argv_lives_in_engine_py() -> None:
+    """argv 必须在 services/engine.py 里拼，页面里不许出现子命令字面量。
+
+    为什么这条要在：`test_packaging_contract.py::test_cli_subcommand_registry` 第 3 段
+    只扫 engine.py 里 `argv.append("<子命令>")` 这一种形状。同一条 argv 写在页面里
+    照样跑得动，但子命令名拼错、或名册里那一行被删掉时，**不会有任何东西红**。
+
+    变异：把 engine.py 的 `argv.append("acq-check")` 改成 `argv.extend([...])`
+    或把整条 argv 搬进页面 ⇒ 本条红。
+    """
+    eng = ROOT / "desktop" / "app" / "services" / "engine.py"
+    tree = ast.parse(eng.read_text(encoding="utf-8"), filename=str(eng))
+    appended: set[str] = set()
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Expr) and isinstance(node.value, ast.Call)
+                and isinstance(node.value.func, ast.Attribute)
+                and node.value.func.attr == "append"
+                and isinstance(node.value.func.value, ast.Name)
+                and node.value.func.value.id == "argv"
+                and node.value.args
+                and isinstance(node.value.args[0], ast.Constant)):
+            val = node.value.args[0].value
+            if isinstance(val, str):
+                appended.add(val)
+    assert "acq-check" in appended, (
+        "engine.py 里找不到 `argv.append(\"acq-check\")` 这一种形状。"
+        f"当前扫到的是 {sorted(appended)}。"
+        "子命令名册的对账守卫只认这个形状，换成 extend 就等于把它绕开了"
+    )
+
+    page = ROOT / "desktop" / "app" / "pages" / "self_test.py"
+    page_src = page.read_text(encoding="utf-8")
+    assert "acq-check" not in page_src, (
+        "页面里出现了子命令字面量 'acq-check' —— argv 只许在 engine.py 拼"
+    )
+    assert "acq_check_argv" in page_src, "页面没在用 engine.acq_check_argv"
+    assert "result_from_process" in page_src, "页面没在用 result_from_process 判退出码"
+    assert "QProcess(" in page_src, (
+        "页面没有真的起子进程（DP-120 之前这里是 `# TODO B10+` 占位）"
+    )
+    assert "exit_code ==" not in page_src and "exit_code in (" not in page_src, (
+        "页面自己在比退出码 —— 退出码怎么解读是判断，判断在模型层"
+    )
+
+
+def test_acq_check_argv_shape() -> None:
+    """argv 形状：引擎前缀 + acq-check + --video 绝对路径 + --chambers。
+
+    变异：把 `Path(text).resolve()` 改回 `text` ⇒ 相对路径那条断言红
+    （源码模式下子进程 cwd 是仓根，相对路径会被解到别处去，然后报「解码失败」）。
+    """
+    from desktop.app.services import engine as eng
+
+    prefix = eng.engine_command()
+    argv = eng.acq_check_argv("relative_name.mp4", 6)
+    assert argv[:len(prefix)] == prefix, f"引擎前缀不对：{argv[:len(prefix)]}"
+    assert argv.count("acq-check") == 1, f"子命令应出现一次：{argv}"
+    assert argv[len(prefix)] == "acq-check", "子命令必须紧跟在引擎前缀后面"
+
+    i = argv.index("--video")
+    assert argv[i + 1] == str(Path("relative_name.mp4").resolve()), (
+        f"--video 必须是绝对路径，得到 {argv[i + 1]!r}"
+    )
+    j = argv.index("--chambers")
+    assert argv[j + 1] == "6", f"--chambers 应为 '6'，得到 {argv[j + 1]!r}"
+
+    for bad in ("", "   "):
+        try:
+            eng.acq_check_argv(bad, 4)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"空路径 {bad!r} 应当抛 ValueError")
+
+    for bad_n in (0, -1, True, "4", 2.0):
+        try:
+            eng.acq_check_argv("/x/y.mp4", bad_n)  # type: ignore[arg-type]
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"隔间数 {bad_n!r} 应当抛 ValueError")
+
+
+def test_exit_codes_mirror_engine() -> None:
+    """外壳那份退出码常量必须与引擎真跑出来的 rc 一致（镜像 + 对账）。
+
+    外壳不许 import 引擎（架构 §3.4），所以常量必然是第二份；
+    第二份唯一能不撒谎的办法就是拿真 rc 来对。
+    变异：把 EXIT_NOT_MEASURABLE 改成 3 ⇒ 本条红。
+    """
+    from desktop.app.models import self_test as M
+
+    kinds = (STILL, STILL, STILL, STILL)
+    rc_ok, _out, _err = _run_main_streams(_make_frames(kinds, 80))
+    assert rc_ok == M.EXIT_MEASURED, f"正常一跑 rc={rc_ok}，镜像里写的是 {M.EXIT_MEASURED}"
+
+    rc_nm, _out, _err = _run_main_streams(_make_frames(kinds, 10), n_frames=10)
+    assert rc_nm == M.EXIT_NOT_MEASURABLE, (
+        f"帧数不足 rc={rc_nm}，镜像里写的是 {M.EXIT_NOT_MEASURABLE}"
+    )
+
+    rc_dec, _out, _err = _run_main_streams(
+        _make_frames(kinds, 80), probe_exc=RuntimeError("摄像头没插上")
+    )
+    assert rc_dec == M.EXIT_DECODE_FAILED, (
+        f"解码失败 rc={rc_dec}，镜像里写的是 {M.EXIT_DECODE_FAILED}"
+    )
+
+
+def test_rc2_is_a_result_not_a_failure() -> None:
+    """退出码 2（测不出）必须变成一份结果，不是一次失败。
+
+    rc=2 带着完整 JSON：读数是 null、判定是「无法测量」。把非零码一律当
+    「自检程序崩了」，等于把「你这段素材测不出来」这条结论吃掉。
+    变异：让 result_from_process 只认 rc=0 ⇒ 本条红。
+    """
+    from desktop.app.models.self_test import result_from_process
+
+    kinds = (STILL, STILL, STILL, STILL)
+    rc, out, err = _run_main_streams(_make_frames(kinds, 10), n_frames=10)
+    assert rc == 2, f"这一跑本该 rc=2，得到 {rc}"
+
+    result = result_from_process(rc, out, err)          # 不许抛
+    assert result.contrast_value is None, "测不出的读数必须是 None，不是 0"
+    assert result.area_jitter_passed is None, "测不出时判定必须是 None（无法测量）"
+    assert result.chambers == [], "测不出时不该有逐隔间读数"
+
+
+def test_rc0_gate_fail_is_a_result_not_a_failure() -> None:
+    """门不通过（rc=0）同样是一份结果，且 contrast_passed 必须是 False。
+
+    变异：把 result_from_process 改成「JSON 里有 passed=False 就抛」⇒ 本条红。
+    """
+    from depressionplex.assay_core import segment as S
+    from desktop.app.models.self_test import result_from_process
+
+    _LOW = {
+        "threshold": 150.0, "background_mean": 200.0, "animal_mean": 160.0,
+        "abs_diff": 40.0, "ratio": 1.25, "dark_from_mask": 1.0, "passes_gate": 0.0,
+    }
+    orig_contrast = S.contrast_report
+    orig_chambers = S.find_chambers
+    S.contrast_report = lambda g: _LOW.copy()
+    S.find_chambers = lambda g, **kw: [(0, 94)]
+    try:
+        rc, out, err = _run_main_streams(_make_frames((STILL,) * 4, 80))
+    finally:
+        S.contrast_report = orig_contrast
+        S.find_chambers = orig_chambers
+
+    assert rc == 0, f"门不通过时 rc 应为 0，得到 {rc}"
+    result = result_from_process(rc, out, err)          # 不许抛
+    assert result.contrast_passed is False, "门不通过要显示为不通过"
+
+
+def test_rc1_carries_engine_own_words() -> None:
+    """解码失败（rc=1）要抛出人话，且**带着引擎自己那句原文**。
+
+    只说一句「自检失败」的报错，等于让人拿着一句废话去查一个解码问题。
+    变异：把报错改成不含 engine_error_text ⇒ 本条红。
+    """
+    from desktop.app.models.self_test import AcqCheckError, result_from_process
+
+    rc, out, err = _run_main_streams(
+        _make_frames((STILL,) * 4, 80), probe_exc=RuntimeError("摄像头没插上")
+    )
+    assert rc == 1, f"probe 抛异常时 rc 应为 1，得到 {rc}"
+    assert "摄像头没插上" in err, f"引擎没把原因写进 stderr：{err[:200]!r}"
+
+    try:
+        result_from_process(rc, out, err)
+    except AcqCheckError as exc:
+        msg = str(exc)
+    else:
+        raise AssertionError("rc=1 必须抛 AcqCheckError")
+
+    assert "视频解码失败" in msg, f"报错没说清是解码失败：{msg}"
+    assert "摄像头没插上" in msg, f"报错没带上引擎原话：{msg}"
+
+
+def test_from_json_str_raises_acq_check_error_only() -> None:
+    """读不懂的输入一律 AcqCheckError —— 不许把 json.JSONDecodeError 漏给外壳。
+
+    自检页只 except AcqCheckError；漏一个 JSONDecodeError 出去，
+    客户看到的就是崩溃而不是一句「引擎这次没给出 JSON」。
+    变异：把 from_json_str 里的 try/except 去掉 ⇒ 本条红。
+    """
+    from desktop.app.models.self_test import AcqCheckError, AcqCheckResult
+
+    for bad in ("", "这不是 JSON", "[1, 2, 3]", "null"):
+        try:
+            AcqCheckResult.from_json_str(bad)
+        except AcqCheckError:
+            pass
+        except Exception as exc:  # noqa: BLE001 —— 就是要抓住漏出去的那一类
+            raise AssertionError(
+                f"{bad!r} 抛的是 {type(exc).__name__}，不是 AcqCheckError：{exc}"
+            ) from exc
+        else:
+            raise AssertionError(f"{bad!r} 应当抛 AcqCheckError")
+
+
+def test_garbage_stdout_and_unknown_rc_are_not_swallowed() -> None:
+    """stdout 不是 JSON、或退出码不在约定内：都要抛，且把证据带上。
+
+    变异：任一分支改成 `return AcqCheckResult({})` 或只抛一句「失败」⇒ 本条红。
+    """
+    from desktop.app.models.self_test import AcqCheckError, result_from_process
+
+    try:
+        result_from_process(0, "这不是 JSON，是引擎崩溃时打的一行字", "")
+    except AcqCheckError as exc:
+        msg = str(exc)
+        assert "这不是 JSON" in msg, f"报错没把 stdout 片段带上：{msg}"
+    else:
+        raise AssertionError("stdout 不是 JSON 时必须抛")
+
+    try:
+        result_from_process(7, "", '{"status": "算着呢"}')
+    except AcqCheckError as exc:
+        msg = str(exc)
+        assert "7" in msg, f"报错没说清是哪个退出码：{msg}"
+    else:
+        raise AssertionError("未约定的退出码必须抛")
+
+
+def test_status_text_unwraps_engine_progress_lines() -> None:
+    """引擎的进度行是 `{"status": ...}`，摆到界面上之前必须解成人话。
+
+    真跑一次拿真 stderr，走 StderrPump，再走 status_text —— 不许拿手写的行当夹具。
+    变异：让 status_text 原样返回 ⇒ 本条红。
+    """
+    from desktop.app.services import progress as prog
+
+    rc, _out, err = _run_main_streams(_make_frames((STILL,) * 4, 80))
+    assert rc == 0
+
+    pump = prog.StderrPump()
+    events = pump.feed(err.encode("utf-8"))
+    log_lines = [e for e in events if isinstance(e, prog.LogLine)]
+    assert log_lines, f"引擎一行 stderr 都没出：{err[:200]!r}"
+    assert any(e.text.strip().startswith("{") for e in log_lines), (
+        "引擎的进度行不再是 JSON 形状了——本条守卫要跟着重写"
+    )
+
+    texts = [prog.status_text(e) for e in log_lines]
+    assert all(not txt.startswith("{") for txt in texts), (
+        f"status_text 没把 JSON 解开，界面上会出现一行 JSON：{texts}"
+    )
+    assert "计算采集指标" in texts, f"引擎的进度原话没带出来：{texts}"

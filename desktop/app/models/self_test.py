@@ -162,8 +162,24 @@ class AcqCheckResult:
 
     @classmethod
     def from_json_str(cls, text: str) -> "AcqCheckResult":
-        """从 JSON 字符串加载（用于测试和进程间读取）。"""
-        return cls(json.loads(text))
+        """从 JSON 字符串加载（用于测试和进程间读取）。
+
+        读不懂一律抛 `AcqCheckError`：本类的调用方（自检页）只接这一种异常，
+        漏一个 `json.JSONDecodeError` 出去就会变成外壳的未捕获异常
+        —— 客户看到的是崩溃，而不是「引擎这次没给出 JSON」（DP-120）。
+        """
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError as exc:
+            raise AcqCheckError(
+                f"读不懂自检输出（不是合法 JSON）：{exc}"
+                f"（开头：{text[:120]!r}）"
+            ) from exc
+        if not isinstance(data, dict):
+            raise AcqCheckError(
+                f"自检输出的顶层必须是对象，读到 {type(data).__name__}"
+            )
+        return cls(data)
 
     @classmethod
     def from_json_file(cls, path: Path) -> "AcqCheckResult":
@@ -265,3 +281,71 @@ def _require_keys(d: dict, keys: tuple[str, ...], location: str) -> None:
             f"acq_check JSON 的 {location} 缺少键 {missing}。"
             "引擎产物，键缺失说明契约破裂（版本不匹配或 JSON 被改动）。"
         )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 自检子进程的退出码契约（DP-120）
+# ═══════════════════════════════════════════════════════════════════════════════
+
+#: 引擎 `acq-check` 的退出码。**这是镜像，不是真值** —— 真值在
+#: `depressionplex/cli/acq_check.py::main`；外壳不许 import 引擎（架构 §3.4），
+#: 所以这里必然是第二份。由 `tests/test_acq_check.py::test_exit_codes_mirror_engine`
+#: 拿真跑出来的 rc 对账：引擎改了这边不改，那条守卫就红。
+EXIT_MEASURED = 0        # 测到读数 —— 门通过或不通过**都是** 0
+EXIT_DECODE_FAILED = 1   # 解码失败，没有 JSON
+EXIT_NOT_MEASURABLE = 2  # 测不出（如帧数不足），**但 stdout 仍是一份完整 JSON**
+
+
+def engine_error_text(stderr: str) -> str:
+    """从 stderr 里取引擎自己那句报错原文。
+
+    引擎报错的形状是一行 `{"error": "视频解码失败：..."}`，夹在若干行
+    `{"status": ...}` 进度里。**原话必须带出来** —— 只说一句「自检失败」
+    的报错，等于让人拿着一句废话去查一个解码问题。
+    """
+    lines = [ln.strip() for ln in stderr.splitlines() if ln.strip()]
+    for ln in reversed(lines):
+        if not ln.startswith("{"):
+            continue
+        try:
+            obj = json.loads(ln)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(obj, dict) and isinstance(obj.get("error"), str):
+            return obj["error"]
+    if lines:
+        return lines[-1]
+    return "（引擎一行 stderr 都没输出）"
+
+
+def result_from_process(exit_code: int, stdout: str, stderr: str) -> AcqCheckResult:
+    """把自检子进程的 (退出码, stdout, stderr) 变成一个结果，或抛一句人话。
+
+    判断放模型层、摆放放页面层（共同约定 §6）。这里最要紧的一条：
+    **退出码 2 不是失败** —— 它带着一份完整 JSON，读数是 null、判定是「无法测量」，
+    那正是客户需要看到的东西。把非零码一律当成「自检程序崩了」，
+    等于把「你这段素材测不出来」这条结论吃掉（DP-120）。
+
+    Raises:
+        AcqCheckError: 解码失败、退出码不在约定内、或 stdout 不是能读的自检 JSON。
+            消息里一律带上引擎原话或 stdout 片段，不许只说「失败」。
+    """
+    if exit_code in (EXIT_MEASURED, EXIT_NOT_MEASURABLE):
+        try:
+            return AcqCheckResult.from_json_str(stdout)
+        except AcqCheckError as exc:
+            raise AcqCheckError(
+                f"自检进程退出码 {exit_code}，但 stdout 不是能读的自检 JSON：{exc}"
+                f"（stdout 开头：{stdout[:200]!r}）"
+            ) from exc
+
+    if exit_code == EXIT_DECODE_FAILED:
+        raise AcqCheckError(
+            f"视频解码失败（退出码 {exit_code}）。引擎原话：{engine_error_text(stderr)}"
+        )
+
+    raise AcqCheckError(
+        f"自检进程以未约定的退出码 {exit_code} 结束"
+        f"（约定只有 {EXIT_MEASURED} / {EXIT_DECODE_FAILED} / {EXIT_NOT_MEASURABLE}）。"
+        f"引擎最后一句：{engine_error_text(stderr)}"
+    )
