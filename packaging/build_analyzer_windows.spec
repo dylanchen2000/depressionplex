@@ -11,10 +11,14 @@
 
 block_cipher = None
 
-# 仓根
+# 仓根。必须用 SPECPATH（本 spec 所在目录 = packaging/）的 parent，
+# 不能用 Path(".").resolve()：workflow 的 cwd 就是 packaging/，那样 pathex
+# 会指到 packaging/ 自己，hiddenimport depressionplex.cli 全部 not found，
+# 冻结 exe `from depressionplex.cli import main` 失败，--help 直接 rc=1
+# （run 34920623069 实测）。
 import sys
 from pathlib import Path
-repo_root = Path(".").resolve()
+repo_root = Path(SPECPATH).resolve().parent
 
 a = Analysis(
     ["analyzer_entry.py"],
@@ -25,6 +29,7 @@ a = Analysis(
         "depressionplex",
         "depressionplex.assay_core",
         "depressionplex.cli",
+        "depressionplex.cli._stdio",
         "depressionplex.runner",
         "depressionplex.video",
     ],
