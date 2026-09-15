@@ -20,12 +20,14 @@ import json
 import sys
 import tempfile
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 
 # 可以 import 引擎（tests/ 不受进程边界约束）
 sys.path.insert(0, str(ROOT))
 from depressionplex.cli import analyze
+from depressionplex.video import TOOL_FFMPEG, TOOL_FFPROBE
 
 # 可以 import models（不含 PySide6）
 from desktop.app.models import results
@@ -446,7 +448,10 @@ def test_end_to_end_with_real_engine_output():
 
         # 写 run.json
         run_json_path = tmp / "synthetic_run.json"
-        run_data = analyze._build_run_json(info, plan, "TST", skipped, set(reports))
+        ffmpeg_path, ffmpeg_source, ffprobe_path, ffprobe_source = _decoder_identity(tmp)
+        run_data = analyze._build_run_json(info, plan, "TST", skipped, set(reports),
+                                           ffmpeg_path, ffmpeg_source,
+                                           ffprobe_path, ffprobe_source)
         with run_json_path.open("w", encoding="utf-8") as f:
             json.dump(run_data, f, indent=2)
 
@@ -487,6 +492,35 @@ def test_end_to_end_with_real_engine_output():
 # ========================================================================
 
 
+def _decoder_identity(tmp: Path) -> tuple[str, str, str, str]:
+    """按产品那条路取解码器身份，穿进 `_build_run_json`（DP-108 H10+A4）。
+
+    两个工具各解析一次（source 可以不同：只设了 DPX_FFMPEG、或随包漏了一个文件），
+    并且**走真的 `_resolve_ffmpeg_tool`**——在测试里手写 `"system"` 之类的字面量，
+    等于给 run.json 的 decoder 块编一个产品永远不会写出来的值，那个块就再也没人验了。
+
+    用 DPX_FFMPEG / DPX_FFPROBE 指到 tmp 下两个真实存在的空文件：这几条测试因此在
+    没装 ffmpeg 的机器上也能跑，走的还是解析器的 env 真分支（不是 patch 掉
+    `Path.exists`——本文件同一个 tmp 里还要真读真写 CSV 与 run.json，
+    全局 patch 掉 exists 会把「文件不在」这类失败一起盖住）。
+    空文件跑不起来，`_get_ffmpeg_version` 会按它自己的退化路径给 None 并往 stderr
+    说一句，这也是产品在现场会走的路。
+    """
+    from depressionplex import video as V
+
+    stub_ffmpeg = tmp / "stub_ffmpeg"
+    stub_ffprobe = tmp / "stub_ffprobe"
+    stub_ffmpeg.write_bytes(b"")
+    stub_ffprobe.write_bytes(b"")
+    with mock.patch.dict(
+        "os.environ",
+        {"DPX_FFMPEG": str(stub_ffmpeg), "DPX_FFPROBE": str(stub_ffprobe)},
+    ):
+        ffmpeg_path, ffmpeg_source = V._resolve_ffmpeg_tool(TOOL_FFMPEG)
+        ffprobe_path, ffprobe_source = V._resolve_ffmpeg_tool(TOOL_FFPROBE)
+    return ffmpeg_path, ffmpeg_source, ffprobe_path, ffprobe_source
+
+
 def _make_run_json(chambers: list[int], not_scored: list[dict] | None = None,
                    chamber_validity: list[dict] | None = None) -> dict:
     """创建一个合法的 run.json 对象（包含所有必写键）。"""
@@ -507,6 +541,21 @@ def _make_run_json(chambers: list[int], not_scored: list[dict] | None = None,
         "plan_warnings": [],
         "chamber_validity": chamber_validity or [],
         "not_scored": not_scored or [],
+        # decoder 块：引擎每次都写（DP-108 A4），所以它和上面几个键一样是必写的。
+        # 键名用 video 的常量，不在这里手抄字符串（抄了就是第二份工具名真值）。
+        "decoder": {
+            TOOL_FFMPEG: {
+                "path": "/usr/bin/ffmpeg",
+                "source": "system",
+                "version": "ffmpeg version 6.0",
+            },
+            TOOL_FFPROBE: {
+                "path": "/usr/bin/ffprobe",
+                "source": "system",
+                "version": "ffprobe version 6.0",
+            },
+            "mixed_source": False,
+        },
     }
 
 
@@ -699,7 +748,10 @@ def test_f4_trial_prefix_single_source():
 
         # 写 run.json
         run_json_path = tmp / "synthetic_run.json"
-        run_data = analyze._build_run_json(info, plan, "TST", skipped, set(reports))
+        ffmpeg_path, ffmpeg_source, ffprobe_path, ffprobe_source = _decoder_identity(tmp)
+        run_data = analyze._build_run_json(info, plan, "TST", skipped, set(reports),
+                                           ffmpeg_path, ffmpeg_source,
+                                           ffprobe_path, ffprobe_source)
         with run_json_path.open("w", encoding="utf-8") as f:
             json.dump(run_data, f, indent=2)
 
@@ -758,7 +810,10 @@ def test_f5_top_level_required_keys():
         )
 
         # 生成真实的 run.json
-        run_data = analyze._build_run_json(info, plan, "TST", skipped, set(reports))
+        ffmpeg_path, ffmpeg_source, ffprobe_path, ffprobe_source = _decoder_identity(tmp)
+        run_data = analyze._build_run_json(info, plan, "TST", skipped, set(reports),
+                                           ffmpeg_path, ffmpeg_source,
+                                           ffprobe_path, ffprobe_source)
 
         # 提取顶层键名（排除 schema_version，因为它有单独的检查）
         top_keys = [k for k in run_data.keys() if k != "schema_version"]
@@ -959,7 +1014,10 @@ def test_f8_denominators_回算():
 
         # 写 run.json
         run_json_path = tmp / "synthetic_run.json"
-        run_data = analyze._build_run_json(info, plan, "TST", skipped, set(reports))
+        ffmpeg_path, ffmpeg_source, ffprobe_path, ffprobe_source = _decoder_identity(tmp)
+        run_data = analyze._build_run_json(info, plan, "TST", skipped, set(reports),
+                                           ffmpeg_path, ffmpeg_source,
+                                           ffprobe_path, ffprobe_source)
         with run_json_path.open("w", encoding="utf-8") as f:
             json.dump(run_data, f, indent=2)
 
