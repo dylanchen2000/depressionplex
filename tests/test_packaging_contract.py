@@ -151,6 +151,69 @@ def test_gui_selftest_step_gets_real_exit_code():
     )
 
 
+def test_gui_spec_datas_dest_matches_resource_path():
+    """守卫 9：datas 里 desktop/ 下的资源，包内目标目录 = 它相对 desktop/ 的路径。
+
+    `resource_path(rel)` 的语义是「rel 相对 desktop/」，冻结后基准换成 `sys._MEIPASS`
+    （`desktop/app/utils/paths.py`）。dest 多写一层 `desktop/` 就让冻结后的查找差一级。
+
+    **这不是理论**：run 34930864774 第 13 步日志是
+    「自检不通过：皮肤缺失：…\\_internal\\app\\styles\\dark.qss」，
+    而文件被放在 `…\\_internal\\desktop\\app\\styles\\` 下；三次「构建成功」都带着
+    这个错，因为那一步当时吞了退出码（守卫 7）。paths.py 的 docstring 早写了这条规矩，
+    缺的是守卫——**文档里的承诺没有守卫就是假承诺**。
+
+    `vendor/` 下的资源不在此列：它们在源码树里本就不在 `desktop/` 下，
+    走 `paths.bundled_font_dir()`，由 `test_bundled_font_in_installer_spec` 单独对账。
+    """
+    import posixpath
+
+    spec_path = ROOT / "packaging" / "build_windows.spec"
+    tree = ast.parse(spec_path.read_text(encoding="utf-8"), filename=str(spec_path))
+
+    datas = None
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) \
+                and node.func.id == "Analysis":
+            for kw in node.keywords:
+                if kw.arg == "datas" and isinstance(kw.value, ast.List):
+                    datas = [
+                        (elt.elts[0].value, elt.elts[1].value)
+                        for elt in kw.value.elts
+                        if isinstance(elt, ast.Tuple) and len(elt.elts) == 2
+                        and all(isinstance(e, ast.Constant) for e in elt.elts)
+                    ]
+    assert datas, "build_windows.spec 里读不到 Analysis(datas=[...])"
+
+    prefix = "../desktop/"
+    checked = 0
+    for src, dest in datas:
+        if not src.startswith(prefix):
+            continue
+        checked += 1
+        expected = posixpath.dirname(src[len(prefix):])
+        assert dest == expected, (
+            f"datas 目标目录错配：源 {src!r} 的包内位置应当是 {expected!r}，实际 {dest!r}。"
+            f"resource_path() 以 desktop/ 为基准，冻结后差一级就是「皮肤缺失」返回 2"
+        )
+    assert checked >= 1, "datas 里一个 desktop/ 下的资源都没有——皮肤没被打进包？"
+
+    # 反向对账：main.py 真正去查的那个字面量，必须真的在 datas 里且位置对得上。
+    # 只查「形状对」不够，得查「查的那一份在」。
+    main_tree = ast.parse((ROOT / "desktop" / "main.py").read_text(encoding="utf-8"))
+    stylesheet = None
+    for node in main_tree.body:
+        if isinstance(node, ast.Assign) and any(
+                isinstance(t, ast.Name) and t.id == "STYLESHEET" for t in node.targets):
+            assert isinstance(node.value, ast.Constant), "STYLESHEET 不再是字面量，守卫要更新"
+            stylesheet = node.value.value
+    assert stylesheet, "desktop/main.py 里找不到 STYLESHEET"
+    want = (prefix + stylesheet, posixpath.dirname(stylesheet))
+    assert want in datas, (
+        f"main.py 查的皮肤 {stylesheet!r} 在 spec 的 datas 里对不上：期望 {want}，实际 {datas}"
+    )
+
+
 def test_build_workflow_fetches_bundled_font():
     """守卫 8：构建流水线必须先拉随包中文字体，否则 GUI spec 的 datas 引不到文件。
 

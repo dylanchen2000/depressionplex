@@ -128,6 +128,35 @@ def _make_run_json(chambers: list[int], not_scored=None, chamber_validity=None,
     }
 
 
+def _decoder_identity(tmp: Path) -> tuple[str, str, str, str]:
+    """按产品那条路取解码器身份，穿进 `_build_run_json`（DP-108 H10+A4）。
+
+    两个工具各解析一次（source 可以不同），并且**走真的 `_resolve_ffmpeg_tool`**：
+    在测试里手写 `"system"` 之类的字面量，等于给 run.json 的 decoder 块编一个产品
+    永远不会写出来的值，那个块就再也没人验了。
+
+    用 `DPX_FFMPEG` / `DPX_FFPROBE` 指到 tmp 下两个真实存在的空文件，走解析器的 env
+    真分支（不 patch `Path.exists`——同一个 tmp 里还要真读真写 CSV 与 run.json，
+    全局盖掉 exists 会把「文件不在」这类失败一起盖住）。空文件跑不起来，
+    `_get_ffmpeg_version` 会走它自己的退化路径给 None，这也是现场会走的路。
+    """
+    from unittest import mock
+
+    from depressionplex import video as V
+
+    stub_ffmpeg = tmp / "stub_ffmpeg"
+    stub_ffprobe = tmp / "stub_ffprobe"
+    stub_ffmpeg.write_bytes(b"")
+    stub_ffprobe.write_bytes(b"")
+    with mock.patch.dict(
+        "os.environ",
+        {"DPX_FFMPEG": str(stub_ffmpeg), "DPX_FFPROBE": str(stub_ffprobe)},
+    ):
+        ffmpeg_path, ffmpeg_source = V._resolve_ffmpeg_tool(TOOL_FFMPEG)
+        ffprobe_path, ffprobe_source = V._resolve_ffmpeg_tool(TOOL_FFPROBE)
+    return ffmpeg_path, ffmpeg_source, ffprobe_path, ffprobe_source
+
+
 def _make_exp(output_dir: Path, video_path: Path, trial_prefix: str | None = None) -> dict:
     return {
         "schema_version": "1",
@@ -1449,9 +1478,13 @@ def test_end_to_end_with_real_engine_output() -> None:
             for ch in sorted(reports):
                 w_csv.writerow(A._row(reports[ch]))
 
-        # 写 run.json：用引擎的 _build_run_json（与 test_results_model 一致）
+        # 写 run.json：用引擎的 _build_run_json（与 test_results_model 一致）。
+        # 解码器身份由调用方穿进来（DP-108 H10+A4），值取自真的 _resolve_ffmpeg_tool。
         run_json_path = tmp / "合成_run.json"
-        run_data = A._build_run_json(info, plan, "TST", skipped, set(reports))
+        ffmpeg_path, ffmpeg_source, ffprobe_path, ffprobe_source = _decoder_identity(tmp)
+        run_data = A._build_run_json(info, plan, "TST", skipped, set(reports),
+                                     ffmpeg_path, ffmpeg_source,
+                                     ffprobe_path, ffprobe_source)
         run_json_path.write_text(json.dumps(run_data, ensure_ascii=False), encoding="utf-8")
 
         exp = _make_exp(tmp, video_path)
@@ -1535,6 +1568,10 @@ def test_bad_context_fields_print_as_unknown() -> None:
             "plan_warnings": [],
             "chamber_validity": [],
             "not_scored": [],
+            # decoder 是必写键（DP-121：缺了要炸，不许 getattr 成「未知」蒙过去）。
+            # 这条测试的主题是**别的**字段类型错 ⇒ 印「未知」，所以这里给一个**好**块；
+            # 坏 decoder 块有自己的守卫 test_decoder_bad_block_prints_unknown_with_reason。
+            "decoder": _DECODER_BLOCK,
         }
         (tmp / "v_run.json").write_text(json.dumps(bad_run), encoding="utf-8")
         # 写一个正常 CSV（否则 load_results 会因为无 CSV 而全部 alarm）

@@ -169,12 +169,17 @@ jobs:
               app.quit()
               print('Export render smoke test PASSED')
           "
-      # 逼掉随包分支（指一个空目录），看两件事：系统兜底在不在，报错归因对不对。
-      # 实测（run 34932358712）：ubuntu offscreen 枚举到 36 个 family、15 个能渲「中」；
+      # 逼掉随包分支，看两件事：系统兜底在不在，报错归因对不对。分两个情形，
+      # 因为「文件不在位」和「文件在位但注册不上」是两种不同的原因，报错不许说成一件事：
+      #   情形 1 空目录        ⇒ 打包/部署漏了文件（跟这台机器装没装字体无关）
+      #   情形 2 坏字体文件在位 ⇒ 注册失败，此时才该谈平台插件/系统字体
+      # 第三种原因（这台机器真的缺中文字体）在两个 runner 上都造不出来，
+      # 由单测 test_font_failure_message_distinguishes_three_causes 覆盖（枚举 154 个那一支）。
+      # 实测（run 34932358712 / 34937121350）：ubuntu offscreen 枚举到 36 个 family、15 个能渲「中」；
       # windows offscreen 枚举到 **0** 个（同一台机器 msyh.ttc 在位、原生插件能枚举到 154 个）。
-      # 所以 ubuntu 必须靠系统字体成功，windows 必须失败**且说清是平台插件的事**。
+      # 所以 ubuntu 两个情形都必须靠系统字体成功，windows 两个都必须失败且各自说对原因。
       # 哪天 Qt 修了 offscreen 的字体枚举，这条会红在 windows 上——那是该红的，改这里之前先看数。
-      - name: Font attribution smoke (forced empty bundled dir)
+      - name: Font attribution smoke (forced bundled-font failures)
         env:
           SMOKE_RUNNER_OS: ${{ runner.os }}
         run: |
@@ -197,26 +202,42 @@ jobs:
           print(f'{runner_os}: 平台插件枚举到 {n} 个 family')
           expect_system_fallback = (runner_os == 'Linux')
 
-          with tempfile.TemporaryDirectory() as d:
-              empty = Path(d)   # 空目录 ⇒ 随包分支必然走不通
+          def probe(font_dir, case):
               try:
-                  fam = _select_font_with_qt(empty)
+                  fam = _select_font_with_qt(font_dir)
               except FontUnavailableError as e:
                   got = str(e)
-                  print('拒绝导出：' + got)
+                  print(case + ' 拒绝导出：' + got)
                   assert not expect_system_fallback, (
-                      f'{runner_os} 上装了中文字体（枚举 {n} 个）却没兜住：{got}')
+                      f'{case} {runner_os} 上装了中文字体（枚举 {n} 个）却没兜住：{got}')
+                  return got
+              print(case + ' 系统字体兜底选中: ' + fam)
+              assert expect_system_fallback, (
+                  f'{case} {runner_os} 上本该没有可用系统字体，却选中了 {fam}——先看数再改守卫')
+              return None
+
+          with tempfile.TemporaryDirectory() as d:
+              got = probe(Path(d), '[情形1 空目录]')
+              if got is not None:
+                  assert '不在位' in got, f'没归因到文件缺失：{got}'
+                  assert '不是这台机器缺字体' in got, f'把锅推给机器了：{got}'
+                  assert '平台插件' not in got, f'文件都不在位就别扯平台插件：{got}'
+                  print('归因文案 OK（打包/部署漏了文件）')
+
+          with tempfile.TemporaryDirectory() as d:
+              bad = Path(d) / BUNDLED_FONT_FILENAME
+              bad.write_bytes(b'not a font at all' * 16)
+              got = probe(Path(d), '[情形2 坏字体]')
+              if got is not None:
                   assert n == 0, (
                       f'{runner_os} 现在枚举到 {n} 个 family 了，offscreen 的字体库行为变了，'
                       f'先看数再改这条守卫')
+                  assert '注册失败' in got, f'没说清是注册失败：{got}'
                   assert '平台插件' in got, f'没归因到平台插件：{got}'
                   assert '不等于这台机器没有中文字体' in got, f'把锅推给机器了：{got}'
                   print('归因文案 OK（平台插件不给字体库，不是机器没字体）')
-              else:
-                  print('系统字体兜底选中: ' + fam)
-                  assert expect_system_fallback, (
-                      f'{runner_os} 上本该没有可用系统字体，却选中了 {fam}——先看数再改守卫')
-              app.quit()
+
+          app.quit()
           print('Font attribution smoke PASSED')
           "
 

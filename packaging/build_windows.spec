@@ -18,8 +18,13 @@ a = Analysis(
     binaries=[],
     datas=[
         # VI 深色皮肤（已于 2026-09-13 搬入本仓）
-        ("../desktop/app/styles/dark.qss", "desktop/app/styles"),
-        ("../desktop/app/styles/colors.py", "desktop/app/styles"),
+        # 目标目录**不带 desktop/ 前缀**：resource_path() 的相对基准就是 desktop/
+        # （冻结后换成 sys._MEIPASS），所以 desktop/app/styles/dark.qss 的包内位置
+        # 必须是 app/styles/。写成 "desktop/app/styles" 时冻结后查不到，
+        # 自检打「皮肤缺失」返回 2 —— run 34930864774 第 13 步实测就是这个日志，
+        # 只是那一步当时吞了退出码，连着三次假的「构建成功」。守卫 9 盯这条对账。
+        ("../desktop/app/styles/dark.qss", "app/styles"),
+        ("../desktop/app/styles/colors.py", "app/styles"),
         # 随包中文字体（DP-110）。offscreen 平台插件在 Windows 上枚举到 0 个系统字体
         # （实测 run 34932358712），随包 + addApplicationFont 是唯一普适的机制。
         # 目标目录名 fonts 必须与 export_pdf.BUNDLED_FONT_SUBDIR 一致。
