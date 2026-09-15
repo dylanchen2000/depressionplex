@@ -10,6 +10,7 @@ import sys
 from pathlib import Path
 
 from desktop.app.models.experiment import SCHEMA_KEYS, VIDEO_KEYS
+from desktop.app.utils.paths import is_frozen as _is_frozen
 
 #: 后端子目录与可执行文件名（架构 §3.4 裁决，不许再有第二份）。
 #: spec 里的 `name=` 必须与 ENGINE_STEM 相同（守卫 1 验证）。
@@ -75,6 +76,23 @@ def output_paths(exp: dict, video_index: int) -> dict[str, Path]:
     return {k: (out / tpl.format(stem=stem)).resolve() for k, tpl in OUTPUT_SUFFIXES.items()}
 
 
+def trial_prefix(exp: dict, video_index: int) -> str:
+    """CSV 里 trial_id 的前缀。与引擎 runner.py:340 同一条规则。
+
+    引擎规则：prefix = trial_prefix or Path(path).stem
+    前缀派生只许一份，测试会拿引擎真产出核对。
+    """
+    require_contract(exp)
+    if not 0 <= video_index < len(exp["videos"]):
+        raise ValueError(f"video_index {video_index} 越界（共 {len(exp['videos'])} 段）")
+
+    video = exp["videos"][video_index]
+    user_prefix = video.get("trial_prefix")
+    if user_prefix:
+        return user_prefix
+    return Path(video["path"]).stem
+
+
 def engine_command() -> list[str]:
     """引擎调用前缀。冻结与源码两种情形；环境变量优先（给测试与现场排障用）。
 
@@ -88,11 +106,9 @@ def engine_command() -> list[str]:
     if env_cmd:
         return shlex.split(env_cmd)
 
-    # 判断是否冻结（PyInstaller）
-    is_frozen = getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS")
-
-    if is_frozen:
-        # 冻结后：backend/depression-analyzer.exe（架构 §3.4 裁决）
+    if _is_frozen():
+        # 冻结后：backend/depression-analyzer.exe（架构 §3.4 裁决；
+        # 冻结判定只许问 utils/paths.is_frozen —— 台账 DP-112）
         main_exe = Path(sys.executable)
         engine_name = f"{ENGINE_STEM}.exe" if sys.platform == "win32" else ENGINE_STEM
         engine_path = main_exe.parent / ENGINE_SUBDIR / engine_name
@@ -122,8 +138,7 @@ def engine_command() -> list[str]:
 
 def get_cwd() -> Path | None:
     """返回引擎子进程的 cwd。源码模式下必须是仓根，冻结模式下返回 None（用默认）。"""
-    is_frozen = getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS")
-    if is_frozen:
+    if _is_frozen():
         return None
     else:
         return Path(__file__).resolve().parent.parent.parent.parent
