@@ -1071,3 +1071,44 @@ def test_gate_thresholds_match_issues_md() -> None:
         "改门槛是科学决定，必须同步更新 DP-117 行：\n"
         + "\n".join(missing)
     )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 守卫 20（B7 收口）：placeholders.py 里不许留已经被真页面顶掉的占位类
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def test_no_orphan_placeholder_pages() -> None:
+    """`pages/placeholders.py` 里定义的每个页面类，都必须出现在 `PAGE_CLASSES` 里。
+
+    防的是：一页从占位换成真实现（B7 的 `SelfCheckPage` → `AcqCheckPage`）之后，
+    空壳留在仓里没人 import。它不会让任何测试变红，但下一个人照侧栏名字找「自检页」
+    会先摸到那个只写着「本页由 B7 交付」的空壳，然后照它改——改完发现界面上没反应。
+    七页名册只许有一份（`PAGE_ORDER` / `PAGE_CLASSES`），占位类是名册外的第二个答案。
+
+    变异：把 `SelfCheckPage` 那个类加回 placeholders.py ⇒ 本条红。
+    """
+    ph = ROOT / "desktop" / "app" / "pages" / "placeholders.py"
+    mw = ROOT / "desktop" / "app" / "main_window.py"
+    ph_tree = ast.parse(ph.read_text(encoding="utf-8"), filename=str(ph))
+    defined = [n.name for n in ph_tree.body if isinstance(n, ast.ClassDef)]
+    assert defined, "placeholders.py 里一个类都没有——文件形状变了，这条守卫要重写"
+
+    mw_src = mw.read_text(encoding="utf-8")
+    mw_tree = ast.parse(mw_src, filename=str(mw))
+    registered: set[str] = set()
+    for node in ast.walk(mw_tree):
+        if isinstance(node, ast.Assign) and any(
+            isinstance(t, ast.Name) and t.id == "PAGE_CLASSES" for t in node.targets
+        ):
+            assert isinstance(node.value, ast.Dict), "PAGE_CLASSES 不是字面 dict 了"
+            registered = {
+                v.id for v in node.value.values if isinstance(v, ast.Name)
+            }
+    assert registered, "main_window.py 里找不到 PAGE_CLASSES 的字面 dict"
+
+    orphans = sorted(set(defined) - registered)
+    assert not orphans, (
+        "placeholders.py 里有没人用的占位页类（真页面上线后忘了删）：\n"
+        + "\n".join(f"  {name}" for name in orphans)
+        + "\n七页名册只许有一份，占位类是名册外的第二个答案。"
+    )

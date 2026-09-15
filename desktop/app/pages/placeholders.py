@@ -60,20 +60,3 @@ class ExportPage(QWidget):
 
         layout.addStretch()
 
-
-class SelfCheckPage(QWidget):
-    """Self-check page - to be implemented in B7."""
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        layout = QVBoxLayout(self)
-
-        title = QLabel("自检")
-        title.setObjectName("pageTitle")
-        layout.addWidget(title)
-
-        description = QLabel("本页由 B7 交付")
-        description.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(description)
-
-        layout.addStretch()
