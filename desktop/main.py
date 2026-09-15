@@ -91,10 +91,21 @@ def self_test() -> int:
     badge = window.mode_badge
     if badge.parent() is None:
         problems.append("mode_badge 没有被加进任何容器（不会显示）")
+    elif not window.statusBar().isAncestorOf(badge):
+        # **「有父容器」不等于「在状态栏上」**（B8 复核 R5）：把徽章挂进任意一页的
+        # layout，`parent()` 也不是 None，这条断言照样过，而「七页可见」当场就没了——
+        # 而七页可见正是本件通篇的主张。用 `isAncestorOf` 不用
+        # `badge.parent() is window.statusBar()`：前者是文档化的 API，
+        # Qt 在中间塞了容器也照样成立，同时仍然能把「状态栏」和「某一页」分开。
+        problems.append(
+            f"mode_badge 挂在 {type(badge.parent()).__name__} 里，不在状态栏上："
+            "那样只有它所在的那一页看得见")
     else:
         view = badge.view
         print(f"模式徽章：{view.text}（mode={window.calibration_status.mode.value}，"
               f"claims_metrology={view.claims_metrology}）")
+        if not view.text.strip():
+            problems.append("徽章挂上去了，但上面一个字都没有")
         for reason in window.calibration_status.reasons:
             print(f"  原因：{reason}")
         # 自检**不判断该是黄还是绿**（那取决于随包标定文件，两种都是合法发布态），

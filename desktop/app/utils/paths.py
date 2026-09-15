@@ -18,7 +18,11 @@ APP_NAME = "DEPRESSION-PLEX"
 ORG_DIR = "GeneI"          # 磁盘用名，见上文第 2 条
 APP_DIR_POSIX = "depression-plex"
 
-#: 随包标定文件的文件名。**只此一处**：启动自检、签发脚本、安装脚本都引这一个。
+#: 随包标定文件的文件名。**全仓只许这一处出现这个字面量**，由
+#: `tests/test_badge_view.py::test_calibration_filename_literal_in_exactly_one_file`
+#: 盯着。今天引它的只有启动自检（`main_window.py`）；签发脚本与安装脚本还不存在，
+#: 它们落地时也必须引这个常量而不是自己再写一遍——**文档里的承诺没有守卫就是假承诺**，
+#: 所以这句话配了守卫才敢写。
 CALIBRATION_FILENAME = "calibration.json"
 
 

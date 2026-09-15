@@ -12,15 +12,19 @@
 from __future__ import annotations
 
 import ast
+import shutil
+import sys
+import tempfile
 from pathlib import Path
 
 from desktop.app.models.badge import (
     NO_METROLOGY_LINE, BadgeView, build_badge_view,
 )
 from desktop.app.services.calibration import (
-    Badge, CalibrationStatus, Mode, evaluate_calibration,
+    Badge, CalibrationStatus, Mode, evaluate_calibration, file_sha256,
 )
-from desktop.app.utils.paths import bundled_calibration_path
+from desktop.app.utils import paths as paths_mod
+from desktop.app.utils.paths import bundled_calibration_path, is_frozen
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -326,6 +330,15 @@ def test_no_second_mode_decision_in_desktop():
     """`desktop/` 里只有判定层能拿模式做分支。
 
     第二处分支 = 第二个判定器（DP-102 那四个静默缺陷就是这么长出来的）。
+
+    **判据是「任何形状」，不是「比较表达式」**（B8 复核 R3）：第一版只看
+    `ast.Compare`，实测（M4）往页面里塞
+    `_CAN_REPORT = {Mode.VALIDATED: True}` + `_CAN_REPORT.get(status.mode, False)`
+    时 12 条守卫全绿——字典派发里没有 Compare 节点，而那段注入连一个中文字都没有，
+    所以「文案只许一处」那条也抓不到它。两条守卫的覆盖之间有缝，
+    第二个判定器正好从缝里长出来。改成扫所有 `Attribute` 之后，
+    `match status.mode: case Mode.VALIDATED:` 也一并盖住了（`MatchValue`
+    里面就是一个 `Attribute` 节点）——CI 是 3.11，那里 `match` 是合法语法。
     """
     allowed = Path("desktop/app/services/calibration.py")
     offenders = []
@@ -336,15 +349,13 @@ def test_no_second_mode_decision_in_desktop():
         tree = _parse(py)
         doc_ids = _docstring_ids(tree)
         for node in ast.walk(tree):
-            if isinstance(node, ast.Compare):
-                for side in [node.left, *node.comparators]:
-                    if isinstance(side, ast.Attribute) and side.attr in ("VALIDATED",
-                                                                        "RESEARCH"):
-                        offenders.append(f"{rel}:{node.lineno}")
-                    if isinstance(side, ast.Constant) and side.value in ("validated",
-                                                                         "research") \
-                            and id(side) not in doc_ids:
-                        offenders.append(f"{rel}:{node.lineno}")
+            if isinstance(node, ast.Attribute) and node.attr in ("VALIDATED",
+                                                                 "RESEARCH"):
+                offenders.append(f"{rel}:{node.lineno}")
+            if isinstance(node, ast.Constant) and node.value in ("validated",
+                                                                 "research") \
+                    and id(node) not in doc_ids:
+                offenders.append(f"{rel}:{node.lineno}")
     assert not offenders, \
         f"这些地方在判定层之外拿模式做了分支：{sorted(set(offenders))}"
 
@@ -374,3 +385,255 @@ def test_end_to_end_with_real_startup_path():
     assert "计量模式" not in view.text
     for reason in status.reasons:
         assert reason in view.tooltip
+
+
+# --------------------------------------------------------------------------
+# 守卫 9（B8 复核 R2）：三块徽章的文案逐字钉死
+# --------------------------------------------------------------------------
+
+#: badge → 徽章上必须**逐字**出现的那句话。
+#:
+#: 用**全等**不用「包含」：这三句是对客户的资质声明，改动它们必须是一次自觉的决定，
+#: 而不是顺手改文案时的副作用。想改词就得连这张表一起改，改的时候会看见这段说明。
+EXPECTED_BADGE_TEXT = {
+    Badge.YELLOW: "研究用途 · 未计量标定",
+    Badge.GREEN: "计量模式",
+    Badge.RED: "标定不可信 · 已按研究用途运行",
+}
+
+
+def test_badge_wording_pinned_verbatim():
+    """徽章文案不许被换成另一种口径，也不许三块之间对调。
+
+    这一条补的是复核 R2 实测出来的洞（变异 M2 / M3）：
+    - M2 把绿徽章的「计量模式」改成「研究用途 · 已验证」⇒ **12 条守卫全绿**；
+    - M3 把黄徽章与红徽章的 label 互换 ⇒ **12 条守卫全绿**；
+    - M2b 把绿徽章文案改成空串 ⇒ 红。
+
+    也就是说：**「不为空」被验了，「说的是真话」没被验**（共同约定 §6）。
+    `test_badge_text_exists_in_exactly_one_file` 只断言「别的文件里*没有*这四个字」，
+    从来没断言 `models/badge.py` 里*有*这四个字；
+    `test_claims_metrology_mirrors_judgement` 对绿徽章只断了「tooltip 里没有免责句」
+    这个反方向。只断一个方向的守卫拦不住换口径。
+    """
+    assert set(EXPECTED_BADGE_TEXT) == set(Badge), \
+        f"Badge 枚举变了，这张表要跟着改：{set(Badge) ^ set(EXPECTED_BADGE_TEXT)}"
+
+    for badge, want in EXPECTED_BADGE_TEXT.items():
+        view = build_badge_view(_consistent(badge))
+        assert view.text == want, \
+            f"{badge.value} 徽章的文案变了：期望 {want!r}，实际 {view.text!r}"
+
+    # 反方向：没有资质的两块，文案里绝不许出现「计量模式」
+    for badge in (Badge.YELLOW, Badge.RED):
+        assert "计量模式" not in EXPECTED_BADGE_TEXT[badge]
+
+
+def test_no_metrology_line_pinned_verbatim():
+    """免责句的**值**钉一次 —— 常量被读到 ≠ 值是对的（共同约定 §6）。
+
+    全仓现在只有 `NO_METROLOGY_LINE in view.tooltip` 这种用法，
+    把这个常量改成「本软件功能齐全。」，所有断言照样成立。
+    """
+    assert NO_METROLOGY_LINE == \
+        "本软件当前没有计量资质，秒数不得作为计量结果或合规证据使用。", \
+        f"免责句被改了：{NO_METROLOGY_LINE!r}——这句话是对客户的声明，改它要走复核"
+
+
+# --------------------------------------------------------------------------
+# 守卫 10（B8 复核 R1）：随包标定文件的路径，**目录**也要验，还要有一次正向往返
+# --------------------------------------------------------------------------
+
+def test_calibration_path_pinned_in_source_mode():
+    """源码模式下派生的是**仓根**的 `calibration.json`，不是别的某一级目录。
+
+    原来唯一碰这个函数的断言是 `path.name == "calibration.json"`——只验文件名。
+    实测（M1）把 `paths.py` 的 `parents[3]` 改成 `parents[2]`（指向 `desktop/`）
+    ⇒ **12 条守卫全绿**。今天不报错的原因是：仓根本来就没有标定文件，
+    指哪儿都读不到 ⇒ 黄徽章 ⇒ 端到端那条断言的 YELLOW / RESEARCH 照样成立。
+    **那条测试分不清「路径对但文件不存在」和「路径压根指错了」。**
+    """
+    assert not is_frozen(), "本条只在源码模式下有意义（CI 与本地都不是冻结态）"
+    assert bundled_calibration_path() == ROOT / "calibration.json", \
+        f"源码模式派生的路径不对：{bundled_calibration_path()}，应为 {ROOT / 'calibration.json'}"
+
+
+def test_calibration_path_pinned_in_frozen_mode():
+    """冻结模式下派生的是 **exe 同级目录**，不是 `_MEIPASS`。
+
+    实测（M1b）把冻结分支改回 `resource_path(...)` ⇒ **12 条守卫全绿**，
+    而 `paths.py` 的 docstring 为这个决定论证了半屏：`_MEIPASS` 在 onefile 下是
+    每次启动重建的临时目录，标定文件是**资质凭据**，必须跟 exe 一起被签名、
+    被安装脚本放在 IT 审计得到的位置。**论证了半屏、零个守卫。**
+    """
+    tmp = tempfile.TemporaryDirectory()
+    try:
+        app_dir = Path(tmp.name) / "app"
+        app_dir.mkdir()
+        fake_exe = app_dir / "DEPRESSION-PLEX.exe"
+        orig_frozen, orig_exe = paths_mod.is_frozen, sys.executable
+        try:
+            paths_mod.is_frozen = lambda: True
+            sys.executable = str(fake_exe)
+            got = paths_mod.bundled_calibration_path()
+        finally:
+            # 打了补丁不恢复会污染同进程后面的测试——本仓 runner 是单进程
+            paths_mod.is_frozen = orig_frozen
+            sys.executable = orig_exe
+        assert got == app_dir / "calibration.json", \
+            f"冻结模式派生的路径不对：{got}，应为 exe 同级的 {app_dir / 'calibration.json'}"
+    finally:
+        tmp.cleanup()
+
+
+def test_calibration_file_is_read_from_the_derived_path():
+    """**正向往返**：把真标定文件放到派生出来的那个路径上，判定必须真的读到它。
+
+    前两条钉的是「路径等于某个值」；这一条钉的是**「写文件的位置」和「读文件的位置」
+    是同一个地方**——名册双向对账，不是只查一个方向（共同约定 §6）。
+
+    为什么非要有这一条：到 M4 真签发了标定文件、安装脚本按 `{app}\\calibration.json`
+    放好之后，路径错的后果是产品**永远认不出自己的资质**，徽章永远黄，
+    CI 全绿、无任何报错，由客户来发现。反过来若那时哈希常量已填，
+    路径错会走「该有却没有」规则 ⇒ 红徽章，而根因是路径 bug 不是标定问题,
+    **失败归因被抹平成另一件事**。
+
+    用 `docs/标定文件示例_研究版.json` 而不是手搓 payload：
+    `tests/test_calibration_contract.py` 已经在防这份示例漂移，两边共用同一份就不会各自漂。
+    """
+    example = ROOT / "docs/标定文件示例_研究版.json"
+    assert example.exists(), "示例标定文件不在了，本条没法验往返"
+
+    tmp = tempfile.TemporaryDirectory()
+    try:
+        app_dir = Path(tmp.name) / "app"
+        app_dir.mkdir()
+        fake_exe = app_dir / "DEPRESSION-PLEX.exe"
+        orig_frozen, orig_exe = paths_mod.is_frozen, sys.executable
+        try:
+            paths_mod.is_frozen = lambda: True
+            sys.executable = str(fake_exe)
+            target = paths_mod.bundled_calibration_path()
+            shutil.copyfile(example, target)
+
+            # 正向：文件就在派生路径上 ⇒ 必须被读到、被解析出来
+            status = evaluate_calibration(
+                paths_mod.bundled_calibration_path(),
+                expected_sha256=file_sha256(target))
+            assert status.calibration is not None, \
+                f"文件明明在 {target}，判定却没读到：{status.reasons}"
+            assert status.calibration.theta_mob == 0.0175, \
+                "读到了但内容不对——示例文件里的 θ_mob 不是冻结值"
+            assert status.badge is Badge.YELLOW, \
+                f"示例是研究版（G11 门槛为 null）应判黄，实际 {status.badge}：{status.reasons}"
+
+            # 反向：把文件挪到派生路径的**上一级**，就必须读不到。
+            # 少了这一臂，「读到了」有可能只是因为碰巧哪儿都能读到。
+            target.unlink()
+            shutil.copyfile(example, Path(tmp.name) / "calibration.json")
+            miss = evaluate_calibration(
+                paths_mod.bundled_calibration_path(),
+                expected_sha256=file_sha256(example))
+            assert miss.calibration is None, \
+                "文件在上一级目录却被读到了——派生路径没起作用，这条往返测不出东西"
+        finally:
+            paths_mod.is_frozen = orig_frozen
+            sys.executable = orig_exe
+    finally:
+        tmp.cleanup()
+
+
+# --------------------------------------------------------------------------
+# 守卫 11（B8 复核 R4）：标定文件只许有一个读它的地方
+# --------------------------------------------------------------------------
+
+def _references(tree: ast.Module, target: str) -> list[int]:
+    """`target` 这个名字在一棵 AST 里被**引用**到的所有行号。
+
+    **判据落在 import 上，不落在调用上**：第一版只找 `ast.Call` 里 `func` 是
+    `ast.Name(id=target)` 的地方，结果变异 M5 用
+    `from ...paths import bundled_calibration_path as _bcp` 一行别名就绕过去了
+    （调用点的 Name 是 `_bcp`，守卫看不见）——**守卫自己有洞，是它自己的变异测出来的**。
+    别名可以随便起，但 `ImportFrom` 里的原名改不了，所以判据钉在原名上。
+    三种形状全收：`from x import target [as y]`、`x.target`、裸 `target`。
+    """
+    hits: list[int] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            hits.extend(node.lineno for a in node.names if a.name == target)
+        elif isinstance(node, ast.Attribute) and node.attr == target:
+            hits.append(node.lineno)
+        elif isinstance(node, ast.Name) and node.id == target:
+            hits.append(node.lineno)
+    return sorted(set(hits))
+
+
+#: 标定这条链上「只许启动自检碰」的两个入口，以及各自的定义文件（定义处不算引用）。
+CALIBRATION_ENTRY_POINTS = {
+    "bundled_calibration_path": Path("desktop/app/utils/paths.py"),
+    "evaluate_calibration": Path("desktop/app/services/calibration.py"),
+}
+
+
+def test_calibration_entry_points_only_in_main_window():
+    """派生标定路径、判定标定结论，`desktop/` 里都只许主窗口启动时碰。
+
+    `evaluate_calibration` 原本有一条单调用点守卫（`test_calibration_evaluated_in_
+    exactly_one_place`），但它和本条的第一版一样只看调用点的名字，**别名 import
+    就能绕过**。那条保留（它没错，只是窄），本条从 import 名字上把两个入口一起钉死。
+
+    为什么 `bundled_calibration_path` 也要管：实测（M5）往页面里塞
+    `json.loads(bundled_calibration_path().read_text())` ⇒ 补齐前 12 条守卫全绿。
+    这比「第二个判定器」更糟——第二个判定器至少还走 `evaluate_calibration` 的规则，
+    自己读文件的那份**绕过哈希校验、绕过降级、绕过 reasons**，
+    连「这个文件可疑」都判不出来。
+    """
+    allowed = Path("desktop/app/main_window.py")
+    offenders = []
+    seen_in_main = {name: 0 for name in CALIBRATION_ENTRY_POINTS}
+
+    for py in sorted((ROOT / "desktop").rglob("*.py")):
+        rel = py.relative_to(ROOT)
+        tree = _parse(py)
+        for name, definer in CALIBRATION_ENTRY_POINTS.items():
+            if rel == definer:
+                continue                      # 定义处
+            lines = _references(tree, name)
+            if not lines:
+                continue
+            if rel == allowed:
+                seen_in_main[name] += len(lines)
+            else:
+                offenders.append(f"{rel}:{lines} 碰了 {name}")
+
+    assert not offenders, \
+        f"标定入口只许主窗口启动时碰，这些地方绕过去了：{offenders}"
+    for name, count in seen_in_main.items():
+        assert count, f"主窗口里找不到 {name} 的引用——启动自检丢了"
+
+
+def test_calibration_filename_literal_in_exactly_one_file():
+    """`calibration.json` 这个字面量在 `desktop/` 里只许出现在 `utils/paths.py`。
+
+    单调用点守卫拦得住 `bundled_calibration_path()`，拦不住有人自己写
+    `Path("calibration.json")` 再读一遍。文件名分叉之后，
+    安装脚本放一个名字、产品找另一个名字，症状是「装好了但徽章永远黄」。
+
+    **只看代码里的字符串常量，不看注释与 docstring**（同
+    `test_badge_text_exists_in_exactly_one_file` 的口径：假违规的下一步
+    永远是有人把守卫改松）。
+    """
+    allowed = Path("desktop/app/utils/paths.py")
+    offenders = []
+    for py in sorted((ROOT / "desktop").rglob("*.py")):
+        rel = py.relative_to(ROOT)
+        if rel == allowed:
+            continue
+        tree = _parse(py)
+        doc_ids = _docstring_ids(tree)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Constant) and isinstance(node.value, str) \
+                    and id(node) not in doc_ids and "calibration.json" in node.value:
+                offenders.append(f"{rel}:{node.lineno}")
+    assert not offenders, \
+        f"这些地方自己写了标定文件名，应改成引 paths.CALIBRATION_FILENAME：{offenders}"
