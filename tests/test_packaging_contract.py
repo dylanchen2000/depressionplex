@@ -304,14 +304,20 @@ def test_fetch_ffmpeg_hash_not_placeholder():
         tmp_path.unlink()
 
 
+def test_ffmpeg_tool_constant_values():
+    """常量被读到 ≠ 值是对的：钉死 TOOL_FFMPEG / TOOL_FFPROBE 的字面值。"""
+    from depressionplex import video
+    assert video.TOOL_FFMPEG == "ffmpeg"
+    assert video.TOOL_FFPROBE == "ffprobe"
+
+
 def test_run_json_decoder_block():
-    """守卫 9：run.json 的 decoder 块（四个键都在，ffmpeg_version 取不到时是 None 不是 ""）。"""
+    """守卫 9：run.json decoder 块按工具嵌套（A4），扁平形状表达不了两个来源不同。"""
     from depressionplex.cli import analyze
     from depressionplex import video
     from depressionplex.assay_core import validity
     from unittest.mock import patch
 
-    # 模拟一个简单的 info / plan
     info = video.VideoInfo(
         path=Path("/fake/video.mp4"),
         fps=25.0,
@@ -321,8 +327,6 @@ def test_run_json_decoder_block():
         frame_count_source="nb_frames"
     )
 
-    # 构造一个空的 plan（只需要字段存在即可）
-    # 使用 runner 里的实际类
     from depressionplex import runner
     plan = runner.TrialPlan(
         calib_indices=[],
@@ -331,34 +335,44 @@ def test_run_json_decoder_block():
         trial_validity=validity.TrialValidity(chambers=[])
     )
 
-    # 模拟 _resolve_ffmpeg_tool 返回元组 (path, source)
-    with patch("depressionplex.video._resolve_ffmpeg_tool") as mock_resolve:
-        mock_resolve.side_effect = lambda tool: (f"/fake/{tool}", "env")
+    def _assert_nested_shape(decoder: dict) -> None:
+        assert "ffmpeg_path" not in decoder, (
+            "decoder 块不许再被拍平，扁平形状表达不了两个工具来源不同（A4）"
+        )
+        assert video.TOOL_FFMPEG in decoder, "decoder 块缺 TOOL_FFMPEG 键"
+        assert video.TOOL_FFPROBE in decoder, "decoder 块缺 TOOL_FFPROBE 键"
+        assert "mixed_source" in decoder, "decoder 块缺 mixed_source"
+        for tool in (video.TOOL_FFMPEG, video.TOOL_FFPROBE):
+            block = decoder[tool]
+            assert "path" in block, f"decoder[{tool!r}] 缺 path"
+            assert "source" in block, f"decoder[{tool!r}] 缺 source"
+            assert "version" in block, f"decoder[{tool!r}] 缺 version"
+            assert block["version"] is None, (
+                f"decoder[{tool!r}].version 取不到时应该是 None，"
+                f"实际是 {block['version']!r}"
+            )
 
-        # 获取 ffmpeg 信息（模拟调用方的职责）
-        ffmpeg_path, ffmpeg_source = video._resolve_ffmpeg_tool("ffmpeg")
-        ffprobe_path, ffprobe_source = video._resolve_ffmpeg_tool("ffprobe")
+    with patch("depressionplex.cli.analyze._get_ffmpeg_version") as mock_version:
+        mock_version.return_value = None
 
-        # 模拟 _get_ffmpeg_version 返回 None（取不到）
-        with patch("depressionplex.cli.analyze._get_ffmpeg_version") as mock_version:
-            mock_version.return_value = None
+        same = analyze._build_run_json(
+            info, plan, "TST", {}, set(),
+            "/fake/ffmpeg", "env", "/fake/ffprobe", "env",
+        )
+        assert "decoder" in same, "run.json 里找不到 decoder 块"
+        _assert_nested_shape(same["decoder"])
+        assert same["decoder"]["mixed_source"] is False, (
+            "两个工具 source 相同时 mixed_source 必须是 False"
+        )
 
-            result = analyze._build_run_json(info, plan, "TST", {}, set(),
-                                             ffmpeg_path, ffmpeg_source, ffprobe_path, ffprobe_source)
-
-            # 断言 decoder 块存在
-            assert "decoder" in result, "run.json 里找不到 decoder 块"
-            decoder = result["decoder"]
-
-            # 断言四个键都在
-            assert "ffmpeg_path" in decoder, "decoder 块缺 ffmpeg_path"
-            assert "ffprobe_path" in decoder, "decoder 块缺 ffprobe_path"
-            assert "source" in decoder, "decoder 块缺 source"
-            assert "ffmpeg_version" in decoder, "decoder 块缺 ffmpeg_version"
-
-            # 断言取不到时是 None 不是 ""
-            assert decoder["ffmpeg_version"] is None, \
-                f"ffmpeg_version 取不到时应该是 None，实际是 {decoder['ffmpeg_version']!r}"
+        mixed = analyze._build_run_json(
+            info, plan, "TST", {}, set(),
+            "/fake/ffmpeg", "env", "/fake/ffprobe", "bundled",
+        )
+        _assert_nested_shape(mixed["decoder"])
+        assert mixed["decoder"]["mixed_source"] is True, (
+            "两个工具 source 不同时 mixed_source 必须是 True"
+        )
 
 
 def test_license_files_in_packaging():
