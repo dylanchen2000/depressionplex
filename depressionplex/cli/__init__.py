@@ -17,7 +17,7 @@ from . import _stdio
 # 每个键必须对应 depressionplex/cli/ 下一个有 main() 的模块
 SUBCOMMANDS = {
     "analyze": "depressionplex.cli.analyze",
-    # "acq-check" 待 PR #97 合入后加
+    "acq-check": "depressionplex.cli.acq_check",
 }
 
 
