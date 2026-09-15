@@ -14,6 +14,8 @@ import math
 import pathlib
 import sys
 
+from . import _stdio
+
 Seg = tuple[float, float]
 
 
@@ -173,6 +175,8 @@ def _describe(vals, label: str) -> float:
 
 
 def main(argv: list[str]) -> int:
+    _stdio.force_utf8()
+
     if len(argv) != 3:
         print("用法: python3 -m depressionplex.cli.scorer_disagreement <A.json> <B.json>",
               file=sys.stderr)

@@ -148,3 +148,41 @@ def test_no_cli_hardcodes_a_chamber_ceiling() -> None:
             assert "choices" not in kw, \
                 f"{mod}:{node.lineno} 给 --chambers 加了 choices，把观测上界当成了格式上界（DP-106）"
     assert seen == 2, f"只找到 {seen} 处 --chambers 定义，期望 2（analyze + probe_frames）"
+
+
+def test_get_ffmpeg_version_returns_none_when_unavailable():
+    """守卫：_get_ffmpeg_version 取不到时返回 None 并往 stderr 写 [警告]（A5）。
+
+    三种取不到的情况：路径不存在、returncode != 0、只输出空行。
+    这是 analyze._get_ffmpeg_version 的直测——不 mock 它，直接调真的。
+    """
+    import io
+    import sys
+    from unittest import mock
+    from depressionplex.cli import analyze
+
+    # 情况1：路径不存在
+    with mock.patch("sys.stderr", new_callable=io.StringIO) as mock_stderr:
+        result = analyze._get_ffmpeg_version("/nonexistent/ffmpeg")
+        assert result is None
+        stderr_output = mock_stderr.getvalue()
+        assert "[警告]" in stderr_output
+        assert "不存在" in stderr_output or "FileNotFoundError" in stderr_output
+
+    # 情况2：returncode != 0（用 Python 自己模拟一个会失败的可执行文件）
+    with mock.patch("subprocess.run") as mock_run:
+        mock_run.return_value = mock.Mock(returncode=1, stdout="", stderr="error")
+        with mock.patch("sys.stderr", new_callable=io.StringIO) as mock_stderr:
+            result = analyze._get_ffmpeg_version("/fake/ffmpeg")
+            assert result is None
+            stderr_output = mock_stderr.getvalue()
+            assert "[警告]" in stderr_output
+
+    # 情况3：只输出空行（returncode=0 但没有有效输出）
+    with mock.patch("subprocess.run") as mock_run:
+        mock_run.return_value = mock.Mock(returncode=0, stdout="\n\n", stderr="")
+        with mock.patch("sys.stderr", new_callable=io.StringIO) as mock_stderr:
+            result = analyze._get_ffmpeg_version("/fake/ffmpeg")
+            assert result is None
+            stderr_output = mock_stderr.getvalue()
+            assert "[警告]" in stderr_output

@@ -12,6 +12,11 @@ from pathlib import Path
 from desktop.app.models.experiment import SCHEMA_KEYS, VIDEO_KEYS
 from desktop.app.utils.paths import is_frozen as _is_frozen
 
+#: 后端子目录与可执行文件名（架构 §3.4 裁决，不许再有第二份）。
+#: spec 里的 `name=` 必须与 ENGINE_STEM 相同（守卫 1 验证）。
+ENGINE_SUBDIR = "backend"
+ENGINE_STEM = "depression-analyzer"
+
 #: 一个 item 的产出文件名。**只有这一处**按视频名派生文件名：
 #: 原来 `build_argv`（查重名）与 `QueuePage._cleanup_outputs`（取消时删）各写一遍，
 #: 两边任何一边改了后缀，另一边就会去查/去删一个不存在的文件而毫无声响。
@@ -102,20 +107,21 @@ def engine_command() -> list[str]:
         return shlex.split(env_cmd)
 
     if _is_frozen():
-        # 冻结后：与主程序同目录的 dp-engine.exe / dp-engine
+        # 冻结后：backend/depression-analyzer.exe（架构 §3.4 裁决；
+        # 冻结判定只许问 utils/paths.is_frozen —— 台账 DP-112）
         main_exe = Path(sys.executable)
-        engine_name = "dp-engine.exe" if sys.platform == "win32" else "dp-engine"
-        engine_path = main_exe.parent / engine_name
+        engine_name = f"{ENGINE_STEM}.exe" if sys.platform == "win32" else ENGINE_STEM
+        engine_path = main_exe.parent / ENGINE_SUBDIR / engine_name
 
         if not engine_path.exists():
             raise FileNotFoundError(
                 f"引擎可执行文件不存在：{engine_path}（冻结模式）。"
-                f"预期与主程序 {main_exe} 在同一目录。"
+                f"预期在 {main_exe.parent / ENGINE_SUBDIR} 目录。"
             )
         return [str(engine_path)]
 
     else:
-        # 源码运行：python -m depressionplex.cli.analyze，cwd 必须是仓根
+        # 源码运行：python -m depressionplex.cli <子命令> [参数...]，cwd 必须是仓根
         # 仓根 = desktop/ 的上一级（desktop/app/services/engine.py 在 desktop/ 下三层）
         repo_root = Path(__file__).resolve().parent.parent.parent.parent
 
@@ -127,7 +133,7 @@ def engine_command() -> list[str]:
                 f"预期仓根为 {repo_root}。"
             )
 
-        return [sys.executable, "-m", "depressionplex.cli.analyze"]
+        return [sys.executable, "-m", "depressionplex.cli"]
 
 
 def get_cwd() -> Path | None:
@@ -168,6 +174,7 @@ def build_argv(exp: dict, video_index: int) -> list[str]:
     # 拼装参数。键名一律照契约取，**不许 `.get(键, 默认值)`**：
     # 契约校验已经保证键都在，再写默认值只会在键名拼错时把错误盖住。
     argv = engine_command()
+    argv.append("analyze")  # 子命令：analyze（冻结与源码模式 argv 形状一致）
     argv.append(str(video_path.resolve()))
     argv.extend(["--assay", exp["assay"]])
     argv.extend(["--chambers", str(exp["n_chambers"])])

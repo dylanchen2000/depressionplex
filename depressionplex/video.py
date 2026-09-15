@@ -16,16 +16,23 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator
 
 import numpy as np
 
-FFPROBE = "ffprobe"
-FFMPEG = "ffmpeg"
+
+#: decoder.source 的取值集合（A4）。三种来源，优先级由 _resolve_ffmpeg_tool 决定。
+DECODER_SOURCES = ("env", "bundled", "system")
+
+#: ffmpeg 工具名常量（A14 守卫：除 video.py 外不许出现字面量，所以从这里导出）
+TOOL_FFMPEG = "ffmpeg"
+TOOL_FFPROBE = "ffprobe"
 
 
 class VideoError(RuntimeError):
@@ -48,12 +55,59 @@ class VideoInfo:
         return self.n_frames / self.fps
 
 
-def _require(tool: str) -> str:
-    if shutil.which(tool) is None:
-        raise VideoError(
-            f"找不到 {tool}。驱动层需要 ffmpeg 套件解码视频"
-            "（assay_core 本身仍然只依赖 numpy）。装法：brew install ffmpeg")
-    return tool
+def _resolve_ffmpeg_tool(tool_name: str) -> tuple[str, str]:
+    """唯一的 ffmpeg 工具解析函数（架构 §0.2 裁决）。
+
+    解析顺序：env → 随包 → PATH。**不许再有别处直接把 "ffmpeg" / "ffprobe" 当命令用。**
+
+    Args:
+        tool_name: "ffmpeg" 或 "ffprobe"
+
+    Returns:
+        (path, source) 元组：
+        - path: 可执行文件的完整路径
+        - source: "env" | "bundled" | "system"（单一来源，不许在别处二次推导）
+
+    Raises:
+        VideoError: 三处都找不到时，列出找过的路径
+    """
+    # 1. 环境变量优先（给 CI 与现场排障用，同 DPX_ENGINE_CMD 的路子）
+    env_var = f"DPX_{tool_name.upper()}"
+    env_path = os.environ.get(env_var)
+    if env_path and Path(env_path).exists():
+        return (env_path, "env")
+
+    # 2. 随包：冻结时在 sys.executable 旁边的 ffmpeg/ 下，源码跑时在仓根 vendor/ffmpeg/
+    is_frozen = getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS")
+    exe_name = f"{tool_name}.exe" if sys.platform == "win32" else tool_name
+
+    if is_frozen:
+        # 冻结后：backend/ffmpeg/（与引擎同级）
+        bundled = Path(sys.executable).parent / "ffmpeg" / exe_name
+    else:
+        # 源码：仓根/vendor/ffmpeg/
+        repo_root = Path(__file__).resolve().parent.parent  # video.py 在 depressionplex/ 下
+        bundled = repo_root / "vendor" / "ffmpeg" / exe_name
+
+    if bundled.exists():
+        return (str(bundled), "bundled")
+
+    # 3. 系统 PATH（兜底）
+    system_path = shutil.which(tool_name)
+    if system_path:
+        return (system_path, "system")
+
+    # 都没有 ⇒ 抛 VideoError，把找过的三处路径全列出来
+    raise VideoError(
+        f"找不到 {tool_name}。驱动层需要 ffmpeg 套件解码视频（assay_core 本身仍只依赖 numpy）。\n"
+        f"已查找：\n"
+        f"  1. 环境变量 {env_var}={env_path!r}\n"
+        f"  2. 随包位置：{bundled}\n"
+        f"  3. 系统 PATH：{shutil.which(tool_name)}\n"
+        f"三处都不存在。\n"
+        f"Windows 安装包会自带 LGPL 版 ffmpeg；源码跑时需手动下载到 vendor/ffmpeg/，"
+        f"或用环境变量 {env_var} 指定路径。"
+    )
 
 
 def _run(cmd: list[str]) -> str:
@@ -82,8 +136,8 @@ def probe(path: str | Path) -> VideoInfo:
     p = Path(path)
     if not p.exists():
         raise VideoError(f"视频不存在：{p}")
-    _require(FFPROBE)
-    out = _run([FFPROBE, "-v", "error", "-select_streams", "v:0",
+    ffprobe, _ = _resolve_ffmpeg_tool("ffprobe")
+    out = _run([ffprobe, "-v", "error", "-select_streams", "v:0",
                 "-show_entries",
                 "stream=avg_frame_rate,r_frame_rate,nb_frames,width,height",
                 "-of", "json", str(p)])
@@ -107,7 +161,7 @@ def probe(path: str | Path) -> VideoInfo:
     else:
         # 容器头没记 ⇒ 逐包计数。慢，但比"用时长×fps 推"可靠：
         # 推出来的帧数与实际差一两帧，窗口边界就会错位。
-        out2 = _run([FFPROBE, "-v", "error", "-select_streams", "v:0",
+        out2 = _run([ffprobe, "-v", "error", "-select_streams", "v:0",
                      "-count_packets", "-show_entries", "stream=nb_read_packets",
                      "-of", "json", str(p)])
         st2 = (json.loads(out2).get("streams") or [{}])[0]
@@ -129,7 +183,8 @@ def decode_cmd(info: VideoInfo, *, start_frame: int = 0,
     """
     if start_frame < 0:
         raise ValueError(f"start_frame 不能为负：{start_frame}")
-    cmd = [FFMPEG, "-v", "error", "-i", str(info.path)]
+    ffmpeg, _ = _resolve_ffmpeg_tool("ffmpeg")
+    cmd = [ffmpeg, "-v", "error", "-i", str(info.path)]
     if start_frame:
         cmd += ["-vf", f"select=gte(n\\,{start_frame})", "-vsync", "0"]
     if n_frames is not None:
@@ -146,8 +201,7 @@ def iter_gray(info: VideoInfo, *, start_frame: int = 0,
     读到半帧（管道被截断）⇒ raise：半帧静默丢掉会让后面所有帧号偏移一位，
     而帧号偏移在报告里完全看不出来。
     """
-    _require(FFMPEG)
-    cmd = decode_cmd(info, start_frame=start_frame, n_frames=n_frames)
+    cmd = decode_cmd(info, start_frame=start_frame, n_frames=n_frames)  # 里面已调用 _resolve_ffmpeg_tool
     per = info.width * info.height
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     assert proc.stdout is not None

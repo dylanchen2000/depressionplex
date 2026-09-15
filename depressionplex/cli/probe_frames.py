@@ -26,6 +26,7 @@ from ..assay_core import rad as R
 from ..assay_core import segment as S
 from ..assay_core import silhouette as sil
 from ..assay_core import validity as V
+from . import _stdio
 from ..assay_core.segment import GATE_CONTRAST_ABS, GATE_CONTRAST_RATIO, GATE_AREA_JITTER_P90
 
 # RAD 残差判断动物是否在动。与 GATE_AREA_JITTER_P90 无关，别合并——
@@ -40,6 +41,8 @@ def load_gray(path: Path) -> np.ndarray:
 
 
 def main(argv: list[str] | None = None) -> int:
+    _stdio.force_utf8()
+
     ap = argparse.ArgumentParser()
     ap.add_argument("frames", nargs="+", type=Path)
     ap.add_argument("--chambers", type=int, default=4)

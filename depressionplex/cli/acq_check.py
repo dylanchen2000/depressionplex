@@ -37,6 +37,7 @@ from .. import video as V
 # MOVING_RESIDUAL 与 GATE_AREA_JITTER_P90 数值相同但意义不同：前者判"动物是否在动"，
 # 后者判"面积抖动噪声底是否达标"。统一从 probe_frames 引入，不在本文件重复定义。
 from .probe_frames import MOVING_RESIDUAL
+from . import _stdio
 
 # ── 抽帧参数（写死，不给命令行开关——开关一给，两次自检就不可比）──────────────
 N_WINDOWS: int = 5
@@ -335,6 +336,7 @@ def main(argv: list[str] | None = None) -> int:
     退出码：0=测到读数（通过/不通过都算），2=测不出，1=解码失败。
     **不把「不通过」映射成非零码**——那样 GUI 只会显示「自检程序崩了」。
     """
+    _stdio.force_utf8()
     ap = argparse.ArgumentParser(
         description="采集自检：对比度 / 分割噪声底 / 面积抖动 p90"
     )

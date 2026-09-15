@@ -18,6 +18,8 @@ import argparse
 import csv
 import json
 import sys
+
+from . import _stdio
 from pathlib import Path
 
 DONE_KEY = '"done":['
@@ -138,6 +140,8 @@ def salvage(path: Path) -> tuple[list[dict], dict]:
 
 
 def main() -> int:
+    _stdio.force_utf8()
+
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("input", type=Path)
     ap.add_argument("-o", "--output", type=Path, required=True)

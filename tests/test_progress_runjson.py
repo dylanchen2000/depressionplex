@@ -26,10 +26,11 @@ import dataclasses
 import json
 import sys
 from pathlib import Path
+from unittest import mock
 
 import numpy as np
 
-from depressionplex import runner as R
+from depressionplex import runner as R, video
 from depressionplex.cli import analyze
 
 # 复用 test_runner.py 的合成帧生成器
@@ -172,59 +173,64 @@ def test_runjson_no_csv_overlap() -> None:
 
     这条硬约束防止"一个数字两个序列化器 = 迟早漂移"（DP-054）。
     """
-    # 构造一个最小的 run.json 样本
-    from depressionplex import video
-    from depressionplex.assay_core import segment, validity
+    with mock.patch.dict("os.environ", {"DPX_FFMPEG": "/fake/ffmpeg", "DPX_FFPROBE": "/fake/ffprobe"}), \
+         mock.patch("pathlib.Path.exists", return_value=True):
+        # 构造一个最小的 run.json 样本
+        from depressionplex import video
+        from depressionplex.assay_core import segment, validity
 
-    # 构造假的 info/plan
-    info = video.VideoInfo(
-        path=Path("/fake.mp4"), fps=25.0, n_frames=100,
-        width=400, height=268, frame_count_source="nb_frames")
+        # 构造假的 info/plan
+        info = video.VideoInfo(
+            path=Path("/fake.mp4"), fps=25.0, n_frames=100,
+            width=400, height=268, frame_count_source="nb_frames")
 
-    # 构造假的 plan（单隔间，走廊失败 → 会进 skipped）
-    ch = R.ChamberPlan(
-        index=1, col_range=(0, 95), corridor=None, suspension=None,
-        source="test")
-    cv = validity.ChamberValidity(
-        chamber=1, status="valid", max_area=100.0, ref_body_area=90.0,
-        body_threshold=45.0, ever_had_body=True, note="", occupied_fraction=1.0,
-        unsegmentable_fraction=0.0)
-    tv = validity.TrialValidity(chambers=(cv,))
-    plan = R.TrialPlan(
-        chambers=(ch,), trial_validity=tv, calib_indices=(0, 10, 20),
-        warnings=("test_warning",))
+        # 构造假的 plan（单隔间，走廊失败 → 会进 skipped）
+        ch = R.ChamberPlan(
+            index=1, col_range=(0, 95), corridor=None, suspension=None,
+            source="test")
+        cv = validity.ChamberValidity(
+            chamber=1, status="valid", max_area=100.0, ref_body_area=90.0,
+            body_threshold=45.0, ever_had_body=True, note="", occupied_fraction=1.0,
+            unsegmentable_fraction=0.0)
+        tv = validity.TrialValidity(chambers=(cv,))
+        plan = R.TrialPlan(
+            chambers=(ch,), trial_validity=tv, calib_indices=(0, 10, 20),
+            warnings=("test_warning",))
 
-    skipped = {1: "悬挂点不可估（走廊标定失败 ⇒ 悬挂点不可估（不猜））⇒ 拒绝产出数字"}
+        skipped = {1: "悬挂点不可估（走廊标定失败 ⇒ 悬挂点不可估（不猜））⇒ 拒绝产出数字"}
 
-    run_data = analyze._build_run_json(info, plan, "TST", skipped, set())
+        ffmpeg_path, ffmpeg_source = video._resolve_ffmpeg_tool("ffmpeg")
+        ffprobe_path, ffprobe_source = video._resolve_ffmpeg_tool("ffprobe")
+        run_data = analyze._build_run_json(info, plan, "TST", skipped, set(),
+                                           ffmpeg_path, ffmpeg_source, ffprobe_path, ffprobe_source)
 
-    # 递归提取所有键名
-    def extract_keys(obj, prefix=""):
-        keys = set()
-        if isinstance(obj, dict):
-            for k, v in obj.items():
-                full_key = f"{prefix}.{k}" if prefix else k
-                keys.add(full_key)
-                keys.update(extract_keys(v, full_key))
-        elif isinstance(obj, list):
-            for item in obj:
-                keys.update(extract_keys(item, prefix))
-        return keys
+        # 递归提取所有键名
+        def extract_keys(obj, prefix=""):
+            keys = set()
+            if isinstance(obj, dict):
+                for k, v in obj.items():
+                    full_key = f"{prefix}.{k}" if prefix else k
+                    keys.add(full_key)
+                    keys.update(extract_keys(v, full_key))
+            elif isinstance(obj, list):
+                for item in obj:
+                    keys.update(extract_keys(item, prefix))
+            return keys
 
-    run_keys = extract_keys(run_data)
-    csv_fields = set(analyze.CSV_FIELDS)
+        run_keys = extract_keys(run_data)
+        csv_fields = set(analyze.CSV_FIELDS)
 
-    # 找出最外层键与 CSV_FIELDS 的交集
-    top_level_keys = {k.split(".")[0] for k in run_keys}
-    overlap = top_level_keys & csv_fields
+        # 找出最外层键与 CSV_FIELDS 的交集
+        top_level_keys = {k.split(".")[0] for k in run_keys}
+        overlap = top_level_keys & csv_fields
 
-    # 只允许 assay 和 fps（这两个是标识不是指标）
-    allowed = {"assay", "fps"}
-    forbidden = overlap - allowed
+        # 只允许 assay 和 fps（这两个是标识不是指标）
+        allowed = {"assay", "fps"}
+        forbidden = overlap - allowed
 
-    assert not forbidden, \
-        f"run.json 出现了 CSV 里已有的键：{forbidden}。" \
-        "一个数字两个序列化器 = 迟早漂移（DP-054）"
+        assert not forbidden, \
+            f"run.json 出现了 CSV 里已有的键：{forbidden}。" \
+            "一个数字两个序列化器 = 迟早漂移（DP-054）"
 
 
 # ---- 判据 5：not_scored 包含未产出数字的隔间 -------------------------------
@@ -232,60 +238,65 @@ def test_runjson_no_csv_overlap() -> None:
 
 def test_runjson_not_scored_present() -> None:
     """存在未产出数字的隔间时，run.json 的 not_scored 里有它和原因原文。"""
-    # 直接构造一个有 skipped 的场景（模拟走廊标定失败）
-    from depressionplex import video
-    from depressionplex.assay_core import validity
+    with mock.patch.dict("os.environ", {"DPX_FFMPEG": "/fake/ffmpeg", "DPX_FFPROBE": "/fake/ffprobe"}), \
+         mock.patch("pathlib.Path.exists", return_value=True):
+        # 直接构造一个有 skipped 的场景（模拟走廊标定失败）
+        from depressionplex import video
+        from depressionplex.assay_core import validity
 
-    # 构造假的 info
-    info = video.VideoInfo(
-        path=Path("/fake.mp4"), fps=FPS, n_frames=100,
-        width=400, height=H, frame_count_source="nb_frames")
+        # 构造假的 info
+        info = video.VideoInfo(
+            path=Path("/fake.mp4"), fps=FPS, n_frames=100,
+            width=400, height=H, frame_count_source="nb_frames")
 
-    # 构造一个走廊为 None 的隔间（会导致悬挂点为 None → 跳过）
-    ch1 = R.ChamberPlan(
-        index=1, col_range=(0, 95), corridor=None, suspension=None,
-        source="test")
-    ch2 = R.ChamberPlan(
-        index=2, col_range=(100, 195),
-        corridor=None, suspension=None,
-        source="test")
+        # 构造一个走廊为 None 的隔间（会导致悬挂点为 None → 跳过）
+        ch1 = R.ChamberPlan(
+            index=1, col_range=(0, 95), corridor=None, suspension=None,
+            source="test")
+        ch2 = R.ChamberPlan(
+            index=2, col_range=(100, 195),
+            corridor=None, suspension=None,
+            source="test")
 
-    cv1 = validity.ChamberValidity(
-        chamber=1, status="valid", max_area=100.0, ref_body_area=90.0,
-        body_threshold=45.0, ever_had_body=True, note="",
-        occupied_fraction=1.0, unsegmentable_fraction=0.0)
-    cv2 = validity.ChamberValidity(
-        chamber=2, status="valid", max_area=100.0, ref_body_area=90.0,
-        body_threshold=45.0, ever_had_body=True, note="",
-        occupied_fraction=1.0, unsegmentable_fraction=0.0)
+        cv1 = validity.ChamberValidity(
+            chamber=1, status="valid", max_area=100.0, ref_body_area=90.0,
+            body_threshold=45.0, ever_had_body=True, note="",
+            occupied_fraction=1.0, unsegmentable_fraction=0.0)
+        cv2 = validity.ChamberValidity(
+            chamber=2, status="valid", max_area=100.0, ref_body_area=90.0,
+            body_threshold=45.0, ever_had_body=True, note="",
+            occupied_fraction=1.0, unsegmentable_fraction=0.0)
 
-    tv = validity.TrialValidity(chambers=(cv1, cv2))
-    plan = R.TrialPlan(
-        chambers=(ch1, ch2), trial_validity=tv, calib_indices=(0, 10, 20),
-        warnings=())
+        tv = validity.TrialValidity(chambers=(cv1, cv2))
+        plan = R.TrialPlan(
+            chambers=(ch1, ch2), trial_validity=tv, calib_indices=(0, 10, 20),
+            warnings=())
 
-    # 模拟 skipped（悬挂点不可估）
-    skipped = {
-        1: "test-ch1：悬挂点不可估（走廊标定失败 ⇒ 悬挂点不可估（不猜））⇒ 拒绝产出数字",
-        2: "test-ch2：悬挂点不可估（走廊标定失败 ⇒ 悬挂点不可估（不猜））⇒ 拒绝产出数字",
-    }
+        # 模拟 skipped（悬挂点不可估）
+        skipped = {
+            1: "test-ch1：悬挂点不可估（走廊标定失败 ⇒ 悬挂点不可估（不猜））⇒ 拒绝产出数字",
+            2: "test-ch2：悬挂点不可估（走廊标定失败 ⇒ 悬挂点不可估（不猜））⇒ 拒绝产出数字",
+        }
 
-    run_data = analyze._build_run_json(info, plan, "TST", skipped, set())
+        ffmpeg_path, ffmpeg_source = video._resolve_ffmpeg_tool("ffmpeg")
+        ffprobe_path, ffprobe_source = video._resolve_ffmpeg_tool("ffprobe")
+        run_data = analyze._build_run_json(info, plan, "TST", skipped, set(),
+                                           ffmpeg_path, ffmpeg_source, ffprobe_path, ffprobe_source)
 
-    # not_scored 必须存在且非空
-    assert "not_scored" in run_data, "run.json 缺少 not_scored 键"
-    not_scored = run_data["not_scored"]
-    assert isinstance(not_scored, list), "not_scored 必须是列表"
-    assert len(not_scored) == 2, f"not_scored 应该包含 2 个跳过的隔间，实际 {len(not_scored)}"
+        # not_scored 必须存在且非空
+        assert "not_scored" in run_data, "run.json 缺少 not_scored 键"
+        not_scored = run_data["not_scored"]
+        assert isinstance(not_scored, list), "not_scored 必须是列表"
+        assert len(not_scored) == 2, f"not_scored 应该包含 2 个跳过的隔间，实际 {len(not_scored)}"
 
-    # 检查是否包含原因原文
-    not_scored_chambers = {item["chamber"] for item in not_scored}
-    assert not_scored_chambers == {1, 2}, "not_scored 应包含隔间 1 和 2"
+        # 检查是否包含原因原文
+        not_scored_chambers = {item["chamber"] for item in not_scored}
+        assert not_scored_chambers == {1, 2}, "not_scored 应包含隔间 1 和 2"
 
-    for item in not_scored:
-        assert "chamber" in item and "reason" in item
-        assert item["chamber"] in skipped
-        assert item["reason"] == skipped[item["chamber"]]
+        for item in not_scored:
+            assert "chamber" in item and "reason" in item
+            assert item["chamber"] in skipped
+            assert item["reason"] == skipped[item["chamber"]]
 
 
 # ---- 补充：not_scored 为空时也要有这个键 -----------------------------------
@@ -293,28 +304,33 @@ def test_runjson_not_scored_present() -> None:
 
 def test_runjson_not_scored_empty_but_present() -> None:
     """not_scored 为空时也要有这个键（写 []），不许省略。"""
-    # 全部正常隔间（MOVE 和 STILL）
-    kinds = (MOVE, STILL, MOVE, STILL)
-    calib = _frames(kinds, 8)
-    frames = _frames(kinds, 20)
+    with mock.patch.dict("os.environ", {"DPX_FFMPEG": "/fake/ffmpeg", "DPX_FFPROBE": "/fake/ffprobe"}), \
+         mock.patch("pathlib.Path.exists", return_value=True):
+        # 全部正常隔间（MOVE 和 STILL）
+        kinds = (MOVE, STILL, MOVE, STILL)
+        calib = _frames(kinds, 8)
+        frames = _frames(kinds, 20)
 
-    plan, reports, skipped = R.analyze_frames(
-        calib, frames, fps=FPS, assay="TST", trial_prefix="test", n_chambers=4)
+        plan, reports, skipped = R.analyze_frames(
+            calib, frames, fps=FPS, assay="TST", trial_prefix="test", n_chambers=4)
 
-    # 应该没有 skipped
-    assert len(skipped) == 0, "所有隔间应该都产出数字"
+        # 应该没有 skipped
+        assert len(skipped) == 0, "所有隔间应该都产出数字"
 
-    from depressionplex import video
-    info = video.VideoInfo(
-        path=Path("/fake.mp4"), fps=FPS, n_frames=len(frames),
-        width=400, height=H, frame_count_source="nb_frames")
+        from depressionplex import video
+        info = video.VideoInfo(
+            path=Path("/fake.mp4"), fps=FPS, n_frames=len(frames),
+            width=400, height=H, frame_count_source="nb_frames")
 
-    run_data = analyze._build_run_json(info, plan, "TST", skipped, set(reports))
+        ffmpeg_path, ffmpeg_source = video._resolve_ffmpeg_tool("ffmpeg")
+        ffprobe_path, ffprobe_source = video._resolve_ffmpeg_tool("ffprobe")
+        run_data = analyze._build_run_json(info, plan, "TST", skipped, set(reports),
+                                           ffmpeg_path, ffmpeg_source, ffprobe_path, ffprobe_source)
 
-    # not_scored 必须存在
-    assert "not_scored" in run_data, \
-        "run.json 缺少 not_scored 键（为空时也要有，写 []）"
-    assert run_data["not_scored"] == [], "not_scored 应该是空列表"
+        # not_scored 必须存在
+        assert "not_scored" in run_data, \
+            "run.json 缺少 not_scored 键（为空时也要有，写 []）"
+        assert run_data["not_scored"] == [], "not_scored 应该是空列表"
 
 
 # ---- 判据 4 补强：进了 CSV 的隔间不许在 run.json 里再写一遍有效性 ----------
@@ -328,33 +344,38 @@ def test_runjson_omits_validity_of_scored_chambers() -> None:
     ——CSV 取 `TrialReport`，run.json 取 `plan.trial_validity`，是两个对象。
     所以这里按隔间号比，不按键名比。
     """
-    kinds = (MOVE, STILL, MOVE, STILL)
-    calib = _frames(kinds, 8)
-    frames = _frames(kinds, 20)
+    with mock.patch.dict("os.environ", {"DPX_FFMPEG": "/fake/ffmpeg", "DPX_FFPROBE": "/fake/ffprobe"}), \
+         mock.patch("pathlib.Path.exists", return_value=True):
+        kinds = (MOVE, STILL, MOVE, STILL)
+        calib = _frames(kinds, 8)
+        frames = _frames(kinds, 20)
 
-    plan, reports, skipped = R.analyze_frames(
-        calib, frames, fps=FPS, assay="TST", trial_prefix="test", n_chambers=4)
-    assert reports, "这批帧应当至少有一个隔间产出数字，否则本测试没在测东西"
+        plan, reports, skipped = R.analyze_frames(
+            calib, frames, fps=FPS, assay="TST", trial_prefix="test", n_chambers=4)
+        assert reports, "这批帧应当至少有一个隔间产出数字，否则本测试没在测东西"
 
-    from depressionplex import video
-    info = video.VideoInfo(
-        path=Path("/fake.mp4"), fps=FPS, n_frames=len(frames),
-        width=400, height=H, frame_count_source="nb_frames")
+        from depressionplex import video
+        info = video.VideoInfo(
+            path=Path("/fake.mp4"), fps=FPS, n_frames=len(frames),
+            width=400, height=H, frame_count_source="nb_frames")
 
-    scored = {int(k) for k in reports}
-    run_data = analyze._build_run_json(info, plan, "TST", skipped, scored)
+        scored = {int(k) for k in reports}
+        ffmpeg_path, ffmpeg_source = video._resolve_ffmpeg_tool("ffmpeg")
+        ffprobe_path, ffprobe_source = video._resolve_ffmpeg_tool("ffprobe")
+        run_data = analyze._build_run_json(info, plan, "TST", skipped, scored,
+                                           ffmpeg_path, ffmpeg_source, ffprobe_path, ffprobe_source)
 
-    listed = {item["chamber"] for item in run_data["chamber_validity"]}
-    dup = listed & scored
-    assert not dup, (
-        f"隔间 {sorted(dup)} 既有 CSV 行又在 run.json 的 chamber_validity 里。"
-        "一个数字只许有一个序列化器（架构 §3.5 / DP-054）")
+        listed = {item["chamber"] for item in run_data["chamber_validity"]}
+        dup = listed & scored
+        assert not dup, (
+            f"隔间 {sorted(dup)} 既有 CSV 行又在 run.json 的 chamber_validity 里。"
+            "一个数字只许有一个序列化器（架构 §3.5 / DP-054）")
 
-    # 反面：没产出数字的隔间**必须**还在（它没有 CSV 行，有效性只能在这里说）
-    unscored = {cv.chamber for cv in plan.trial_validity.chambers} - scored
-    assert listed == unscored, (
-        f"chamber_validity 应当正好是没进 CSV 的隔间 {sorted(unscored)}，"
-        f"实际 {sorted(listed)}")
+        # 反面：没产出数字的隔间**必须**还在（它没有 CSV 行，有效性只能在这里说）
+        unscored = {cv.chamber for cv in plan.trial_validity.chambers} - scored
+        assert listed == unscored, (
+            f"chamber_validity 应当正好是没进 CSV 的隔间 {sorted(unscored)}，"
+            f"实际 {sorted(listed)}")
 
 
 def test_build_run_json_requires_scored_argument() -> None:
@@ -477,60 +498,74 @@ def test_runjson_keeps_zero_bl_est_distinct_from_none() -> None:
     归一化，所以真数据里到不了 0.0——这条守的是序列化器本身不许自作归一化，
     免得哪天生产者改了口径（比如允许 0 表示"贴着地板"），信息在这一层被吃掉。
     """
-    from depressionplex import video
-    from depressionplex.assay_core import segment, validity
+    with mock.patch.dict("os.environ", {"DPX_FFMPEG": "/fake/ffmpeg", "DPX_FFPROBE": "/fake/ffprobe"}), \
+         mock.patch("pathlib.Path.exists", return_value=True):
+        from depressionplex import video
+        from depressionplex.assay_core import segment, validity
 
-    info = video.VideoInfo(
-        path=Path("/fake.mp4"), fps=FPS, n_frames=10,
-        width=400, height=H, frame_count_source="nb_frames")
+        info = video.VideoInfo(
+            path=Path("/fake.mp4"), fps=FPS, n_frames=10,
+            width=400, height=H, frame_count_source="nb_frames")
 
-    def _plan(bl):
-        corr = segment.TapeCorridor(
-            col_range=(44, 49), row_range=(70, 224), confidence=1.0,
-            band_range=(70, 224), sealed=True, bl_est=bl)
-        ch = R.ChamberPlan(index=1, col_range=(0, 95), corridor=corr,
-                           suspension=(46.5, 70.0), source="test")
-        cv = validity.ChamberValidity(
-            chamber=1, status="valid", max_area=100.0, ref_body_area=90.0,
-            body_threshold=45.0, ever_had_body=True, note=None,
-            occupied_fraction=1.0, unsegmentable_fraction=0.0)
-        return R.TrialPlan(chambers=(ch,), trial_validity=validity.TrialValidity(
-            chambers=(cv,)), calib_indices=(0, 5), warnings=())
+        def _plan(bl):
+            corr = segment.TapeCorridor(
+                col_range=(44, 49), row_range=(70, 224), confidence=1.0,
+                band_range=(70, 224), sealed=True, bl_est=bl)
+            ch = R.ChamberPlan(index=1, col_range=(0, 95), corridor=corr,
+                               suspension=(46.5, 70.0), source="test")
+            cv = validity.ChamberValidity(
+                chamber=1, status="valid", max_area=100.0, ref_body_area=90.0,
+                body_threshold=45.0, ever_had_body=True, note=None,
+                occupied_fraction=1.0, unsegmentable_fraction=0.0)
+            return R.TrialPlan(chambers=(ch,), trial_validity=validity.TrialValidity(
+                chambers=(cv,)), calib_indices=(0, 5), warnings=())
 
-    zero = analyze._build_run_json(info, _plan(0.0), "TST", {}, set())
-    assert zero["chambers"][0]["corridor"]["bl_est"] == 0.0, \
-        "bl_est=0.0 被写成了 null——「量出来是 0」和「量不出来」不是一件事"
+        ffmpeg_path, ffmpeg_source = video._resolve_ffmpeg_tool("ffmpeg")
+        ffprobe_path, ffprobe_source = video._resolve_ffmpeg_tool("ffprobe")
 
-    none = analyze._build_run_json(info, _plan(None), "TST", {}, set())
-    assert none["chambers"][0]["corridor"]["bl_est"] is None
+        zero = analyze._build_run_json(info, _plan(0.0), "TST", {}, set(),
+                                        ffmpeg_path, ffmpeg_source, ffprobe_path, ffprobe_source)
+        assert zero["chambers"][0]["corridor"]["bl_est"] == 0.0, \
+            "bl_est=0.0 被写成了 null——「量出来是 0」和「量不出来」不是一件事"
+
+        none = analyze._build_run_json(info, _plan(None), "TST", {}, set(),
+                                        ffmpeg_path, ffmpeg_source, ffprobe_path, ffprobe_source)
+        assert none["chambers"][0]["corridor"]["bl_est"] is None
 
 
 def test_runjson_keeps_note_none_distinct_from_empty() -> None:
     """`note` 为 None（没话说）不许被写成 ""（有话说但是空串）。"""
-    from depressionplex import video
-    from depressionplex.assay_core import validity
+    with mock.patch.dict("os.environ", {"DPX_FFMPEG": "/fake/ffmpeg", "DPX_FFPROBE": "/fake/ffprobe"}), \
+         mock.patch("pathlib.Path.exists", return_value=True):
+        from depressionplex import video
+        from depressionplex.assay_core import validity
 
-    info = video.VideoInfo(
-        path=Path("/fake.mp4"), fps=FPS, n_frames=10,
-        width=400, height=H, frame_count_source="nb_frames")
+        info = video.VideoInfo(
+            path=Path("/fake.mp4"), fps=FPS, n_frames=10,
+            width=400, height=H, frame_count_source="nb_frames")
 
-    def _plan(note):
-        ch = R.ChamberPlan(index=1, col_range=(0, 95), corridor=None,
-                           suspension=None, source="test")
-        cv = validity.ChamberValidity(
-            chamber=1, status="valid", max_area=100.0, ref_body_area=90.0,
-            body_threshold=45.0, ever_had_body=True, note=note,
-            occupied_fraction=1.0, unsegmentable_fraction=0.0)
-        return R.TrialPlan(chambers=(ch,), trial_validity=validity.TrialValidity(
-            chambers=(cv,)), calib_indices=(0, 5), warnings=())
+        def _plan(note):
+            ch = R.ChamberPlan(index=1, col_range=(0, 95), corridor=None,
+                               suspension=None, source="test")
+            cv = validity.ChamberValidity(
+                chamber=1, status="valid", max_area=100.0, ref_body_area=90.0,
+                body_threshold=45.0, ever_had_body=True, note=note,
+                occupied_fraction=1.0, unsegmentable_fraction=0.0)
+            return R.TrialPlan(chambers=(ch,), trial_validity=validity.TrialValidity(
+                chambers=(cv,)), calib_indices=(0, 5), warnings=())
 
-    # 隔间 1 没进 CSV（scored 为空）⇒ 它的有效性写在 run.json 里
-    got_none = analyze._build_run_json(info, _plan(None), "TST", {}, set())
-    assert got_none["chamber_validity"][0]["note"] is None, \
-        "note=None 被写成了空串——下游分不出「没备注」和「备注是空串」"
+        ffmpeg_path, ffmpeg_source = video._resolve_ffmpeg_tool("ffmpeg")
+        ffprobe_path, ffprobe_source = video._resolve_ffmpeg_tool("ffprobe")
 
-    got_empty = analyze._build_run_json(info, _plan(""), "TST", {}, set())
-    assert got_empty["chamber_validity"][0]["note"] == ""
+        # 隔间 1 没进 CSV（scored 为空）⇒ 它的有效性写在 run.json 里
+        got_none = analyze._build_run_json(info, _plan(None), "TST", {}, set(),
+                                           ffmpeg_path, ffmpeg_source, ffprobe_path, ffprobe_source)
+        assert got_none["chamber_validity"][0]["note"] is None, \
+            "note=None 被写成了空串——下游分不出「没备注」和「备注是空串」"
+
+        got_empty = analyze._build_run_json(info, _plan(""), "TST", {}, set(),
+                                            ffmpeg_path, ffmpeg_source, ffprobe_path, ffprobe_source)
+        assert got_empty["chamber_validity"][0]["note"] == ""
 
 
 # ---- 补充：run.json 必须带实际生效的 FROZEN 判定参数（§3.5 点名 θ_mob）-----
@@ -546,22 +581,27 @@ def test_runjson_carries_effective_rules_params() -> None:
     改了 `TstRulesParams` 而忘了改这里，run.json 会**理直气壮地记错**
     （比 KeyError 危险得多，因为它看起来完全正常）。
     """
-    from depressionplex import video
-    from depressionplex.assay_core import rules as RU, validity
+    with mock.patch.dict("os.environ", {"DPX_FFMPEG": "/fake/ffmpeg", "DPX_FFPROBE": "/fake/ffprobe"}), \
+         mock.patch("pathlib.Path.exists", return_value=True):
+        from depressionplex import video
+        from depressionplex.assay_core import rules as RU, validity
 
-    info = video.VideoInfo(
-        path=Path("/fake.mp4"), fps=FPS, n_frames=10,
-        width=400, height=H, frame_count_source="nb_frames")
-    ch = R.ChamberPlan(index=1, col_range=(0, 95), corridor=None,
-                       suspension=None, source="test")
-    cv = validity.ChamberValidity(
-        chamber=1, status="valid", max_area=100.0, ref_body_area=90.0,
-        body_threshold=45.0, ever_had_body=True, note=None,
-        occupied_fraction=1.0, unsegmentable_fraction=0.0)
-    plan = R.TrialPlan(chambers=(ch,), trial_validity=validity.TrialValidity(
-        chambers=(cv,)), calib_indices=(0, 5), warnings=())
+        info = video.VideoInfo(
+            path=Path("/fake.mp4"), fps=FPS, n_frames=10,
+            width=400, height=H, frame_count_source="nb_frames")
+        ch = R.ChamberPlan(index=1, col_range=(0, 95), corridor=None,
+                           suspension=None, source="test")
+        cv = validity.ChamberValidity(
+            chamber=1, status="valid", max_area=100.0, ref_body_area=90.0,
+            body_threshold=45.0, ever_had_body=True, note=None,
+            occupied_fraction=1.0, unsegmentable_fraction=0.0)
+        plan = R.TrialPlan(chambers=(ch,), trial_validity=validity.TrialValidity(
+            chambers=(cv,)), calib_indices=(0, 5), warnings=())
 
-    got = analyze._build_run_json(info, plan, "TST", {}, set())
+        ffmpeg_path, ffmpeg_source = video._resolve_ffmpeg_tool("ffmpeg")
+        ffprobe_path, ffprobe_source = video._resolve_ffmpeg_tool("ffprobe")
+        got = analyze._build_run_json(info, plan, "TST", {}, set(),
+                                       ffmpeg_path, ffmpeg_source, ffprobe_path, ffprobe_source)
     assert "rules" in got, "run.json 缺少 rules（θ_mob 等 FROZEN 判定参数）"
 
     frozen = RU.TstRulesParams()
