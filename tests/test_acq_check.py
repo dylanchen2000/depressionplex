@@ -920,7 +920,13 @@ def test_desktop_model_keys_mirror_engine_keys() -> None:
 
     变异：
     - M4  ACQ_JSON_KEYS 加 "extra" ⇒ 引擎侧多键 ⇒ 本条红；
-    - M12 模型 _require_keys 少一个键 ⇒ 模型侧少键 ⇒ 本条红。
+    - M12 模型 _MODEL_*_KEYS 少一个键 ⇒ 模型侧少键 ⇒ 本条红。
+
+    **这条 docstring 上一版写的是「模型 _require_keys 少一个键 ⇒ 本条红」，那是假的**：
+    第三轮复核实测，六个 `_require_keys` 调用点当时各写一份行内字面量元组，
+    改行内元组（产品真行为变了）本条全绿，改常量（产品行为没变）本条才红 ——
+    镜子照的是一份产品不看的名册。现在常量是 `_require_keys` 的唯一来源，
+    由下面那条 AST 守卫钉着，这两句承诺才对得上。
     """
     from depressionplex.cli import acq_check
     from desktop.app.models import self_test as M
@@ -947,6 +953,40 @@ def test_desktop_model_keys_mirror_engine_keys() -> None:
     assert not errors, (
         "acq_check.ACQ_*_KEYS 与 desktop model _MODEL_*_KEYS 不同步（双向对账失败）：\n"
         + "\n".join(errors)
+    )
+
+
+def test_require_keys_only_takes_model_key_constants() -> None:
+    """`_require_keys()` 的键集实参只许是 `_MODEL_*_KEYS` 常量，不许写行内元组。
+
+    没有这一条，守卫 13 会**再一次**变成装饰：只要有人图省事把某一层的键集写回
+    行内元组，那一层的双向对账就当场失明，而守卫 13 照样绿（它比的是常量）。
+    第三轮复核实测过这个洞：改行内元组 ⇒ 18 条全绿；改常量 ⇒ 红 1。
+    **守卫要盯产品真正走的那条路，不是盯一份平行的声明。**
+    """
+    model_py = ROOT / "desktop" / "app" / "models" / "self_test.py"
+    tree = ast.parse(model_py.read_text(encoding="utf-8"), filename=str(model_py))
+
+    calls = [n for n in ast.walk(tree)
+             if isinstance(n, ast.Call)
+             and isinstance(n.func, ast.Name) and n.func.id == "_require_keys"]
+    assert calls, "模型里一个 _require_keys 调用都没有——键集校验丢了"
+
+    offenders: list[str] = []
+    for call in calls:
+        if len(call.args) < 2:
+            offenders.append(f"  line {call.lineno}: 参数不足，看不出键集从哪来")
+            continue
+        keys_arg = call.args[1]
+        if not (isinstance(keys_arg, ast.Name) and keys_arg.id.startswith("_MODEL_")):
+            shape = type(keys_arg).__name__
+            offenders.append(
+                f"  line {call.lineno}: 键集实参是 {shape}，不是 _MODEL_*_KEYS 常量"
+            )
+
+    assert not offenders, (
+        "_require_keys 的键集必须引 _MODEL_*_KEYS 常量，否则守卫 13 的双向对账照的是"
+        "一份产品不看的名册：\n" + "\n".join(offenders)
     )
 
 

@@ -14,7 +14,11 @@ import json
 from pathlib import Path
 
 
-# ── 键集常量（守卫 13 双向对账用）─────────────────────────────────────────────
+# ── 键集常量（守卫 13 双向对账用，**同时是 _require_keys 的唯一来源**）───────
+# 只声明不使用 = 注释：第三轮复核实测，六个 _require_keys 调用点原本各写一份行内
+# 字面量元组，于是「把行内元组少要一个键」（产品真行为变了）双向镜子全绿，
+# 而「只改这里的常量」（产品行为没变）反而变红 —— 镜子照的是一份产品不看的名册。
+# 现在 _require_keys 只许收这几个常量，AST 守卫盯着（见 test_acq_check.py 守卫 13b）。
 _MODEL_JSON_KEYS = ("generated_at", "video", "sampling", "gates", "chambers", "reference")
 _MODEL_GATES_KEYS = ("contrast", "noise_floor", "area_jitter")
 _MODEL_CONTRAST_KEYS = ("value", "ratio", "threshold_abs", "threshold_ratio", "passed")
@@ -35,30 +39,22 @@ class AcqCheckResult:
     """
 
     def __init__(self, data: dict) -> None:
-        _require_keys(data, (
-            "generated_at", "video", "sampling", "gates", "chambers", "reference",
-        ), "顶层")
+        _require_keys(data, _MODEL_JSON_KEYS, "顶层")
 
         gates = data["gates"]
-        _require_keys(gates, ("contrast", "noise_floor", "area_jitter"), "gates")
+        _require_keys(gates, _MODEL_GATES_KEYS, "gates")
 
         contrast = gates["contrast"]
-        _require_keys(contrast, (
-            "value", "ratio", "threshold_abs", "threshold_ratio", "passed",
-        ), "gates.contrast")
+        _require_keys(contrast, _MODEL_CONTRAST_KEYS, "gates.contrast")
 
         noise_floor = gates["noise_floor"]
-        _require_keys(noise_floor, ("value", "n_frames"), "gates.noise_floor")
+        _require_keys(noise_floor, _MODEL_NOISE_FLOOR_KEYS, "gates.noise_floor")
 
         area_jitter = gates["area_jitter"]
-        _require_keys(area_jitter, (
-            "value", "threshold", "passed", "chamber", "chamber_residual", "moving",
-        ), "gates.area_jitter")
+        _require_keys(area_jitter, _MODEL_AREA_JITTER_KEYS, "gates.area_jitter")
 
         sampling = data["sampling"]
-        _require_keys(sampling, (
-            "n_windows", "frames_per_window", "frame_indices",
-        ), "sampling")
+        _require_keys(sampling, _MODEL_SAMPLING_KEYS, "sampling")
 
         self._data = data
 
