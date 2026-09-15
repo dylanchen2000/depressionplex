@@ -974,6 +974,32 @@ def test_analyzer_spec_entry_is_not_package_init():
         f"spec 入口指向的文件不存在：{entry_path} （解析为 {entry_full_path}）"
 
 
+def test_analyzer_spec_pathex_is_repo_root():
+    """守卫 D7：后端 spec 的 pathex 必须是仓根，不能是 packaging/。
+
+    workflow 在 packaging/ 下跑 pyinstaller。Path('.').resolve() 就是 packaging/
+    自己，hiddenimport depressionplex.cli 会 not found，冻结 exe --help 直接 rc=1
+    （run 34920623069 实测）。必须用 SPECPATH.parent，与 cwd 无关。
+    """
+    spec_file = ROOT / "packaging" / "build_analyzer_windows.spec"
+    src = spec_file.read_text(encoding="utf-8")
+    tree = ast.parse(src, filename=str(spec_file))
+
+    names = {node.id for node in ast.walk(tree) if isinstance(node, ast.Name)}
+    assert "SPECPATH" in names, (
+        "build_analyzer_windows.spec 必须用 SPECPATH 定位仓根："
+        "cwd 是 packaging/ 时 Path('.').resolve() 是 packaging/ 自己，"
+        "hiddenimport depressionplex.cli 会 not found（run 34920623069）"
+    )
+    has_parent = any(
+        isinstance(node, ast.Attribute) and node.attr == "parent"
+        for node in ast.walk(tree)
+    )
+    assert has_parent, (
+        "repo_root 必须是 SPECPATH 的 parent（仓根），不能是 packaging/ 自己"
+    )
+
+
 def test_analyzer_entry_is_thin():
     """守卫 C2.2：PyInstaller 入口脚本只许有 import 和 sys.exit(main())。
 
