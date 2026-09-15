@@ -100,6 +100,17 @@ class ResultsTable:
     video_n_frames: int | None = None
     frame_count_source: str | None = None
 
+    # 解码器身份（DP-121）：{工具名: {"path", "source", "version"}}。
+    # None = 读不出来（报告印「未知」，且 context_problems 里留了一句说明）。
+    decoder_tools: dict[str, dict[str, str | None]] | None = None
+    # 两个工具是不是不同来源；None = 读不出来
+    decoder_mixed_source: bool | None = None
+
+    # 引擎自己给的计划告警（DP-122）。**三态**：
+    #   None = 读不出来（未知）  /  [] = 引擎确实没告警  /  非空 = 告警原文
+    # 把「读不出来」折成 [] 就是把引擎的告警吞掉，报告上看不出区别。
+    plan_warnings: list[str] | None = None
+
     # 缺失文件的标记
     csv_missing: bool = False
     run_json_missing: bool = False
@@ -194,6 +205,73 @@ def _reason_text(value: object, what: str) -> str:
     if isinstance(value, str) and value.strip():
         return value
     return f"[{what}不可读：run.json 里它是 {type(value).__name__}（{_short(value)}）]"
+
+
+def _str_list_or_unknown(
+    value: object, what: str, problems: list[str]
+) -> list[str] | None:
+    """一串给人看的字符串（`plan_warnings`）。
+
+    **空列表和「读不出来」是两件事**：前者报告里印「（无）」，后者印「未知」。
+    折成同一个值的代价是——引擎明明告警了、字段却是坏的，报告上写着「（无）」，
+    看起来像引擎什么都没说。
+    """
+    if not isinstance(value, list):
+        problems.append(f"{what}（不是列表：{_short(value)}）")
+        return None
+    bad = [v for v in value if not isinstance(v, str)]
+    if bad:
+        problems.append(f"{what}（列表里有不是字符串的元素：{_short(bad)}）")
+        return None
+    return list(value)
+
+
+def _decoder_or_unknown(
+    value: object, what: str, problems: list[str]
+) -> tuple[dict[str, dict[str, str | None]] | None, bool | None]:
+    """`decoder` 块 ⇒ ({工具名: {path, source, version}}, mixed_source)。
+
+    工具名**不在这里写死**：除 `mixed_source` 以外的每个键都当成一个工具。
+    进程边界那一侧（`depressionplex/cli/analyze.py`）用 `TOOL_FFMPEG` /
+    `TOOL_FFPROBE` 两个常量做键，外壳不许 import 那个包（架构 §3.4），
+    所以这里抄一份工具名就是抄一份真值——多一个工具时它还会安静地漏掉。
+
+    `version` 允许是 `None`：引擎取不到版本时自己就写 `None`（空文件、旧构建），
+    那是产品在现场真会走的路，不是坏文件。`path` / `source` 是坏值就降级为未知。
+    """
+    if not isinstance(value, dict):
+        problems.append(f"{what}（不是对象：{_short(value)}）")
+        return None, None
+
+    mixed = value.get("mixed_source")
+    if not isinstance(mixed, bool):
+        problems.append(f"{what}.mixed_source（不是布尔值：{_short(mixed)}）")
+        mixed = None
+
+    tools: dict[str, dict[str, str | None]] = {}
+    for tool, block in value.items():
+        if tool == "mixed_source":
+            continue
+        if not isinstance(block, dict):
+            problems.append(f"{what}.{tool}（不是对象：{_short(block)}）")
+            continue
+        entry: dict[str, str | None] = {}
+        for name in ("path", "source", "version"):
+            raw = block.get(name)
+            if name == "version" and raw is None:
+                entry[name] = None          # 引擎自己写的 None，不是坏值
+            elif isinstance(raw, str) and raw.strip():
+                entry[name] = raw
+            else:
+                problems.append(
+                    f"{what}.{tool}.{name}（不是非空字符串：{_short(raw)}）")
+                entry[name] = None
+        tools[tool] = entry
+
+    if not tools:
+        problems.append(f"{what}（一个工具条目都没有）")
+        return None, mixed
+    return tools, mixed
 
 
 def _make_csv_row_fields(row_dict: dict[str, str]) -> dict[str, str]:
@@ -395,6 +473,14 @@ def load_results(exp: dict, video_index: int) -> ResultsTable:
         context.frame_count_source = _text_or_unknown(
             video_info["frame_count_source"], "帧数来源 video.frame_count_source",
             context_problems)
+
+        # DP-121：解码器身份——审计包要回答的就是「这批帧是哪个解码器解出来的」
+        context.decoder_tools, context.decoder_mixed_source = _decoder_or_unknown(
+            run_data["decoder"], "解码器 decoder", context_problems)
+
+        # DP-122：引擎自己给的计划告警，原文照搬（三态，见 ResultsTable 字段注释）
+        context.plan_warnings = _str_list_or_unknown(
+            run_data["plan_warnings"], "计划告警 plan_warnings", context_problems)
 
         # 提取名册（F1）：chambers[].index 是唯一权威来源
         # G1 + N1/N2/N3/N4/N5/bool：细化名册可信度判断

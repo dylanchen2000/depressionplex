@@ -21,9 +21,13 @@ from PySide6.QtWidgets import (
     QPushButton,
     QFileDialog,
     QHeaderView,
+    QMessageBox,
 )
 
 from desktop.app.models.results import load_results, ResultsTable, ResultsRow, DENOMINATORS
+
+# 判定标定状态只在主窗口启动时做一次（main_window.py:63，DP-111）。
+# 这里用 self.window().calibration_status 拿结论，不许再调 evaluate_calibration。
 
 
 class ResultsPage(QWidget):
@@ -47,10 +51,19 @@ class ResultsPage(QWidget):
         badge_row.addWidget(self.badge_slot)
         layout.addLayout(badge_row)
 
-        # 打开按钮
+        # 按钮行：打开目录 + 导出
+        btn_row = QHBoxLayout()
         open_btn = QPushButton("打开输出目录…")
         open_btn.clicked.connect(self._on_open_directory)
-        layout.addWidget(open_btn)
+        btn_row.addWidget(open_btn)
+
+        # B6 导出按钮（只加按钮与调用，不动表格逻辑）
+        self.export_btn = QPushButton("导出…")
+        self.export_btn.setEnabled(False)  # 没有加载数据时禁用
+        self.export_btn.clicked.connect(self._on_export)
+        btn_row.addWidget(self.export_btn)
+        btn_row.addStretch()
+        layout.addLayout(btn_row)
 
         # 元信息区域
         self.meta_label = QLabel("")
@@ -107,6 +120,7 @@ class ResultsPage(QWidget):
 
         self._display_meta(table_data)
         self._display_table(table_data)
+        self.export_btn.setEnabled(True)  # 有数据后启用导出按钮
 
     def _display_meta(self, table_data: ResultsTable):
         """显示页面顶部的元信息。"""
@@ -230,3 +244,94 @@ class ResultsPage(QWidget):
         item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)  # 只读
 
         return item
+
+    def _on_export(self) -> None:
+        """导出按钮点击处理（B6 新增，只加按钮与调用，不动表格逻辑）。
+
+        原子性契约：三份产物先渲染到临时子目录，三份都成功才移动到目标目录；
+        任何一份失败则整体不留（DP-110 C7/C12）。
+        """
+        if self._current_exp is None:
+            return
+
+        import tempfile
+        import shutil
+        from desktop.app.services.export import export_paths, export_xlsx, export_audit
+        from desktop.app.services.export import export_pdf as _export_pdf
+        from desktop.app.services.export_pdf import FontUnavailableError
+
+        # 标定判定只在主窗口启动时做一次（DP-111），这里直接取结论。
+        calib_status = self.window().calibration_status
+        e_paths = export_paths(
+            self._current_exp, self._current_video_index, calib_status.mode
+        )
+
+        # 让用户选择导出到哪个目录
+        dir_path = QFileDialog.getExistingDirectory(self, "选择导出目录")
+        if not dir_path:
+            return
+
+        out_dir = Path(dir_path)
+
+        # 先渲染到临时子目录，全部成功才移到目标目录
+        successes: list[str] = []
+        failures: list[str] = []
+
+        with tempfile.TemporaryDirectory() as _tmpdir:
+            tmp = Path(_tmpdir)
+            tmp_xlsx = tmp / e_paths["xlsx"].name
+            tmp_audit = tmp / e_paths["audit_zip"].name
+            tmp_pdf = tmp / e_paths["pdf"].name
+
+            # xlsx
+            try:
+                export_xlsx(self._current_exp, self._current_video_index,
+                            calib_status, tmp_xlsx)
+                successes.append("xlsx")
+            except Exception as e:
+                failures.append(f"xlsx 导出失败：这是软件内部错误，请把这段话发给我们: {e}")
+
+            # 审计包
+            try:
+                export_audit(self._current_exp, self._current_video_index,
+                             calib_status, tmp_audit)
+                successes.append("审计包")
+            except Exception as e:
+                failures.append(f"审计包导出失败：这是软件内部错误，请把这段话发给我们: {e}")
+
+            # PDF
+            try:
+                _export_pdf(self._current_exp, self._current_video_index,
+                            calib_status, tmp_pdf)
+                successes.append("PDF")
+            except FontUnavailableError as e:
+                # 原文转述归因结论。"请检查中文字体安装" 是一句猜测：真实原因可能是
+                # 安装包漏了随包字体，也可能是平台插件不提供字体库——两种都跟
+                # 用户装没装字体无关，把他往那个方向引就是浪费他一个下午。
+                failures.append(f"PDF 未导出：{e}")
+            except Exception as e:
+                failures.append(f"PDF 导出失败：这是软件内部错误，请把这段话发给我们: {e}")
+
+            # 原子移动：全部成功才移到目标目录
+            if not failures:
+                for src in [tmp_xlsx, tmp_audit, tmp_pdf]:
+                    shutil.move(str(src), str(out_dir / src.name))
+
+        # 弹窗反馈
+        if not failures:
+            QMessageBox.information(self, "导出成功", f"已导出到：{out_dir}")
+        elif not successes:
+            QMessageBox.critical(
+                self, "导出失败",
+                "三份产物全部失败，目标目录里没有任何文件。\n" + "\n".join(failures),
+            )
+        else:
+            QMessageBox.warning(
+                self, "部分导出失败",
+                # 不许说「成功：…」：按原子性约定这几份也一起撤回了，目标目录里一个都没有。
+                # 说成功会让用户去找不存在的文件，还会让他以为那几份数据已经留档。
+                f"这次一个文件都没有导出。{'、'.join(successes)} 渲染成功了，"
+                f"但按「不留半套产物」的约定与失败的那几份一起撤回了。\n"
+                f"失败原因：\n" + "\n".join(failures)
+                + f"\n\n处理完上面的问题再导一次，目标目录仍是：{out_dir}",
+            )

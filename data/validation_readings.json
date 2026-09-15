@@ -1,0 +1,101 @@
+{
+  "__comment": "验证批次读数 -- 声明文案和报告从这里读，不许在代码里写死。",
+  "__sources": {
+    "own_n_trials": {
+      "file": "docs/ISSUES.md",
+      "anchor": "DP-055",
+      "quote": "27 段素材全部出数字（其中 1 段真空场正确拒绝产出）"
+    },
+    "own_n_paired": {
+      "file": "docs/ISSUES.md",
+      "anchor": "DP-055",
+      "quote": "26 个与人工真值配对"
+    },
+    "own_bias_s": {
+      "file": "docs/ISSUES.md",
+      "anchor": "DP-055",
+      "quote": "平均偏差仅 +1.74 s，回归斜率 0.933（≈1）"
+    },
+    "own_slope": {
+      "file": "docs/ISSUES.md",
+      "anchor": "DP-055",
+      "quote": "平均偏差仅 +1.74 s，回归斜率 0.933（≈1）"
+    },
+    "own_mae_s": {
+      "file": "docs/SOP_悬尾实验人工评分_v1.5.md",
+      "anchor": "十一",
+      "quote": "**平均 35.15 秒**，范围 -72.5 … +68.5 秒"
+    },
+    "own_err_min_s": {
+      "file": "docs/SOP_悬尾实验人工评分_v1.5.md",
+      "anchor": "十一",
+      "quote": "范围 -72.5 … +68.5 秒"
+    },
+    "own_err_max_s": {
+      "file": "docs/SOP_悬尾实验人工评分_v1.5.md",
+      "anchor": "十一",
+      "quote": "范围 -72.5 … +68.5 秒"
+    },
+    "own_pass_n": {
+      "file": "docs/SOP_悬尾实验人工评分_v1.5.md",
+      "anchor": "十一",
+      "quote": "逐试次达标（≤17.7 秒）的比例 | **5 / 26**"
+    },
+    "rater_median_s": {
+      "file": "docs/SOP_悬尾实验人工评分_v1.5.md",
+      "anchor": "十一",
+      "quote": "极差**中位 19.33 秒**、最大 66.79 秒"
+    },
+    "rater_max_s": {
+      "file": "docs/SOP_悬尾实验人工评分_v1.5.md",
+      "anchor": "十一",
+      "quote": "极差**中位 19.33 秒**、最大 66.79 秒"
+    },
+    "csi_n": {
+      "file": "docs/备忘_逆向报告并入_2026-09-13.md",
+      "anchor": "§4.1",
+      "quote": "报告第三份 §4.1（27 个非空试次，评分者按试次合并后）"
+    },
+    "csi_r": {
+      "file": "docs/逆向/2026-09-10_新增材料全量验证-DepressionSuite-report.md",
+      "anchor": "4.1",
+      "quote": "独立试次评分者均值 | 27 | `+0.15 s` | `24.63 s` | `31.81 s` | `0.842`"
+    },
+    "csi_bias_s": {
+      "file": "docs/备忘_逆向报告并入_2026-09-13.md",
+      "anchor": "§4.1",
+      "quote": "偏差（CSI − 人工） | **+0.15 s**"
+    },
+    "csi_mae_s": {
+      "file": "docs/备忘_逆向报告并入_2026-09-13.md",
+      "anchor": "§4.1",
+      "quote": "MAE | **24.63 s**"
+    },
+    "csi_empty_cup_s": {
+      "file": "docs/SPEC_产品化总体架构_v1.md",
+      "anchor": "G11",
+      "quote": "报成 **466.88 s 不动（99.923%）**"
+    },
+    "csi_empty_cup_pct": {
+      "file": "docs/SPEC_产品化总体架构_v1.md",
+      "anchor": "G11",
+      "quote": "报成 **466.88 s 不动（99.923%）**"
+    }
+  },
+  "own_n_trials": 27,
+  "own_n_paired": 26,
+  "own_bias_s": "+1.74",
+  "own_slope": "0.933",
+  "own_mae_s": "35.15",
+  "own_err_min_s": "-72.5",
+  "own_err_max_s": "+68.5",
+  "own_pass_n": 5,
+  "rater_median_s": "19.33",
+  "rater_max_s": "66.79",
+  "csi_n": 27,
+  "csi_r": "0.842",
+  "csi_bias_s": "+0.15",
+  "csi_mae_s": "24.63",
+  "csi_empty_cup_s": "466.88",
+  "csi_empty_cup_pct": "99.923"
+}

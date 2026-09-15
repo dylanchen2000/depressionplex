@@ -311,6 +311,10 @@ def test_ci_installs_the_pinned_desktop_deps():
     sf = (ROOT / ".github/workflows/desktop-selftest.yml").read_text(encoding="utf-8")
     assert declared["PySide6"] in sf, (
         f"`desktop-selftest.yml` 必须装 {declared['PySide6']}（版本也要与 pyproject 一致）")
+    # export render 步骤要装 openpyxl（版本与 pyproject 一致）
+    assert declared["openpyxl"] in sf, (
+        f"`desktop-selftest.yml` 必须装 {declared['openpyxl']}（export render 步骤需要，"
+        "版本必须与 pyproject 的 pin 一致）")
 
 
 def test_no_sys_path_magic():

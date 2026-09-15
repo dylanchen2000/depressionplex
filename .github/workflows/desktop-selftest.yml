@@ -16,6 +16,7 @@ jobs:
         os: [ubuntu-latest, windows-latest]
     env:
       QT_QPA_PLATFORM: offscreen
+      PYTHONUTF8: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -25,9 +26,16 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libegl1 libxkbcommon0 libdbus-1-3
+          sudo apt-get install -y libegl1 libxkbcommon0 libdbus-1-3 fonts-noto-cjk
       - name: Install PySide6
         run: pip install PySide6==6.7.3
+      - name: Install openpyxl (export render step)
+        run: pip install openpyxl==3.1.5
+      # 随包中文字体（DP-110）。不拉的话 windows 上 PDF 一定导不出来——
+      # offscreen 平台插件在 windows 上枚举到 0 个系统字体（实测 run 34932358712）。
+      # 脚本自己校验字节数 + sha256，拉错了当场非零退出。
+      - name: Fetch bundled CJK font (Noto Sans SC)
+        run: python packaging/fetch_font.py
       - name: Test PySide6 offscreen startup
         run: |
           python -c "
@@ -46,3 +54,190 @@ jobs:
       - name: Report desktop status
         if: hashFiles('desktop/main.py') == ''
         run: echo "desktop/ 尚不存在，已跳过自检（B1 未交付）"
+      - name: Export render smoke test (PDF + xlsx offscreen)
+        run: |
+          python -c "
+          import sys, json, csv, tempfile, html as html_lib
+          from pathlib import Path
+
+          sys.path.insert(0, '.')
+          sys.path.insert(0, 'tests')
+
+          # 构造最小 Report（不起 QApplication，只测导出层）
+          from desktop.app.services.calibration import Mode, Badge, G7_MIN_R, G8_MAX_ABS_BIAS_S
+          from desktop.app.models.results import ResultsTable, ResultsRow, load_results
+          from desktop.app.models.report import build_report
+          from desktop.app.services.export_xlsx import render_xlsx
+          from desktop.app.services.export_pdf import (
+              render_pdf, _build_html, _select_font_with_qt, BUNDLED_FONT_FAMILY)
+          from desktop.app.utils.paths import BUNDLED_FONT_FILENAME, bundled_font_dir
+
+          with tempfile.TemporaryDirectory() as tmpdir:
+              tmp = Path(tmpdir)
+              video = tmp / 'v.mp4'
+              video.touch()
+              exp = {
+                  'schema_version': '1', 'created_at': '2026-09-14T00:00:00+00:00',
+                  'operator': None, 'note': None, 'assay': 'TST',
+                  'n_chambers': 1, 'calib_frames': 12, 'body_area_prior': None,
+                  'output_dir': str(tmp),
+                  'videos': [{'path': str(video), 'trial_prefix': None}],
+              }
+              run_data = {
+                  'schema_version': '1', 'tool_version': '0.1.0', 'assay': 'TST',
+                  'scoring_window_s': [0, 360], 'rules': {'theta_mob': 0.0175},
+                  'video': {'name': 'v.mp4', 'fps': 30.0, 'n_frames': 10800,
+                            'frame_count_source': 'packets'},
+                  'calib_indices': [], 'chambers': [{'index': 1}],
+                  'plan_warnings': [], 'chamber_validity': [], 'not_scored': [],
+                  # decoder 是必写键（DP-108）：审计包要能回答「这批帧是哪个解码器解的」。
+                  # 工具名在这里手写，是因为本 workflow 不装引擎依赖、import 不了
+                  # depressionplex.video 的常量；两边对不上的守卫在
+                  # tests/test_report_model.py（那边是真 import 常量的）。
+                  'decoder': {
+                      'ffmpeg': {'path': '/opt/dpx/ffmpeg', 'source': 'bundled',
+                                 'version': 'ffmpeg version 7.1.1'},
+                      'ffprobe': {'path': '/opt/dpx/ffprobe', 'source': 'bundled',
+                                  'version': 'ffprobe version 7.1.1'},
+                      'mixed_source': False,
+                  },
+              }
+              (tmp / 'v_run.json').write_text(json.dumps(run_data), encoding='utf-8')
+              from desktop.app.models.results import CSV_FIELDS_EXPECTED
+              with (tmp / 'v.csv').open('w', newline='', encoding='utf-8') as f:
+                  w = csv.DictWriter(f, fieldnames=list(CSV_FIELDS_EXPECTED))
+                  w.writeheader()
+                  w.writerow({
+                      'trial_id': 'v-ch1', 'assay': 'TST', 'fps': '30.0',
+                      'recording_frames': '10800', 'window_frames': '10800',
+                      'scorable_frames': '10000', 'unknown_frames_window': '0',
+                      'validity_status': 'valid', 'occupied_fraction': '0.95',
+                      'scored': 'True', 'immobility_s': '120.5',
+                      'immobility_raw_s': '119.0', 'mobility_s': '239.5',
+                      'mobility_bouts': '3', 'first_mobility_onset_s': '5.0',
+                      'gate_messages': '',
+                  })
+              results = load_results(exp, 0)
+              report = build_report(
+                  results=results, calib_mode=Mode.RESEARCH,
+                  calib_badge=Badge.YELLOW.value, calib_batch=None,
+                  g7_threshold=G7_MIN_R, g8_threshold_s=G8_MAX_ABS_BIAS_S,
+              )
+
+              # HTML assertion: _build_html is pure function, check declaration lines
+              html_content = _build_html(report)
+              for line in report.declaration.splitlines():
+                  escaped = html_lib.escape(line)
+                  assert escaped in html_content, f'HTML 里找不到声明行: {line!r}'
+              print('HTML assertion PASSED')
+
+              # xlsx
+              xlsx_path = tmp / 'out.xlsx'
+              render_xlsx(report, xlsx_path)
+              assert xlsx_path.exists() and xlsx_path.stat().st_size > 2000, 'xlsx 太小或为空'
+              import openpyxl
+              wb = openpyxl.load_workbook(str(xlsx_path))
+              ws = wb.active
+              all_vals = ' '.join(str(v or '') for row in ws.iter_rows(values_only=True) for v in row)
+              decl_first_line = report.declaration.splitlines()[0].strip()
+              assert decl_first_line in all_vals, f'xlsx 里找不到声明第一行: {decl_first_line!r}'
+              wb.close()
+              print(f'xlsx OK: {xlsx_path.stat().st_size} bytes')
+
+              # PDF: must truly render, no fallback allowed
+              pdf_path = tmp / 'out.pdf'
+              from PySide6.QtWidgets import QApplication
+              app = QApplication.instance() or QApplication(sys.argv)
+
+              # 先断言选中的**就是随包那一份**：两个平台都该走这条路。
+              # 只断言「render_pdf 没抛异常」是不够的——那句话在系统字体兜底时也成立。
+              font_file = bundled_font_dir() / BUNDLED_FONT_FILENAME
+              assert font_file.is_file(), f'随包字体没拉到位: {font_file}'
+              chosen = _select_font_with_qt()
+              print(f'选中字体: {chosen}')
+              assert chosen == BUNDLED_FONT_FAMILY, (
+                  f'没选中随包字体，实际 {chosen!r}——随包分支坏了，'
+                  f'客户机器上就只能靠碰巧装了中文字体')
+
+              render_pdf(report, pdf_path)
+              assert pdf_path.exists(), 'PDF 文件不存在'
+              pdf_size = pdf_path.stat().st_size
+              assert pdf_size > 2000, f'PDF 太小: {pdf_size} bytes'
+              header = pdf_path.read_bytes()[:4]
+              assert header == b'%PDF', f'PDF 头字节不对: {header!r}'
+              print(f'PDF OK: {pdf_size} bytes, header={header}')
+              app.quit()
+              print('Export render smoke test PASSED')
+          "
+      # 逼掉随包分支，看两件事：系统兜底在不在，报错归因对不对。分两个情形，
+      # 因为「文件不在位」和「文件在位但注册不上」是两种不同的原因，报错不许说成一件事：
+      #   情形 1 空目录        ⇒ 打包/部署漏了文件（跟这台机器装没装字体无关）
+      #   情形 2 坏字体文件在位 ⇒ 注册失败，此时才该谈平台插件/系统字体
+      # 第三种原因（这台机器真的缺中文字体）在两个 runner 上都造不出来，
+      # 由单测 test_font_failure_message_distinguishes_three_causes 覆盖（枚举 154 个那一支）。
+      # 实测（run 34932358712 / 34937121350）：ubuntu offscreen 枚举到 36 个 family、15 个能渲「中」；
+      # windows offscreen 枚举到 **0** 个（同一台机器 msyh.ttc 在位、原生插件能枚举到 154 个）。
+      # 所以 ubuntu 两个情形都必须靠系统字体成功，windows 两个都必须失败且各自说对原因。
+      # 哪天 Qt 修了 offscreen 的字体枚举，这条会红在 windows 上——那是该红的，改这里之前先看数。
+      - name: Font attribution smoke (forced bundled-font failures)
+        env:
+          SMOKE_RUNNER_OS: ${{ runner.os }}
+        run: |
+          python -c "
+          import os, sys, tempfile
+          from pathlib import Path
+
+          sys.path.insert(0, '.')
+          from PySide6.QtWidgets import QApplication
+          from PySide6.QtGui import QFontDatabase
+          from desktop.app.services.export_pdf import (
+              _select_font_with_qt, FontUnavailableError)
+          from desktop.app.utils.paths import BUNDLED_FONT_FILENAME, bundled_font_dir
+
+          app = QApplication.instance() or QApplication(sys.argv)
+          assert (bundled_font_dir() / BUNDLED_FONT_FILENAME).is_file(), '随包字体没拉到位'
+
+          n = len(QFontDatabase.families())
+          runner_os = os.environ['SMOKE_RUNNER_OS']
+          print(f'{runner_os}: 平台插件枚举到 {n} 个 family')
+          expect_system_fallback = (runner_os == 'Linux')
+
+          def probe(font_dir, case):
+              try:
+                  fam = _select_font_with_qt(font_dir)
+              except FontUnavailableError as e:
+                  got = str(e)
+                  print(case + ' 拒绝导出：' + got)
+                  assert not expect_system_fallback, (
+                      f'{case} {runner_os} 上装了中文字体（枚举 {n} 个）却没兜住：{got}')
+                  return got
+              print(case + ' 系统字体兜底选中: ' + fam)
+              assert expect_system_fallback, (
+                  f'{case} {runner_os} 上本该没有可用系统字体，却选中了 {fam}——先看数再改守卫')
+              return None
+
+          with tempfile.TemporaryDirectory() as d:
+              got = probe(Path(d), '[情形1 空目录]')
+              if got is not None:
+                  assert '不在位' in got, f'没归因到文件缺失：{got}'
+                  assert '不是这台机器缺字体' in got, f'把锅推给机器了：{got}'
+                  assert '平台插件' not in got, f'文件都不在位就别扯平台插件：{got}'
+                  print('归因文案 OK（打包/部署漏了文件）')
+
+          with tempfile.TemporaryDirectory() as d:
+              bad = Path(d) / BUNDLED_FONT_FILENAME
+              bad.write_bytes(b'not a font at all' * 16)
+              got = probe(Path(d), '[情形2 坏字体]')
+              if got is not None:
+                  assert n == 0, (
+                      f'{runner_os} 现在枚举到 {n} 个 family 了，offscreen 的字体库行为变了，'
+                      f'先看数再改这条守卫')
+                  assert '注册失败' in got, f'没说清是注册失败：{got}'
+                  assert '平台插件' in got, f'没归因到平台插件：{got}'
+                  assert '不等于这台机器没有中文字体' in got, f'把锅推给机器了：{got}'
+                  print('归因文案 OK（平台插件不给字体库，不是机器没字体）')
+
+          app.quit()
+          print('Font attribution smoke PASSED')
+          "
+

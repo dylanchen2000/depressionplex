@@ -25,6 +25,14 @@ APP_DIR_POSIX = "depression-plex"
 #: 所以这句话配了守卫才敢写。
 CALIBRATION_FILENAME = "calibration.json"
 
+#: 随包中文字体（DP-110）。文件名与包内目录名放在这里、不放在 `export_pdf.py`：
+#: 它们是**路径契约**——`packaging/build_windows.spec` 的 `datas` 目标目录必须跟
+#: `BUNDLED_FONT_SUBDIR` 一字不差，由
+#: `tests/test_report_model.py::test_bundled_font_in_installer_spec` 双向对账。
+#: `export_pdf.py` 只负责「哪个 family 名能渲中文」，不负责路径。
+BUNDLED_FONT_FILENAME = "NotoSansSC-Regular.otf"
+BUNDLED_FONT_SUBDIR = "fonts"
+
 
 def is_frozen() -> bool:
     """是不是 PyInstaller 冻结后的可执行文件。"""
@@ -61,6 +69,25 @@ def bundled_calibration_path() -> Path:
         return Path(sys.executable).parent / CALIBRATION_FILENAME
     # 源码运行：仓根（本文件在 desktop/app/utils/ 下，上溯三级）
     return Path(__file__).resolve().parents[3] / CALIBRATION_FILENAME
+
+
+def bundled_font_dir() -> Path:
+    """随包中文字体所在目录。**故意不走 `resource_path()`**，理由见下。
+
+    这份资源在源码树里不在 `desktop/` 下：由 `packaging/fetch_font.py` 下载到仓根的
+    `vendor/fonts/`（8.3 MB 二进制不进 git），冻结后由 spec 的 `datas` 放到包根的
+    `fonts/`。`resource_path()` 的基准是 `desktop/`，表达不了「源码树在仓根、包内在包根」
+    这种两侧不同名的资源——硬套就要写 `resource_path("../vendor/fonts")`，
+    那在冻结后会指到 `_MEIPASS` 的**外面**去，而且源码模式下碰巧是对的，
+    正好是最难查的那种错。
+
+    PyInstaller 内部 API 仍然只有本模块这一个入口点（架构 §3.4），由
+    `tests/test_acq_check.py::test_no_frozen_internals_in_desktop` 盯着。
+    """
+    if is_frozen():
+        return Path(sys._MEIPASS) / BUNDLED_FONT_SUBDIR
+    # 源码运行：仓根 vendor/fonts（跑一次 `python3 packaging/fetch_font.py` 落地）
+    return Path(__file__).resolve().parents[3] / "vendor" / BUNDLED_FONT_SUBDIR
 
 
 def _ensure(path: Path, create: bool) -> Path:
