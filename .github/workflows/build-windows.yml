@@ -123,6 +123,7 @@ jobs:
             exit 1
           }
           Write-Host "✓ unknown subcommand 通过 (rc=2)"
+          exit 0
 
       - name: Smoke test - GUI exe (offscreen)
         env:
