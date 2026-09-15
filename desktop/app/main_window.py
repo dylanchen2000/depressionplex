@@ -8,11 +8,12 @@ from PySide6.QtWidgets import (
 )
 
 from desktop.app.pages.placeholders import (
-    WelcomePage, ResultsPage,
+    WelcomePage,
     ReviewPage, ExportPage, SelfCheckPage,
 )
 from desktop.app.pages.new_experiment import NewExperimentPage
 from desktop.app.pages.queue import QueuePage
+from desktop.app.pages.results import ResultsPage
 from desktop.app.services.calibration import evaluate_calibration
 from desktop.app.utils.paths import bundled_calibration_path
 from desktop.app.widgets.badge import ModeBadge
