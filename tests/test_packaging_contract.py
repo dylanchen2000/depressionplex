@@ -1108,25 +1108,32 @@ def test_only_one_utf8_shim():
         ROOT / "desktop" / "app" / "utils" / "stdio.py",  # 外壳进程
     }
 
-    # 1. 扫描所有 .py 文件，检查 TextIOWrapper / reconfigure(encoding= 只出现在这两个文件
+    # 1. 只扫产品代码目录（tests/ 不进安装包，扫它等于守卫自伤）
+    product_dirs = (
+        ROOT / "depressionplex",
+        ROOT / "desktop",
+        ROOT / "packaging",
+        ROOT / "scripts",
+        ROOT / "tools",
+        ROOT / "ui",
+    )
     violations = []
-    for py_file in ROOT.rglob("*.py"):
-        # 跳过允许的两个文件
-        if py_file in allowed_files:
+    for product_dir in product_dirs:
+        if not product_dir.is_dir():
             continue
+        for py_file in product_dir.rglob("*.py"):
+            if py_file in allowed_files:
+                continue
+            if "__pycache__" in py_file.parts or ".venv" in py_file.parts:
+                continue
 
-        # 跳过 __pycache__ 和 .venv
-        if "__pycache__" in py_file.parts or ".venv" in py_file.parts:
-            continue
-
-        content = py_file.read_text(encoding="utf-8")
-        # 查找 TextIOWrapper 或 reconfigure(encoding=
-        for i, line in enumerate(content.splitlines(), start=1):
-            if "TextIOWrapper" in line or "reconfigure(encoding=" in line:
-                violations.append(
-                    f"{py_file.relative_to(ROOT)}:{i} 不许自己处理编码，"
-                    f"必须调用 force_utf8()（编码 shim 只许在两个 stdio 文件里）"
-                )
+            content = py_file.read_text(encoding="utf-8")
+            for i, line in enumerate(content.splitlines(), start=1):
+                if "TextIOWrapper" in line or "reconfigure(encoding=" in line:
+                    violations.append(
+                        f"{py_file.relative_to(ROOT)}:{i} 不许自己处理编码，"
+                        f"必须调用 force_utf8()（编码 shim 只许在两个 stdio 文件里）"
+                    )
 
     assert not violations, \
         "编码 shim 只许在两个 stdio 文件里：\n" + "\n".join(f"  - {v}" for v in violations)
