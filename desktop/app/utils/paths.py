@@ -18,6 +18,13 @@ APP_NAME = "DEPRESSION-PLEX"
 ORG_DIR = "GeneI"          # 磁盘用名，见上文第 2 条
 APP_DIR_POSIX = "depression-plex"
 
+#: 随包标定文件的文件名。**全仓只许这一处出现这个字面量**，由
+#: `tests/test_badge_view.py::test_calibration_filename_literal_in_exactly_one_file`
+#: 盯着。今天引它的只有启动自检（`main_window.py`）；签发脚本与安装脚本还不存在，
+#: 它们落地时也必须引这个常量而不是自己再写一遍——**文档里的承诺没有守卫就是假承诺**，
+#: 所以这句话配了守卫才敢写。
+CALIBRATION_FILENAME = "calibration.json"
+
 
 def is_frozen() -> bool:
     """是不是 PyInstaller 冻结后的可执行文件。"""
@@ -36,6 +43,24 @@ def resource_path(relative_path: str) -> Path:
     else:
         base = Path(__file__).resolve().parent.parent.parent   # desktop/
     return base / relative_path
+
+
+def bundled_calibration_path() -> Path:
+    """随包标定文件应当在的位置。**返回路径，不判断存在**。
+
+    存不存在由 `services/calibration.py` 判——那里「该有却没有」和「不该有却有」
+    是两种不同的结论（都红，但原因不同），在这里提前判会把它们合并成一种。
+
+    **冻结时用 `sys.executable` 的目录，不用 `resource_path`（`sys._MEIPASS`）。**
+    这不是随便挑的：`_MEIPASS` 在 onefile 下是每次启动都重建的临时目录，
+    one-folder 下指向 `_internal/`。标定文件是**资质凭据**，要跟 exe 一起被签名、
+    被安装脚本放在用户看得见、能被 IT 审计到的位置（`{app}\\calibration.json`），
+    而不是藏在一个临时目录里让人以为它不存在。
+    """
+    if is_frozen():
+        return Path(sys.executable).parent / CALIBRATION_FILENAME
+    # 源码运行：仓根（本文件在 desktop/app/utils/ 下，上溯三级）
+    return Path(__file__).resolve().parents[3] / CALIBRATION_FILENAME
 
 
 def _ensure(path: Path, create: bool) -> Path:

@@ -80,6 +80,42 @@ def self_test() -> int:
     if got != want:
         problems.append(f"页面清单不符：期望 {want}，实际 {got}")
 
+    # 模式徽章必须真的挂在状态栏上（B8 / DP-111）。沙箱里没有 PySide6，
+    # 只有这里能验「它确实是主窗口的一个子控件」——AST 守卫只能看见代码写了这句，
+    # 看不见它有没有生效。**这一条是徽章唯一的运行期证明。**
+    # **直接取属性，不用 `getattr(..., None)`**：这个函数里一律不许出现按名字找东西的
+    # 写法（`test_page_classes_resolved_in_one_place` 连 `getattr`/`globals`/`vars` 一起禁了，
+    # 起因是 DP-101 那个「按名字找页面类」的第二解析器）。那条守卫的措辞比它要防的事宽，
+    # 但**宽不是错**：这里本来就该直接读——`MainWindow.__init__` 无条件设这个属性，
+    # 读不到就是接线被人拆了，那时一个 AttributeError 当场炸掉比一句温和的提示更对。
+    badge = window.mode_badge
+    if badge.parent() is None:
+        problems.append("mode_badge 没有被加进任何容器（不会显示）")
+    elif not window.statusBar().isAncestorOf(badge):
+        # **「有父容器」不等于「在状态栏上」**（B8 复核 R5）：把徽章挂进任意一页的
+        # layout，`parent()` 也不是 None，这条断言照样过，而「七页可见」当场就没了——
+        # 而七页可见正是本件通篇的主张。用 `isAncestorOf` 不用
+        # `badge.parent() is window.statusBar()`：前者是文档化的 API，
+        # Qt 在中间塞了容器也照样成立，同时仍然能把「状态栏」和「某一页」分开。
+        problems.append(
+            f"mode_badge 挂在 {type(badge.parent()).__name__} 里，不在状态栏上："
+            "那样只有它所在的那一页看得见")
+    else:
+        view = badge.view
+        print(f"模式徽章：{view.text}（mode={window.calibration_status.mode.value}，"
+              f"claims_metrology={view.claims_metrology}）")
+        if not view.text.strip():
+            problems.append("徽章挂上去了，但上面一个字都没有")
+        for reason in window.calibration_status.reasons:
+            print(f"  原因：{reason}")
+        # 自检**不判断该是黄还是绿**（那取决于随包标定文件，两种都是合法发布态），
+        # 只判断「徽章的声称」与「判定模块的结论」一致。这两个数一旦分叉，
+        # 就会出现界面写着计量模式而导出按研究版声明（或反过来）的情形。
+        if view.claims_metrology != window.calibration_status.may_report_metrology:
+            problems.append(
+                f"徽章声称 claims_metrology={view.claims_metrology}，"
+                f"但判定结论是 {window.calibration_status.may_report_metrology}")
+
     total_ms = (time.perf_counter() - t0) * 1000
     if problems:
         for p in problems:
