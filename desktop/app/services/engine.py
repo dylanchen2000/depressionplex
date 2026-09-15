@@ -195,3 +195,42 @@ def build_argv(exp: dict, video_index: int) -> list[str]:
         argv.extend(["--body-area-prior", str(exp["body_area_prior"])])
 
     return argv
+
+
+def acq_check_argv(video_path: str | Path, n_chambers: int) -> list[str]:
+    """采集自检（`acq-check` 子命令）的完整 argv。
+
+    **为什么拼在这里、不许拼在页面里**：子命令名册的对账守卫
+    （`tests/test_packaging_contract.py::test_cli_subcommand_registry` 第 3 段）
+    只扫本文件里 `argv.append("<子命令>")` 这一种形状。同一条 argv 写在页面里
+    照样跑得动，但名册那一行被改掉、或子命令名拼错时，**没有任何东西会红** ——
+    那是守卫看不见的形状（DP-120）。
+
+    不传 `--json`：引擎的 stdout 恒为 JSON（`cli/acq_check.py` 里那是个保留标志），
+    传一个当前无作用的旗标只会在它将来被删掉时把失败变成一句看不懂的 usage。
+
+    Args:
+        video_path: 待检视频路径。**取绝对路径**——源码模式下子进程的 cwd 是仓根，
+            相对路径会被解到仓根下去，找不到就成了「解码失败」。
+        n_chambers: 隔间数提案。规则与向导同一条（≥ 1，见 models/experiment.py）。
+
+    Returns:
+        完整 argv，可直接 `QProcess.start(argv[0], argv[1:])`。
+
+    Raises:
+        ValueError: 路径为空、或隔间数不是 ≥ 1 的整数。
+        FileNotFoundError: 找不到引擎（由 engine_command() 抛，原样上浮）。
+    """
+    text = str(video_path).strip()
+    if not text:
+        raise ValueError("没有选中视频，拼不出自检命令")
+    if isinstance(n_chambers, bool) or not isinstance(n_chambers, int):
+        raise ValueError(f"隔间数必须是整数，读到 {n_chambers!r}")
+    if n_chambers < 1:
+        raise ValueError(f"隔间数必须 ≥ 1，当前为 {n_chambers}")
+
+    argv = engine_command()
+    argv.append("acq-check")
+    argv.extend(["--video", str(Path(text).resolve())])
+    argv.extend(["--chambers", str(n_chambers)])
+    return argv

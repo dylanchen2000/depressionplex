@@ -84,3 +84,26 @@ def percent(frame: int, n: int | None) -> float | None:
     if n is None or n <= 0:
         return None
     return 100.0 * frame / n
+
+
+def status_text(line: LogLine) -> str:
+    """把引擎的一条 stderr 行变成能直接摆给人看的字。
+
+    `acq-check` 的进度行是 `{"status": "计算对比度"}`（`cli/acq_check.py::_progress`），
+    它没有 `"ev"` 键，所以 `StderrPump` 原样当日志行交出来。直接摆到界面上，
+    客户看到的是一行 JSON —— 解只解一次，就解在这里（DP-120）。
+
+    不是 JSON、或 JSON 里没有 `status`：**原样返回，不许吞** ——
+    引擎真正的报错就藏在那些行里。
+    """
+    text = line.text.strip()
+    if text.startswith("{"):
+        try:
+            obj = json.loads(text)
+        except json.JSONDecodeError:
+            return text
+        if isinstance(obj, dict):
+            status = obj.get("status")
+            if isinstance(status, str) and status:
+                return status
+    return text
