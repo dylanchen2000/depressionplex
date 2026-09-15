@@ -1,6 +1,6 @@
 [project]
 name = "depressionplex"
-version = "0.1.0.dev0"
+version = "1.0.0"
 description = "抑郁/绝望行为分析（FST 强迫游泳 + TST 悬尾）"
 requires-python = ">=3.10"
 
