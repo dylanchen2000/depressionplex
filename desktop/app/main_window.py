@@ -9,11 +9,12 @@ from PySide6.QtWidgets import (
 
 from desktop.app.pages.placeholders import (
     WelcomePage,
-    ReviewPage, ExportPage, SelfCheckPage,
+    ReviewPage, ExportPage,
 )
 from desktop.app.pages.new_experiment import NewExperimentPage
 from desktop.app.pages.queue import QueuePage
 from desktop.app.pages.results import ResultsPage
+from desktop.app.pages.self_test import AcqCheckPage
 from desktop.app.services.calibration import evaluate_calibration
 from desktop.app.utils.paths import bundled_calibration_path
 from desktop.app.widgets.badge import ModeBadge
@@ -26,7 +27,7 @@ PAGE_ORDER = (
     ("结果", "ResultsPage"),
     ("复核", "ReviewPage"),
     ("导出", "ExportPage"),
-    ("自检", "SelfCheckPage"),
+    ("自检", "AcqCheckPage"),
 )
 
 #: 类名 → 类。**「哪个类是哪一页」只许在这里回答一次**（DP-101 修）：
@@ -40,7 +41,7 @@ PAGE_CLASSES = {
     "ResultsPage": ResultsPage,
     "ReviewPage": ReviewPage,
     "ExportPage": ExportPage,
-    "SelfCheckPage": SelfCheckPage,
+    "AcqCheckPage": AcqCheckPage,
 }
 
 

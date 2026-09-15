@@ -19,6 +19,12 @@ import numpy as np
 
 from . import silhouette as sil
 
+# ── 采集自检硬门槛（唯一来源，B7 DP-109）──────────────────────────────────────
+# 判定用一份、显示用同一份。任何文件不许再定义这三个字面量（守卫见 test_acq_check.py §3.1）。
+GATE_CONTRAST_ABS: float = 100.0    # 绝对灰阶差门槛；对标 CSI P2 参考素材（208.5 灰阶）
+GATE_CONTRAST_RATIO: float = 2.0    # 背景/暗侧均值比值门槛；CSI P2 参考素材 6.77×
+GATE_AREA_JITTER_P90: float = 0.02  # 最静隔间面积抖动 p90 / BL²；P2 实测 0.0035（6× 余量）
+
 
 @dataclass(frozen=True, eq=False)
 class Component:
@@ -389,7 +395,7 @@ def contrast_report(gray: np.ndarray) -> dict[str, float]:
         "abs_diff": b - d,
         "ratio": b / max(d, 1e-9),
         "dark_from_mask": source,
-        "passes_gate": float((b - d) >= 100.0 and (b / max(d, 1e-9)) >= 2.0),
+        "passes_gate": float((b - d) >= GATE_CONTRAST_ABS and (b / max(d, 1e-9)) >= GATE_CONTRAST_RATIO),
     }
 
 

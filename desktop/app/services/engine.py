@@ -10,6 +10,7 @@ import sys
 from pathlib import Path
 
 from desktop.app.models.experiment import SCHEMA_KEYS, VIDEO_KEYS
+from desktop.app.utils.paths import is_frozen as _is_frozen
 
 #: 一个 item 的产出文件名。**只有这一处**按视频名派生文件名：
 #: 原来 `build_argv`（查重名）与 `QueuePage._cleanup_outputs`（取消时删）各写一遍，
@@ -100,10 +101,7 @@ def engine_command() -> list[str]:
     if env_cmd:
         return shlex.split(env_cmd)
 
-    # 判断是否冻结（PyInstaller）
-    is_frozen = getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS")
-
-    if is_frozen:
+    if _is_frozen():
         # 冻结后：与主程序同目录的 dp-engine.exe / dp-engine
         main_exe = Path(sys.executable)
         engine_name = "dp-engine.exe" if sys.platform == "win32" else "dp-engine"
@@ -134,8 +132,7 @@ def engine_command() -> list[str]:
 
 def get_cwd() -> Path | None:
     """返回引擎子进程的 cwd。源码模式下必须是仓根，冻结模式下返回 None（用默认）。"""
-    is_frozen = getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS")
-    if is_frozen:
+    if _is_frozen():
         return None
     else:
         return Path(__file__).resolve().parent.parent.parent.parent
