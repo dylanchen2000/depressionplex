@@ -774,6 +774,24 @@ def test_cli_subcommand_registry():
     )
 
 
+def _resolve_ffmpeg_tool_arg_ids(tree: ast.AST) -> set[int]:
+    """`_resolve_ffmpeg_tool(...)` 的位置实参节点 id。传给解析器的字面量不算硬编码。"""
+    ids: set[int] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        name = None
+        if isinstance(func, ast.Name):
+            name = func.id
+        elif isinstance(func, ast.Attribute):
+            name = func.attr
+        if name == "_resolve_ffmpeg_tool":
+            for arg in node.args:
+                ids.add(id(arg))
+    return ids
+
+
 def test_no_hardcoded_ffmpeg_tool_names():
     """守卫 A14：除 video.py 与 packaging/ 外，不许出现 ffmpeg 工具名字符串常量。
 
@@ -782,6 +800,7 @@ def test_no_hardcoded_ffmpeg_tool_names():
     改成更硬的规则（A14）：
     1. 除 video.py 与 packaging/ 外，depressionplex/ 的任何源文件里不许出现这四个字符串常量
     2. video.py 里除 _resolve_ffmpeg_tool 外的函数体内也不许出现（_resolve_ffmpeg_tool 是唯一入口）
+    例外：作为 `_resolve_ffmpeg_tool(...)` 调用实参出现的字面量不算违规（那是在调解析器）。
     """
     depressionplex_dir = ROOT / "depressionplex"
     video_py = depressionplex_dir / "video.py"
@@ -795,8 +814,11 @@ def test_no_hardcoded_ffmpeg_tool_names():
             continue  # video.py 单独检查
 
         tree = ast.parse(py_file.read_text(encoding="utf-8"), filename=str(py_file))
+        skip_ids = _resolve_ffmpeg_tool_arg_ids(tree)
 
         for node in ast.walk(tree):
+            if id(node) in skip_ids:
+                continue
             if isinstance(node, ast.Constant) and isinstance(node.value, str):
                 if node.value in forbidden_strings:
                     violations.append(
@@ -808,6 +830,7 @@ def test_no_hardcoded_ffmpeg_tool_names():
     # 2. 检查 video.py 里除 _resolve_ffmpeg_tool 外的函数
     if video_py.exists():
         tree = ast.parse(video_py.read_text(encoding="utf-8"), filename=str(video_py))
+        skip_ids = _resolve_ffmpeg_tool_arg_ids(tree)
 
         # 找到 _resolve_ffmpeg_tool 函数的节点
         resolve_func_node = None
@@ -821,6 +844,8 @@ def test_no_hardcoded_ffmpeg_tool_names():
             if isinstance(node, ast.FunctionDef) and node != resolve_func_node:
                 # 在这个函数体内查找禁止的字符串常量
                 for inner_node in ast.walk(node):
+                    if id(inner_node) in skip_ids:
+                        continue
                     if isinstance(inner_node, ast.Constant) and isinstance(inner_node.value, str):
                         if inner_node.value in forbidden_strings:
                             violations.append(
