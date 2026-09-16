@@ -429,7 +429,11 @@ def test_dp131_zero_selected_is_a_stop_not_a_confirmation() -> None:
     原来 0 场照样弹确认框，把「本批要评几场」写成 0 还劝人再点一次；评分员点第二次
     才被 beginSession 用**另一句**话（「本次所选视频都已评过或不在剩余清单里」）拦住。
     那不是措辞问题，是缺一道关：先读一段假出路，再被告知走不通。现在 0 场就是不许
-    开始，文案按裁决逐字钉死。N ≥ 1 的现有文案是真话，一个字不许动。
+    开始，文案按**复核意见 1** 逐字钉死。原来那句说的是一个不可达的状态：真的一个
+    文件都没选，会被 §1.2 那道关先接住，这道关打得着的只有「选了视频、但选到的每一
+    场都已评过」，而旧文案在说「你没选视频」——评分员照它再选一遍同样的文件，解决
+    不了任何事（旧串的字面在这里也不写：写下来就成了下次「顺手恢复」的种子）。
+    N ≥ 1 的现有文案是真话，一个字不许动。
 
     三件事一起钉，少一件这道关就是假的：
     ① 条件 `if (!nHave)` 必须与那句文案、`state.confirmOnce = null`、`return;` 绑在
@@ -438,23 +442,34 @@ def test_dp131_zero_selected_is_a_stop_not_a_confirmation() -> None:
        **之前**——挪到后面就等于先把假出路说完再拦；
     ③ 那句假出路的字面（「本批只评这 0 场」）在整个文件里一处都不许留，含注释：
        注释里的原句会被下一次「顺手恢复」抄回去（与 test_old_false_promise_copy_is_gone
-       同一条纪律）；活着的「本批只评这 …场」只能有一处，就是 N ≥ 1 那条路。
+       同一条纪律）；活着的「本批只评这 …场」只能有一处，就是 N ≥ 1 那条路；
+    ④ 复核意见 1 的两条边界：新串在整个文件里**恰好 1 处**、旧串连前半截也
+       **0 命中**（含注释）；§1.2 那道「一个视频文件都没选」的关
+       （`if (!vids.length) err.push("请选择视频文件");`）一个字不许动、也不许跟这道
+       合并——那是另一道关，合并就等于把两种不同的现场说成一句话。
+       另钉「文案不许另起说法」：红字引号里那个按钮标签必须与界面上 `redoBtn` 的
+       真标签逐字相同（含省略号），按钮改名而文案没跟着改就是红。
 
     行为归 node（test_timer_assay.js 里 DP-131 那四条：0 场拦住、0 场 + 存档时关优先、
     nHave ≥ 1 不许被误伤、名册全评完仍直接补出最终文件）；这里钉契约文本。
     """
     text = _html_text()
     body = _on_start_body()
+    zero_copy = ("你选的视频对应的场次都已经评过了：本批没有要评的场次。"
+                 "请把还没评的那几场的视频选进来；要重做已评过的场次，"
+                 "请勾「重做已完成试次…」并在清单里勾选。")
     assert re.search(
-        r'if \(!nHave\) \{\s*\$\("setupErr"\)\.textContent = '
-        r'"本次没有选到任何视频，选好视频再开始";\s*'
-        r'state\.confirmOnce = null; return;\s*\}', body), (
-        "DP-131 裁决①那道关不在了：`if (!nHave)` 必须与逐字文案「本次没有选到任何视频，"
-        "选好视频再开始」、清空确认指纹、`return;` 绑在一起（放行/降级成提醒都要红）。"
+        r'if \(!nHave\) \{\s*\$\("setupErr"\)\.textContent = "%s";\s*'
+        r'state\.confirmOnce = null; return;\s*\}' % re.escape(zero_copy), body), (
+        "DP-131 裁决①那道关不在了：`if (!nHave)` 必须与复核意见 1 给的逐字文案、"
+        "清空确认指纹、`return;` 绑在一起（放行/降级成提醒/文案改字都要红）。"
         "实际 onStart 里 missing 那一支：%r"
-        % body[body.index("if (missing.length) {"):body.index("if (missing.length) {") + 700])
-    assert text.count("本次没有选到任何视频，选好视频再开始") == 1, (
-        "那道关的文案应当逐字出现一次，实际 %d 次" % text.count("本次没有选到任何视频，选好视频再开始"))
+        % body[body.index("if (missing.length) {"):body.index("if (missing.length) {") + 900])
+    assert text.count(zero_copy) == 1, (
+        "那道关的文案应当逐字出现**恰好一次**，实际 %d 次" % text.count(zero_copy))
+    assert "本次没有选到任何视频" not in text, (
+        "旧文案（复核意见 1 判定它说的是不可达状态）又出现了：连前半截都不许留，"
+        "含注释——注释里的原句会被下一次「顺手恢复」抄回去")
 
     i_missing = body.index("if (missing.length) {")
     i_gate = body.index("if (!nHave) {")
@@ -473,6 +488,22 @@ def test_dp131_zero_selected_is_a_stop_not_a_confirmation() -> None:
     assert text.count("本批只评这") == 1, (
         "全文件「本批只评这」应当只剩 N ≥ 1 那一处（0 场那处已随裁决①消失），"
         "实际 %d 处" % text.count("本批只评这"))
+
+    # §1.2「一个视频文件都没选」是**另一道关**：文案一个字不许动，也不许跟这道合并
+    assert text.count('if (!vids.length) err.push("请选择视频文件");') == 1, (
+        "§1.2 那道关被动了：`if (!vids.length) err.push(\"请选择视频文件\");` 应当"
+        "逐字恰好一处，实际 %d 处——它管的是「真没选文件」，与这道关管的「选到的都"
+        "评过了」是两种现场，合并就等于把两种现场说成一句话"
+        % text.count('if (!vids.length) err.push("请选择视频文件");'))
+
+    # 文案不许另起说法：红字引号里那个标签必须与界面上 redoBtn 的真标签逐字相同
+    btn = re.search(r'<button id="redoBtn"[^>]*>([^<]+)</button>', text)
+    assert btn, (
+        "界面上找不到 `redoBtn` 那个按钮了：红字里引的「重做已完成试次…」成了空指")
+    assert "「%s」" % btn.group(1) in zero_copy, (
+        "红字引的按钮标签与界面上的不一致（界面是 %r）：复核意见 1 要求照抄现有标签、"
+        "含省略号，不许另起说法；按钮改了名而文案没跟着改，评分员就照着一句假话"
+        "找不着那个勾" % btn.group(1))
 
     # beginSession 那句兜底还在——但它从此只是兜底，不再是 0 场时评分员读到的第一句话
     begin = _body_of("beginSession", "")

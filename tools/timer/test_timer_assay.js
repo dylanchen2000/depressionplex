@@ -1169,7 +1169,16 @@ async function main() {
    * 那句「请选择视频文件」先拦住了；「名册全都评过」也不归它——那时 missing 为空，
    * 照旧走 beginSession 的「直接补出最终文件」（最后一条测试钉的就是这条不许被误伤）。
    * 每条测试都先弄脏这道关自己会写的两个字段（setupErr、confirmOnce），否则
-   * 「关清了指纹」与「本来就没有指纹」、「关写了红字」与「桩里残留的红字」分不开。 */
+   * 「关清了指纹」与「本来就没有指纹」、「关写了红字」与「桩里残留的红字」分不开。
+   * 复核意见 1：红字说的是评分员真能做的下一步。这道关打得着时他确实**选了**视频，
+   * 只是选到的每一场都评过了，所以文案说「都已评过」并给两条真出路，不说「你没选
+   * 视频」（那句照做也解决不了任何事）。期望串只写一遍（ZERO_COPY），四条测试共用，
+   * 免得抄四遍抄出四种版本；引号里那个按钮标签另有一条断言去 HTML 原文里对真标签。 */
+  const ZERO_COPY = "你选的视频对应的场次都已经评过了：本批没有要评的场次。请把还没评的那几场的视频选进来；要重做已评过的场次，请勾「重做已完成试次…」并在清单里勾选。";
+  /* 这道关的 signature 片段：整串出现时它必然出现。第 3／4 条用它验「这道关没插手」，
+   * 比整串比对更严——文案被改过字、只剩这一段，也照样抓得到（原来比的是旧串前半截，
+   * 换成整串就等于把这两条验松了一档，不能那么换）。 */
+  const ZERO_SIG = "本批没有要评的场次";
   console.log("DP-131 裁决①（N == 0 不许开始：0 场是一道「不许开始」，不是「再点一次就评 0 场」）：");
   await okA("选到的视频全是已评过的场次 ⇒ 逐字红字拦住，不弹确认框、第二次点还是这一句", async () => {
     setupStart({ videos: ["a.mp4"], priors: [auditFile("p.json", auditDoc({
@@ -1181,7 +1190,15 @@ async function main() {
     dl.length = 0;
 
     T.onStart(); await tick();
-    eq(el("setupErr").textContent, "本次没有选到任何视频，选好视频再开始", "0 场那一道关的文案（逐字）：");
+    eq(el("setupErr").textContent, ZERO_COPY, "0 场那一道关的文案（逐字）：");
+    /* 文案里引的按钮标签必须是界面上真有的那一个（照抄，含省略号，不许另起说法）：
+     * 按钮改了名而文案没跟着改，评分员就照着一句假话找不着那个勾。 */
+    const realLabel = /<button id="redoBtn"[^>]*>([^<]+)<\/button>/.exec(html)[1];
+    eq(realLabel, "重做已完成试次…", "redoBtn 的真标签（红字里引的就是它）：");
+    if (!el("setupErr").textContent.includes("「" + realLabel + "」")) {
+      throw new Error("红字引的按钮标签与界面上的不一致（照它找不着那个勾）："
+        + el("setupErr").textContent);
+    }
     eq(T.state.confirmOnce, null, "0 场那次点击留下了确认指纹——那等于「再点一次就放行」：");
     eq(el("setup").hidden, false, "0 场却把设置页收起来了：");
     eq(el("scoring").hidden, true, "0 场却进了评分页：");
@@ -1197,7 +1214,7 @@ async function main() {
     /* 第二次点仍是**这一句** ⇒ 拦住的是这道关，不是 beginSession 那句兜底
      * （「本次所选视频都已评过或不在剩余清单里」——那是原来点第二次才读到的另一句话） */
     T.onStart(); await tick();
-    eq(el("setupErr").textContent, "本次没有选到任何视频，选好视频再开始",
+    eq(el("setupErr").textContent, ZERO_COPY,
        "第二次点没被这道关拦住（或换成了 beginSession 那句兜底）：");
     eq(el("scoring").hidden, true, "第二次点就开评了：");
     eq(el("setup").hidden, false, "第二次点把设置页收起来了：");
@@ -1216,7 +1233,7 @@ async function main() {
     el("setup").hidden = false; el("scoring").hidden = true;
 
     T.onStart(); await tick();
-    eq(el("setupErr").textContent, "本次没有选到任何视频，选好视频再开始",
+    eq(el("setupErr").textContent, ZERO_COPY,
        "有存档时这道关的文案也得是这一句（关优先于确认框）：");
     if (el("setupErr").textContent.includes("② 本机有存档")) {
       throw new Error("0 场时还把存档那条列出来了——关让位给了确认框："
@@ -1230,7 +1247,7 @@ async function main() {
     eq(el("setup").hidden, false, "0 场却开了评：");
 
     T.onStart(); await tick();
-    eq(el("setupErr").textContent, "本次没有选到任何视频，选好视频再开始", "第二次点没拦住：");
+    eq(el("setupErr").textContent, ZERO_COPY, "第二次点没拦住：");
     if (localStorage.getItem("dpst:v2:R1") === null) throw new Error("第二次点把存档抹了：");
   });
 
@@ -1250,7 +1267,7 @@ async function main() {
                      "再点一次「开始评分」= 本批只评这 1 场", "c-ch1"]) {
       if (!box.includes(s)) throw new Error("N ≥ 1 的文案缺了「" + s + "」：" + box);
     }
-    if (box.includes("本次没有选到任何视频")) {
+    if (box.includes(ZERO_SIG)) {
       throw new Error("nHave = 1 也被 0 场那道关拦了：" + box);
     }
     eq(T.state.confirmOnce, "a-ch1|b-ch1|c-ch1#b-ch1#c-ch1#0",
@@ -1278,7 +1295,7 @@ async function main() {
     dl.length = 0;
 
     T.onStart(); await tick();
-    if (el("setupErr").textContent.includes("本次没有选到任何视频")) {
+    if (el("setupErr").textContent.includes(ZERO_SIG)) {
       throw new Error("名册全评完那条路被 0 场那道关拦了——评分员再也补不出最终文件："
         + el("setupErr").textContent);
     }
