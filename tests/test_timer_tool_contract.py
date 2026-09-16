@@ -531,14 +531,36 @@ def test_dp131_source_level_pins_for_session_shape_gates() -> None:
         "§1.2 的唯一通道被改了：err 非空 ⇒ 红字（err.join）+ return，"
         "少掉 return 就是把「不许开始」降级成「提醒一句照样开始」")
 
-    # ---- §1.4：重评只派指定场次；非重评只派「选到视频又没评过」的场次 ----
-    for frag in ("勾了「重评」却没指定任何场次",
-                 "指定重评的场次不在链条的已评清单里",
-                 "指定重评的场次本次没选到视频"):
-        i = body.index(frag)
-        assert "return;" in body[i:i + 400], (
+    # ---- §1.4：重评那一支的入口、三道关，与非重评的派题口径 ----
+    assert '} else if ($("rescoreChk").checked) {' in body, (
+        "§1.4 的入口条件 `else if ($(\"rescoreChk\").checked)` 不在源码里了："
+        "重评那一支整体变成死分支，三道关一起失效")
+    # 三道关各把「条件 → 逐字文案 → return」绑在一起钉。只钉「文案后面有 return」
+    # 是不够的：条件被换成 if (false) 时文案与 return 都还在原地，那种弱 pin 看不见
+    # （本轮设计变异 M34 时发现并当场补强，与裁决 D 那条钉子补条件耦合同一个道理）。
+    for cond, frag in (
+        (r'if \(!rescoreOf\.length\) \{', "勾了「重评」却没指定任何场次"),
+        (r'if \(notDone\.length\) \{', "指定重评的场次不在链条的已评清单里"),
+        (r'if \(noVid\.length\) \{', "指定重评的场次本次没选到视频"),
+    ):
+        m = re.search(cond, body)
+        assert m, (
+            "§1.4 的条件 %r 不在源码里了：把它换成 if (false) 就是放行——"
+            "重评会话会静默变成续评，或把没选到视频的场次当成重评派出去" % cond)
+        tail = body[m.end():m.end() + 400]
+        assert frag in tail, (
+            "§1.4 的 %r 这一支的文案缺了 %r（条件还在、话不说了，等于悄悄改口径）"
+            % (cond, frag))
+        assert "return;" in tail, (
             "§1.4 的 %r 后面没有 return——停机被降级成提醒（报错停机是产品行为，"
-            "绝不放宽）" % frag)
+            "绝不放宽）" % cond)
+    # 两道关的判据本身也得钉：条件为真靠的是这两个 filter，掏空它们等于放行
+    assert "const notDone = rescoreOf.filter(t => !prior.done.has(t));" in body, (
+        "§1.4 第二道关的判据被改了：「指定重评的场次不在链条的已评清单里」必须是"
+        "拿 rescoreOf 去查 prior.done，掏空成 const notDone = [] 就是放行")
+    assert "const noVid = rescoreOf.filter(t => !haveFile.has(t));" in body, (
+        "§1.4 第三道关的判据被改了：「本次没选到视频」必须是拿 rescoreOf 去查"
+        "本次真选到的视频，掏空就是放行")
     queue = _body_of("rebuildQueue", "")
     assert "state.queue = state.fullOrder.filter(m => m.file && !doneTids.has(m.trial_id));" in queue, (
         "§1.4／裁决 1 的派题口径被改了：非重评会话只派「选到视频又没评过」的场次。"
