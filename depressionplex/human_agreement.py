@@ -51,6 +51,30 @@ SUMMARY_CSV_MOBILE_TOL_S = 0.05 + 1e-9
 #: 抢救 CSV 无 scorer_id 列，从文件名解析：human_scores_<评分员>_<日期>_SALVAGED_*
 _SCORER_IN_NAME_RE = re.compile(r"^human_scores_(.+?)_\d{4}-\d{2}-\d{2}")
 
+#: 评分员别名（frozen）。判据见 docs/派工单/B14_抢救文件评分员归属_DP-129.md §0.1：
+#: 抢救件「张」与 timer_audit_张咸明_2026-09-04 同批 trial_id + 同 presentation_order。
+#: **只许有架构师授权的条目**；再遇到对不上的名字只报告、不许自己加。
+SCORER_ALIASES: dict[str, str] = {"张": "张咸明"}
+
+
+def resolve_scorer_id(name: str, *, source: str) -> str:
+    """文件名/字段解析出的评分员名 → 规范名；单字且不在别名表 ⇒ 停机。
+
+    正则本身不改正文「张」——文件名确实写的是「张」。别名在解析之后套。
+    """
+    name = str(name or "")
+    if name in SCORER_ALIASES:
+        return SCORER_ALIASES[name]
+    if len(name) == 1:
+        raise ValueError(
+            f"{source}: 解析到单字评分员名 {name!r}，几乎一定是被截断的名字；"
+            f"静默收下会多出一个幽灵评分员。"
+            f"若确认是某人的简称，在 depressionplex/human_agreement.py "
+            f"的别名表 SCORER_ALIASES（约第 55 行）加一行映射。"
+        )
+    return name
+
+
 TRIAL_ID_RE = re.compile(r"^(?P<video>.+)-ch(?P<chamber>[1-9][0-9]*)$")
 
 
@@ -443,7 +467,8 @@ def load_salvaged_csv(path: Path | str, *, on_reject: str = "mark") -> list[Tria
     sibling_txt = sorted(path.parent.glob("*TRUNCATED*json.txt"))
     seed = _seed_from_truncated_txt(sibling_txt[0]) if sibling_txt else None
     m = _SCORER_IN_NAME_RE.match(path.name)
-    scorer_from_name = m.group(1) if m else path.name  # 解析不出如实回退文件名
+    scorer_from_name = resolve_scorer_id(
+        m.group(1) if m else path.name, source=path.name)
     rows: list[TrialRow] = []
     with path.open(encoding="utf-8-sig", newline="") as fh:
         for rec in csv.DictReader(fh):
@@ -459,8 +484,11 @@ def load_salvaged_csv(path: Path | str, *, on_reject: str = "mark") -> list[Tria
             unsorted = parse_bool(rec.get("holds_unsorted")) is True
             zero = int(_f(rec.get("zero_length_segments")) or 0)
             rate = _f(rec.get("playback_rate"))
+            raw_scorer = str(rec.get("scorer_id") or "").strip()
+            scorer_id = (resolve_scorer_id(raw_scorer, source=path.name)
+                         if raw_scorer else scorer_from_name)
             row = TrialRow(
-                scorer_id=str(rec.get("scorer_id") or scorer_from_name),
+                scorer_id=scorer_id,
                 trial_id=trial_id, source="salvaged_csv",
                 video=video, chamber=chamber, seed=seed,
                 presentation_order=(int(v) if (v := _f(rec.get("presentation_order"))) is not None else None),
@@ -497,35 +525,77 @@ def load_salvaged_csv(path: Path | str, *, on_reject: str = "mark") -> list[Tria
 # ---------------------------------------------------------------- 交叉核对：CSV 摘要
 
 
+def _read_summary_csv_rows(path: Path) -> list[dict[str, str]]:
+    with path.open(encoding="utf-8-sig", newline="") as fh:
+        return list(csv.DictReader(fh))
+
+
+def _orders_equal(csv_order: float | None, json_order: int | None) -> bool:
+    """presentation_order：两边都没有 = 一致；只有一边有 = 不一致；都有 ⇒ 比整数。"""
+    if csv_order is None and json_order is None:
+        return True
+    if csv_order is None or json_order is None:
+        return False
+    return int(csv_order) == int(json_order)
+
+
+def _pairing_diffs(csv_recs: Sequence[dict[str, str]],
+                   by_trial: dict[str, "TrialRow"]) -> list[str]:
+    """一份 CSV 相对一份导出的配对差异（缺 trial / order 不同）。空 = 配上。"""
+    diffs: list[str] = []
+    for rec in csv_recs:
+        tid = rec.get("trial_id", "")
+        row = by_trial.get(tid)
+        if row is None:
+            diffs.append(f"CSV 有 JSON 无 → {tid}")
+            continue
+        c_p = _f(rec.get("presentation_order"))
+        if not _orders_equal(c_p, row.presentation_order):
+            diffs.append(
+                f"{tid}: presentation_order CSV={c_p} ≠ JSON={row.presentation_order}")
+    return diffs
+
+
 def _crosscheck_one_csv(by_trial: dict[str, "TrialRow"], path: Path,
+                        csv_recs: Sequence[dict[str, str]] | None = None,
                         ) -> tuple[list[str], set[str]]:
-    """核对**单份** CSV 的逐条数值 → (不一致清单, 这份 CSV 覆盖到的试次集合)。
+    """核对**单份** CSV 相对**已配对的那一份**导出 → (不一致清单, 覆盖试次集合)。
 
     覆盖集合是返回值而不是就地判缺失：缺失只能对同一评分员**全部**分次导出的
     并集判，见 `crosscheck_summary_csv`（DP-076）。
+
+    presentation_order 已在配对阶段用过，这里**不再单独报**（DP-127 §0.2）。
+    `None`/`None` 的 mobile_seconds 算一致；只有一边有 ⇒ 明说哪边缺（§0.3）。
     """
     mismatches: list[str] = []
     seen: set[str] = set()
-    with path.open(encoding="utf-8-sig", newline="") as fh:
-        for rec in csv.DictReader(fh):
-            tid = rec.get("trial_id", "")
-            seen.add(tid)
-            row = by_trial.get(tid)
-            if row is None:
-                mismatches.append(f"{path.name}: CSV 有 JSON 无 → {tid}")
-                continue
-            c_mob, j_mob = _f(rec.get("mobile_seconds")), row.mobile_seconds_DISCARDED
-            # 容差是 CSV 落盘分辨率（1 位小数）的半步长，不是判定阈值——见
-            # SUMMARY_CSV_MOBILE_TOL_S 注释。超出它才是真对不上账。
-            if c_mob is None or j_mob is None or abs(c_mob - j_mob) > SUMMARY_CSV_MOBILE_TOL_S:
-                mismatches.append(f"{path.name}/{tid}: mobile_seconds CSV={c_mob} ≠ JSON={j_mob}")
-            c_p, j_p = _f(rec.get("presentation_order")), row.presentation_order
-            if c_p is None or j_p is None or int(c_p) != j_p:
-                mismatches.append(f"{path.name}/{tid}: presentation_order CSV={c_p} ≠ JSON={j_p}")
-            if parse_bool(rec.get("unscoreable")) != row.unscoreable:
-                mismatches.append(f"{path.name}/{tid}: unscoreable 不一致")
-            if parse_bool(rec.get("tail_climbing")) != row.tail_climbing:
-                mismatches.append(f"{path.name}/{tid}: tail_climbing 不一致")
+    if csv_recs is None:
+        csv_recs = _read_summary_csv_rows(path)
+    for rec in csv_recs:
+        tid = rec.get("trial_id", "")
+        seen.add(tid)
+        row = by_trial.get(tid)
+        if row is None:
+            mismatches.append(f"{path.name}: CSV 有 JSON 无 → {tid}")
+            continue
+        c_mob, j_mob = _f(rec.get("mobile_seconds")), row.mobile_seconds_DISCARDED
+        # 容差是 CSV 落盘分辨率（1 位小数）的半步长，不是判定阈值——见
+        # SUMMARY_CSV_MOBILE_TOL_S 注释。超出它才是真对不上账。
+        if c_mob is None and j_mob is None:
+            pass  # 两边都说「没有」⇒ 一致（DP-127 §0.3）
+        elif c_mob is None:
+            mismatches.append(
+                f"{path.name}/{tid}: mobile_seconds CSV 缺（JSON={j_mob}）")
+        elif j_mob is None:
+            mismatches.append(
+                f"{path.name}/{tid}: mobile_seconds JSON 缺（CSV={c_mob}）")
+        elif abs(c_mob - j_mob) > SUMMARY_CSV_MOBILE_TOL_S:
+            mismatches.append(
+                f"{path.name}/{tid}: mobile_seconds CSV={c_mob} ≠ JSON={j_mob}")
+        if parse_bool(rec.get("unscoreable")) != row.unscoreable:
+            mismatches.append(f"{path.name}/{tid}: unscoreable 不一致")
+        if parse_bool(rec.get("tail_climbing")) != row.tail_climbing:
+            mismatches.append(f"{path.name}/{tid}: tail_climbing 不一致")
     return mismatches, seen
 
 
@@ -538,26 +608,64 @@ def crosscheck_summary_csv(
     返回不一致清单（空 = 一致）。CSV 无 holds，mobile_seconds 列不可采信——
     它的存在价值就是被拿来和 JSON 对账。
 
-    `paths` 收的是**同一个评分员的全部**配套 CSV（也接受单个路径）。逐条数值核对
-    是**逐文件**的，那是它该有的粒度；但「JSON 有 CSV 无」这一条必须对**并集**判
-    ——计时工具是分次导出的，每份各覆盖一部分试次（文件名都写 `partialNofM`），
-    逐份判会把别份文件里的试次全报成缺失（DP-076）。
+    `paths` 收的是**同一个评分员的全部**配套 CSV（也接受单个路径）。
+
+    **对账单位是一次会话**（DP-127 §0.1/§0.2）：每份 CSV 只跟**恰好一份**
+    配对成功的导出核对数值。配对靠数据自证（CSV 每个 trial_id 都在该导出里，
+    且 presentation_order 逐条相等），**不许用文件名日期配对**。
+    - 恰好一份 ⇒ 逐条数值只跟这一份核；
+    - 零份 ⇒ 报「配不上」+ 差得最少那份的前 5 条差异；
+    - 两份以上 ⇒ 报「配对不唯一」并列出候选，**不许挑一份**。
+
+    「JSON 有 CSV 无」仍对**并集**判（DP-076）：分次导出每份只覆盖一部分试次，
+    逐份判会把别份的试次全报成缺失。调用方须把真值 + 已声明复评一并传入
+    （DP-127 §0.4），否则复评键会被误报成「读数不同」。
     """
     ps = ([Path(paths)] if isinstance(paths, (str, Path))
           else [Path(p) for p in paths])
     if not ps:
         raise ValueError("没给任何配套 CSV ⇒ 拒绝返回空清单假装「全部一致」")
-    by_trial = {r.trial_id: r for r in rows if r.source == "audit_json"}
+
+    # 按导出文件分组：一份导出 = 一次会话（source_file 是 load_audit_json 写的）。
+    by_export: dict[str, dict[str, TrialRow]] = {}
+    by_trial_union: dict[str, TrialRow] = {}
+    for r in rows:
+        if r.source != "audit_json":
+            continue
+        by_export.setdefault(r.source_file or "", {})[r.trial_id] = r
+        by_trial_union[r.trial_id] = r
+
     mismatches: list[str] = []
     in_csv: set[str] = set()
     for p in ps:
-        ms, seen = _crosscheck_one_csv(by_trial, p)
+        csv_recs = _read_summary_csv_rows(p)
+        in_csv |= {rec.get("trial_id", "") for rec in csv_recs}
+
+        matched = [name for name, jbt in by_export.items()
+                   if not _pairing_diffs(csv_recs, jbt)]
+        if not matched:
+            if not by_export:
+                mismatches.append(f"{p.name}: 配不上任何一份导出（没有任何审计 JSON）")
+            else:
+                closest_name, closest_jbt = min(
+                    by_export.items(),
+                    key=lambda kv: (len(_pairing_diffs(csv_recs, kv[1])), kv[0]))
+                diffs = _pairing_diffs(csv_recs, closest_jbt)[:5]
+                mismatches.append(
+                    f"{p.name}: 配不上任何一份导出（最接近 {closest_name}）")
+                mismatches.extend(f"  {d}" for d in diffs)
+            continue
+        if len(matched) > 1:
+            mismatches.append(
+                f"{p.name}: 配对不唯一 → {', '.join(sorted(matched))}")
+            continue
+        ms, _ = _crosscheck_one_csv(by_export[matched[0]], p, csv_recs)
         mismatches.extend(ms)
-        in_csv |= seen
+
     where = ps[0].name if len(ps) == 1 else "%s 等 %d 份" % (ps[0].name, len(ps))
     mismatches.extend(
-        "%s: JSON 有 CSV 无 → %s/%s" % (where, by_trial[t].scorer_id, t)
-        for t in sorted(t for t in by_trial if t not in in_csv))
+        "%s: JSON 有 CSV 无 → %s/%s" % (where, by_trial_union[t].scorer_id, t)
+        for t in sorted(t for t in by_trial_union if t not in in_csv))
     return mismatches
 
 
@@ -919,7 +1027,10 @@ def build_table(data_dir: Path | str) -> TableResult:
         result.seed_groups[seed] = sorted(f"{s}/{a}" for s, a in keys)
 
     # 配套 CSV 交叉核对（有 JSON 的评分员才核）
-    json_scorers = {r.scorer_id for r in result.rows if r.source == "audit_json"}
+    # 真值 + 已声明复评一并交给核对（DP-127 §0.4）：归并后只剩真值时，
+    # 复评那条会被字典覆盖逻辑 / 缺键逻辑误报成「读数不同」。
+    check_pool = result.rows + result.repeat_rows
+    json_scorers = {r.scorer_id for r in check_pool if r.source == "audit_json"}
     csvs = [p for p in sorted(data_dir.glob("human_scores_*.csv"))
             if "SALVAGED" not in p.name]
     for s in sorted(json_scorers):
@@ -928,7 +1039,8 @@ def build_table(data_dir: Path | str) -> TableResult:
         mine = [p for p in csvs if f"_{s}_" in p.name]
         if mine:
             result.crosscheck_mismatches.extend(
-                crosscheck_summary_csv([r for r in result.rows if r.scorer_id == s], mine))
+                crosscheck_summary_csv(
+                    [r for r in check_pool if r.scorer_id == s], mine))
     return result
 
 

@@ -1,0 +1,7 @@
+# DP-129：抢救件（09-03 被截断的 0.25x 会话）与 09-04 整批重做撞在同一批 trial_id 上。
+# 真值取 09-04（0.5x，与语料其余部分同条件）；抢救件是被中止的首评，另存不入真值表。
+# 身份判据见 docs/派工单/B14_抢救文件评分员归属_DP-129.md §0.1（同一顺序号、同一批试次）。
+scorer_id,trial_id,primary_export,repeat_export,attribution
+张咸明,30mg_2周_2+20_2周2-ch1,timer_audit_张咸明_2026-09-04_partial14of27.json,human_scores_张_2026-09-03_SALVAGED_3of14.csv,09-03会话导出被截断(DP-010)后整批于09-04以0.5x重做；抢救件是被中止的0.25x读数
+张咸明,30mg_2周_2+20_2周2-ch2,timer_audit_张咸明_2026-09-04_partial14of27.json,human_scores_张_2026-09-03_SALVAGED_3of14.csv,09-03会话导出被截断(DP-010)后整批于09-04以0.5x重做；抢救件是被中止的0.25x读数
+张咸明,30mg_2周_1-3+20_1周1-ch3,timer_audit_张咸明_2026-09-04_partial14of27.json,human_scores_张_2026-09-03_SALVAGED_3of14.csv,09-03会话导出被截断(DP-010)后整批于09-04以0.5x重做；抢救件是被中止的0.25x读数
