@@ -277,6 +277,145 @@ def test_new_truthful_copy_is_pinned() -> None:
         "不许换成另一句同样做不到的承诺（实际：%r）" % m.group(1)
 
 
+# ------------------------------------------------- 第二轮裁决（撤回 + 裁决 B/C/D）
+
+
+def _on_start_body() -> str:
+    """抠出 onStart 函数体：裁决 D 的那一个确认框就在这里面。"""
+    text = _html_text()
+    m = re.search(r"function onStart\(\) \{(.*?)\n\}\n", text, re.S)
+    assert m, "找不到 onStart——「开始评分」的关卡全在这个函数里"
+    return m.group(1)
+
+
+def _body_of(fname: str, args: str) -> str:
+    text = _html_text()
+    m = re.search(r"function %s\(%s\) \{(.*?)\n\}\n" % (fname, args), text, re.S)
+    assert m, "找不到 %s——它被改名/挪走等于契约断线" % fname
+    return m.group(1)
+
+
+def test_ruling_b_prior_files_copy_is_pinned() -> None:
+    """裁决 B：重评勾选框那句提示必须说真话。
+
+    `prior_files` 是**本次选中的历史导出**（会话级、原名不动），不是旧文案说的
+    「首评所在文件」；首评在哪一份是记录级 `first_scored_in` 的事，而且它可能是
+    null。旧文案把两个键混成一句，评分员照着它会把 prior_files 当成首评归因读。
+    按去掉空白与 <code> 标签后的全文相等来钉：源码为了行宽会折行，钉折行位置
+    没意义，钉评分员真看到的那一句才有意义（与「关于顺序」那句同一套钉法）。
+    """
+    text = _html_text()
+    assert "（首评所在文件）" not in text, (
+        "裁决 B 明令改掉的旧文案又出现了：prior_files 不是「首评所在文件」，"
+        "首评归因是记录级 first_scored_in（定不了就写 null）")
+    m = re.search(r'id="rescoreChk">(.*?)</label>', text, re.S)
+    assert m, "找不到重评勾选框（id=rescoreChk）的提示——裁决 B 要钉的就是这一句"
+    plain = re.sub(r"\s+", "", re.sub(r"</?code>", "", m.group(1)))
+    assert plain == (
+        "本次是重评（rescore）：只重派下面勾中的已评场次，并用新种子自盲重派。"
+        "导出会记rescore/rescore_of/prior_files（本次选中的历史导出），"
+        "逐条见first_scored_in"), (
+        "重评勾选框的文案被改了（实际：%r）——裁决 B 逐字给的就是"
+        "「prior_files（本次选中的历史导出）+ 逐条见 first_scored_in」" % plain)
+
+
+def test_ruling_c_first_scored_in_is_three_branch_not_a_guess() -> None:
+    """裁决 C：`first_scored_in` 宁可说不知道，不许说错。
+
+    规则三分支，与 DP-127 的配对同形：候选 = 选中的导出里 records 含这一场、
+    且该导出没把这一场列进 rescore_of 的；恰好一份 ⇒ 写它；零份或两份以上 ⇒
+    null 并进 first_scored_unresolved，**不许挑一份**。指错的文件名会被直接
+    写进 rescore_declarations.csv 的归因，比 null 危险得多。
+
+    行为由 node 自测钉（chainInfo／buildFirstScoredIn 五条 + 导出端到端），
+    这里钉**契约文本**：三分支的形状、rescore_of 排除必须在收候选之前、
+    同一份文件里重复出现只记一次（不去重就会假报「两份」而误写 null）。
+    """
+    build = _body_of("buildFirstScoredIn", "info")
+    assert "cand.length === 1 ? cand[0] : null" in build, (
+        "裁决 C 的三分支核心不见了：恰好一份才写它，零份或两份以上一律 null。"
+        "实际 buildFirstScoredIn 函数体：%r" % build)
+    assert build.count("cand[0]") == 1, (
+        "buildFirstScoredIn 里 cand[0] 出现了 %d 次——多出来的一处十有八九是"
+        "「挑一份」的兜底（cand[0] || null 之类），裁决 C 明令不许挑" % build.count("cand[0]"))
+
+    chain = _body_of("chainInfo", "items")
+    assert "const rof = Array.isArray(d.rescore_of) ? d.rescore_of : [];" in chain, (
+        "裁决 C 的排除规则不见了：读该导出自己的 rescore_of（缺字段的 v1.4–v1.6 "
+        "当成空表，于是两份候选 ⇒ null，正是裁决要的效果）")
+    assert "if (rof.includes(r.trial_id)) continue;" in chain, (
+        "裁决 C 的排除规则不见了：把这一场列进自己 rescore_of 的那一份是重评，"
+        "不算首评候选")
+    assert chain.index("if (rof.includes(r.trial_id)) continue;") < chain.index("firstCand.set"), (
+        "rescore_of 的排除必须发生在收候选**之前**——放到后面就等于先收再删，"
+        "同一份文件里那条 continue 挡不住候选被建出来")
+    assert "if (!l.includes(name)) l.push(name);" in chain, (
+        "同一份文件里这一场出现两次只记一个候选的去重不见了：少了它，一份文件的"
+        "重复记录会被当成「两份候选」，把定得下来的首评误写成 null")
+    assert "firstCand.set(r.trial_id, [])" in chain, (
+        "首评候选必须是**每场一个列表**（三分支要靠「几份」判断）："
+        "存成单个文件名就没法表达「两份以上」")
+
+    resolve = _body_of("resolveFirstScoredIn", "tid, ownName")
+    assert "if (!m.has(tid)) return ownName;" in resolve, (
+        "链条里没有这一场（本次是它的第一遍）⇒ 首评就是本导出文件自己；"
+        "这一支被改了：%r" % resolve)
+    assert "return v === null ? null : String(v);" in resolve, (
+        "定不下来就得如实写 null（同时列进顶层 first_scored_unresolved），"
+        "不许改成本文件名或随便挑一份：%r" % resolve)
+
+
+def test_ruling_d_one_confirmation_box_lists_both_notes() -> None:
+    """裁决 D：「分批没排满」与「本机有存档」两道二次确认合并成**一个框**。
+
+    四连点的真实后果是盲点头，那比多点一次更糟；但合并只是少点几次，
+    **两条内容一件都不许少说**，两段必须在同一个框里逐条列出。
+
+    这里还钉一条实测出来的回归：裁决 1 之后每点一次「开始评分」都当场新生成
+    种子（Math.random），洗牌顺序每次都变；确认指纹里掺了顺序的话「再点一次」
+    就永远确认不了——合并前的 HEAD 上，3 场名册的续评要点到第 5 次才开评
+    （靠随机撞上同一个顺序），名册一长就等于开不了评。指纹只许认「要确认的事」
+    本身：名册、已评、缺哪几场、存着几场，全部排序后取集合。
+    """
+    text = _html_text()
+    for gone in ("confirmBatch", "confirmWipe"):
+        assert gone not in text, (
+            "%s 又出现了：裁决 D 把两道二次确认合并成一道 confirmOnce，"
+            "旧旗标留着就是下次「顺手恢复」成四连点的种子" % gone)
+    body = _on_start_body()
+    assert body.count("if (state.confirmOnce !== fp)") == 1, (
+        "「开始评分」应当只有**一道**二次确认门（裁决 D），实际 %d 道"
+        % body.count("if (state.confirmOnce !== fp)"))
+    for note in ("① 本批没排满：", "② 本机有存档："):
+        assert note in body, "确认框里少了 %r——裁决 D 要求两条内容都逐条列出" % note
+    # 光钉字面还不够：字还在、条件被改成 if (false) 的话文本守卫看不见那是死分支
+    # （变异 M18 正是这么逃过第一版的）。所以「哪一支条件下说哪一句」一并钉住。
+    assert re.search(r'if \(missing\.length\) \{\s*const nHave = .*?\s*notes\.push\("① 本批没排满：',
+                     body, re.S), (
+        "「本批没排满」那一条必须在 `if (missing.length)` 这一支里说出来——"
+        "条件被抽掉（if (false)）就等于少说一件事，裁决 D 明令不许")
+    assert re.search(r'if \(nSaved\) \{\s*\$\("resumeBox"\)\.hidden = false;\s*'
+                     r'notes\.push\("② 本机有存档：', body), (
+        "「本机有存档」那一条必须在 `if (nSaved)` 这一支里说出来，并同时把"
+        "「继续上次未完成的评分」露出来——条件被抽掉就等于少说一件事（裁决 D）")
+    assert 'notes.join("\\n\\n")' in body, (
+        "两条内容必须写进**同一个** setupErr（notes.join），分别写两次等于"
+        "后一条把前一条冲掉，评分员只看得见最后那件")
+    assert "件事一次说清：再点一次「开始评分」= 两件都照办。" in body, (
+        "没说清「一次点击 = 两件都照办」，评分员会以为还要再点一次")
+    fp = re.search(r"const fp = (\[.*?\]\.join\(\"#\"\));", body, re.S)
+    assert fp, "找不到确认指纹的表达式——裁决 D 的「情况变了就得重读」全靠它"
+    norm = re.sub(r"\s+", "", fp.group(1))
+    assert norm == (
+        '[full.map(m=>m.trial_id).sort().join("|"),priorDone.join("|"),'
+        'missing.map(m=>m.trial_id).sort().join("|"),nSaved].join("#")'), (
+        "确认指纹被改了（实际：%s）——四段必须全是排序后的集合：种子每点一次"
+        "都新生成，指纹里掺进洗牌顺序的话「再点一次」永远确认不了" % norm)
+    assert 'full.map(m => m.trial_id).join("|")' not in text, (
+        "顺序相关的旧指纹又回来了：那正是「续评 + 本批没排满时点多少次都开不了评」"
+        "的成因（实测 HEAD 上要点到第 5 次）")
+
+
 # ---------------------------------------------------------------- §4(5)：入库侧吃得下新形状
 
 

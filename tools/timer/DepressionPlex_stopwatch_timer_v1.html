@@ -191,9 +191,9 @@
   <fieldset id="rescoreBox" hidden>
     <legend>重评（只有<b>有意</b>重评才勾；不勾 = 已评场次一场都不会重发）</legend>
     <p><label><input type="checkbox" id="rescoreChk">
-       本次是重评（rescore）：只重派下面勾中的已评场次，导出会记
-       <code>rescore</code> / <code>rescore_of</code> / <code>prior_files</code>（首评所在文件），
-       并用新种子自盲重派</label></p>
+       本次是重评（rescore）：只重派下面勾中的已评场次，并用新种子自盲重派。
+       导出会记 <code>rescore</code> / <code>rescore_of</code> /
+       <code>prior_files</code>（本次选中的历史导出），逐条见 <code>first_scored_in</code></label></p>
     <div id="rescorePick" hidden></div>
   </fieldset>
   <p><button class="primary" id="startBtn" type="button">开始评分</button></p>
@@ -351,8 +351,8 @@ const $ = (id) => document.getElementById(id);
  * 跨批次不重不漏；done 按 trial_id 索引，与队列解耦。 */
 const state = { scorer: "", seed: 0, fullOrder: [], queue: [], qidx: 0, done: [],
                 files: null, acc: null, rate: 1, redoTrialId: null,
-                started: false, lastTime: undefined, maxT: 0, confirmBatch: null,
-                confirmWipe: null, priorDone: [],
+                started: false, lastTime: undefined, maxT: 0, confirmOnce: null,
+                priorDone: [],
                 assay: "TST", windowS: null, declaredEmpty: false,
                 /* ---- v1.7（DP-128）：会话形态与链条状态 ---- */
                 claimedFirst: false,    // 首次会话声明（导出 claimed_first_session 的来源）
@@ -526,7 +526,7 @@ function onStart() {
     const extra = vids.filter(v => !manifest.some(m => m.filename === v.name)).map(v => v.name);
     if (extra.length) {
       $("setupErr").textContent = "多余视频（不在清单）：\n" + extra.join("\n");
-      state.confirmBatch = null; return;
+      state.confirmOnce = null; return;
     }
 
     /* 先认出之前评过的，后面每一句「还差几场」才是真话（DP-077）。
@@ -537,7 +537,7 @@ function onStart() {
                                       new Set(manifest.map(m => m.trial_id)));
     if (prior.errs.length) {
       $("setupErr").textContent = "「已评进度」文件有问题，先解决再开始：\n" + prior.errs.join("\n");
-      state.confirmBatch = null; return;
+      state.confirmOnce = null; return;
     }
     const priorDone = Array.from(prior.done).sort();
 
@@ -549,7 +549,7 @@ function onStart() {
     let seed, claimedFirst = false, rescore = false, rescoreOf = [];
     if (!priors.length) {
       if (!/^\d+$/.test($("seed").value)) {
-        $("setupErr").textContent = "种子必须是非负整数"; state.confirmBatch = null; return;
+        $("setupErr").textContent = "种子必须是非负整数"; state.confirmOnce = null; return;
       }
       seed = Number($("seed").value);
       claimedFirst = true;
@@ -560,13 +560,13 @@ function onStart() {
         $("setupErr").textContent =
           "勾了「重评」却没指定任何场次——在下面的列表里勾出要重评的场次；\n"
           + "不是有意重评就取消勾选，正常续评（已评场次一场都不会重发）。";
-        state.confirmBatch = null; return;
+        state.confirmOnce = null; return;
       }
       const notDone = rescoreOf.filter(t => !prior.done.has(t));
       if (notDone.length) {
         $("setupErr").textContent =
           "指定重评的场次不在链条的已评清单里：" + notDone.join("、") + "——重评只能重派评过的场次";
-        state.confirmBatch = null; return;
+        state.confirmOnce = null; return;
       }
       seed = newSessionSeed();
     } else {
@@ -592,30 +592,13 @@ function onStart() {
       if (noVid.length) {
         $("setupErr").textContent =
           "指定重评的场次本次没选到视频：" + noVid.join("、") + "——重评哪场就要选哪场的视频文件";
-        state.confirmBatch = null; return;
+        state.confirmOnce = null; return;
       }
     }
 
     /* 没安排到的 = 既没评过、也没选视频的。评过的不必再选视频。
      * 重评模式不适用：只派指定场次，其余场次本来就不派（v1.7-④）。 */
     const missing = rescore ? [] : full.filter(m => !prior.done.has(m.trial_id) && !m.file);
-    if (missing.length) {
-      const nHave = full.filter(m => !prior.done.has(m.trial_id) && m.file).length;
-      const fp = full.map(m => m.trial_id).join("|") + "#" + priorDone.join("|");
-      if (!state.confirmBatch || state.confirmBatch.fp !== fp) {
-        state.confirmBatch = { fp, nHave, nMiss: missing.length };
-        $("setupErr").textContent =
-          "清单共 " + full.length + " 场：之前已评 " + priorDone.length + " 场，本次选到 "
-          + nHave + " 场视频，还有 " + missing.length + " 场没安排。\n"
-          + "再点一次「开始评分」= 本批只评这 " + nHave + " 场（剩下 " + missing.length
-          + " 场下次接着评，届时把本次导出的审计文件连同之前的**全部**选进「已评进度」）。\n"
-          + "既没评过也没选视频的试次：" + missing.slice(0, 8).map(m => m.trial_id).join("、")
-          + (missing.length > 8 ? " 等" : "");
-        return;
-      }
-      state.confirmBatch = null;   // 二次点击确认
-    }
-
     /* 「开始评分」= 重开会话，会清掉该评分员的存档进度。原来是**静默**清的，而上面
      * 那句提示还写着进度会保存 ⇒ 第二天点了这个主按钮就丢进度，工具还把评过的试次
      * 重新发一遍（DP-077 缺陷②，实测两位评分员各被重发 4 场）。现在必须明确再点一次。 */
@@ -623,17 +606,49 @@ function onStart() {
     try { saved = JSON.parse(localStorage.getItem("dpst:v2:" + state.scorer) || "null"); }
     catch (e) { /* 隐私模式等：读不到就当没有 */ }
     const nSaved = (saved && saved.done) ? saved.done.length : 0;
-    if (nSaved && state.confirmWipe !== state.scorer) {
-      state.confirmWipe = state.scorer;
+
+    /* 裁决 D（DP-128）：分批确认与存档确认**合并成一个框、只多一次点击**。
+     * 原来是两道门各要「再点一次」，叠在一起就是连点四次；点到第四次的人早就不看字了，
+     * 盲点头比多点一次更糟。但合并只是少点几次，**两条内容一件都不许少说**：本批只评
+     * 哪几场、还剩几场下次接着评，以及本机存着几场存档、再点一次就是放弃它——两段
+     * 都在同一个框里逐条列出。指纹带上份数，情况变了就得重新读一遍。 */
+    const notes = [];
+    if (missing.length) {
+      const nHave = full.filter(m => !prior.done.has(m.trial_id) && m.file).length;
+      notes.push("① 本批没排满：清单共 " + full.length + " 场，之前已评 " + priorDone.length
+        + " 场，本次选到 " + nHave + " 场视频，还有 " + missing.length + " 场没安排。\n"
+        + "再点一次「开始评分」= 本批只评这 " + nHave + " 场（剩下 " + missing.length
+        + " 场下次接着评，届时把本次导出的审计文件连同之前的**全部**选进「已评进度」）。\n"
+        + "既没评过也没选视频的试次：" + missing.slice(0, 8).map(m => m.trial_id).join("、")
+        + (missing.length > 8 ? " 等" : ""));
+    }
+    if (nSaved) {
       $("resumeBox").hidden = false;
-      $("setupErr").textContent =
-        "本机存着「" + state.scorer + "」已评 " + nSaved + " 场的进度。\n"
+      notes.push("② 本机有存档：本机存着「" + state.scorer + "」已评 " + nSaved + " 场的进度。\n"
         + "要接着评，请点下面的「继续上次未完成的评分」。\n"
         + "再点一次「开始评分」= 放弃这 " + nSaved + " 场存档、从头重开（已经导出的文件不受"
-        + "影响；把它们选进「已评进度」一样能接上）。";
-      return;
+        + "影响；把它们选进「已评进度」一样能接上）。");
     }
-    state.confirmWipe = null;
+    if (notes.length) {
+      /* 指纹只认「要确认的事」本身：名册有哪些场、之前已评哪些、这次缺哪几场、
+       * 本机存着几场——**一条都与本次洗牌顺序无关**。裁决 1 之后每点一次
+       * 「开始评分」都当场新生成种子，顺序每次都变；把顺序混进指纹的话「再点一次」
+       * 就永远确认不了（实测合并前的 HEAD：3 场名册要点到第 5 次才开评，靠的是
+       * 随机撞上同一个顺序；名册一长就等于永远开不了评）。 */
+      const fp = [full.map(m => m.trial_id).sort().join("|"), priorDone.join("|"),
+                  missing.map(m => m.trial_id).sort().join("|"), nSaved].join("#");
+      if (state.confirmOnce !== fp) {
+        state.confirmOnce = fp;
+        $("setupErr").textContent = notes.join("\n\n")
+          + (notes.length > 1
+             ? "\n\n上面 " + notes.length + " 件事一次说清：再点一次「开始评分」= 两件都照办。"
+             : "");
+        return;
+      }
+      state.confirmOnce = null;   // 二次点击确认
+    } else {
+      state.confirmOnce = null;
+    }
 
     state.seed = seed; state.fullOrder = full; state.priorDone = priorDone;
     state.claimedFirst = claimedFirst;
@@ -685,7 +700,10 @@ async function parseAuditFile(f) {
  *            清单，链断一环也能接上全部历史）——**去重靠它，不靠顺序**；
  * seeds    = 出现过的全部顺序种子。裁决 1 之后只作诊断，不参与任何停机；
  * claims   = 声称 claimed_first_session: true 的文件（停机条件③的输入）；
- * recFiles = trial_id → records 里含它的文件名列表（裁决 3 定 first_scored_in）；
+ * firstCand = trial_id → **首评候选**文件名（裁决 C）：这一份的 records 里有这一场，
+ *            且这一份没把这一场列进自己的 rescore_of（列了 ⇒ 这一份是重评那一份，
+ *            不是首评）。v1.4–v1.6 的导出没有 rescore_of 字段，所以历史链里评过两遍
+ *            的场次在它们眼里长得一样 ⇒ 两个候选 ⇒ 按「宁可说不知道」判 null；
  * maxCum   = 选中文件里 cumulative_done_count 的最大值——界面拿它与「已恢复 N 场」
  *            对照（裁决 1 要求把选中份数与 cumulative_done_count/名册摆在一起）。
  * 完整性关（不过 ⇒ errs，这份文件整个不可信，它的内容一概不采）：
@@ -697,7 +715,7 @@ async function parseAuditFile(f) {
  * 故删掉（v1.4 起的导出本来就都带 seed，删这道关不会放进新形状）。 */
 function chainInfo(items) {
   const seeds = new Set(), done = new Set(), errs = [], names = [], claims = [];
-  const recFiles = new Map();
+  const firstCand = new Map();     // trial_id → 首评候选文件名（裁决 C）
   let maxCum = null;          // 选中文件里 cumulative_done_count 的最大值（对照用）
   for (const it of items) {
     const name = it.name, d = it.doc;
@@ -718,17 +736,20 @@ function chainInfo(items) {
       claims.push({ name: name, scorer: String(d.scorer_id || ""),
                     assay: String(d.assay || "TST"), seed: String(d.seed) });
     }
+    /* 裁决 C：这一份把这场列进了自己的 rescore_of ⇒ 它是重评那一份，不是首评候选 */
+    const rof = Array.isArray(d.rescore_of) ? d.rescore_of : [];
     for (const r of (d.records || [])) {
       done.add(r.trial_id);
-      if (!recFiles.has(r.trial_id)) recFiles.set(r.trial_id, []);
-      const l = recFiles.get(r.trial_id);
+      if (rof.includes(r.trial_id)) continue;
+      if (!firstCand.has(r.trial_id)) firstCand.set(r.trial_id, []);
+      const l = firstCand.get(r.trial_id);
       if (!l.includes(name)) l.push(name);       // 同一份文件里重复出现只记一次
     }
     for (const t of (d.prior_done || [])) done.add(t);
     for (const t of (Array.isArray(d.cumulative_done) ? d.cumulative_done : [])) done.add(t);
   }
   return { seeds, done, errs: errs.concat(claimConflictErrs(claims)), names,
-           claims, recFiles, maxCum };
+           claims, firstCand, maxCum };
 }
 
 /* 停机条件③（裁决 1，DP-128）：同一评分员同一范式出现两个**会话**都声称
@@ -807,25 +828,31 @@ async function readPriorDone(files, scorer, assay, tidSet) {
            firstScoredIn: buildFirstScoredIn(info) };
 }
 
-/* 裁决 3（DP-128）：链条里每一场已评试次 → 它的首评所在导出文件名。
- * records 里出现过、且只出现在一份文件里 ⇒ 就是那一份；出现在多份（历史上被
- * 重派过，说不清哪份是首评）或只在 prior_done / cumulative_done 里露面（首评
- * 那份没选上）⇒ 确定不了，值为 null。null 会如实写进导出并列进
- * first_scored_unresolved——停机放在入库侧（DP-130），这里不拦评分员。 */
+/* 裁决 3 + 裁决 C（DP-128）：链条里每一场已评试次 → 它的首评所在导出文件名。
+ * 候选 = 选中的导出里 records 含这一场、**且**该导出没把这一场列进 rescore_of 的
+ * （列了 rescore_of 的那一份是重评，不是首评）。三分支，与 DP-127 的配对同形：
+ *   恰好一份 ⇒ 写它；
+ *   零份（首评那份没选上，或这一场只在 prior_done / cumulative_done 里露面）⇒ null；
+ *   两份以上（历史 v1.4–v1.6 没有 rescore_of 字段，一场评两遍在它们眼里长得一样；
+ *             或分批会话的 partial + final 都含这一场）⇒ null，**不许挑一份**。
+ * 原则是宁可说不知道、不许说错：指错的文件名会被直接写进 rescore_declarations.csv
+ * 的归因，比 null 危险得多。null 如实写进导出并列进 first_scored_unresolved——
+ * 停机放在入库侧（DP-130），这里不拦评分员。 */
 function buildFirstScoredIn(info) {
   const m = new Map();
   for (const tid of info.done) {
-    const names = info.recFiles.get(tid) || [];
-    m.set(tid, names.length === 1 ? names[0] : null);
+    const cand = info.firstCand.get(tid) || [];
+    m.set(tid, cand.length === 1 ? cand[0] : null);
   }
   return m;
 }
 
 /* 导出时逐条取 first_scored_in。三种答案，各是真话：
- * - 链条里这一场的首评文件唯一 ⇒ 那个文件名；
+ * - 链条里这一场的首评候选恰好一份 ⇒ 那个文件名；
  * - 链条里根本没有这一场（本次是它的第一遍）⇒ 本导出文件自己的名字；
- * - 链条知道这一场评过、但说不清首评在哪份（多份 records 都有它，或只在
- *   prior_done / cumulative_done 里露面）⇒ null，同时列进 first_scored_unresolved。
+ * - 链条知道这一场评过、但说不清首评在哪份（候选零份：首评那份没选上，或只在
+ *   prior_done / cumulative_done 里露面；候选两份以上：历史链评过两遍、或分批
+ *   会话的 partial + final 都含这一场）⇒ null，同时列进 first_scored_unresolved。
  * null 不拦人：裁决 3 明确「停机放在入库侧（DP-130），不放在人的脸上」。 */
 function resolveFirstScoredIn(tid, ownName) {
   const m = state.firstScoredIn;

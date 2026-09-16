@@ -241,6 +241,9 @@ function threeTrials() {
   T.state.chainMaxCount = null; T.state.manifestTids = null;
   T.state.firstScoredIn = null;
   T.state.rewatchS = 0; T.state.redoTrialId = null; T.state.started = false;
+  /* 裁决 D：两道确认门合成一道 confirmOnce；它跨测试残留的话，下一条测试第一次
+   * 点「开始评分」就会当成已确认直接开评（假绿）。state 是共享单例，一并复位。 */
+  T.state.confirmOnce = null;
   el("rescoreChk").checked = false;
   el("kindFirst").checked = false; el("kindLost").checked = false;
   el("seed").readOnly = false;
@@ -455,7 +458,7 @@ ok("首次会话导出：claimed_first_session=true 落在文件里（屏幕上�
   eq(d.cumulative_done, ["a-ch1"]);
   eq(d.prior_files, []); eq(d.rescore, false); eq(d.rescore_of, []);
 });
-ok("重评导出：rescore / rescore_of / prior_files（首评所在文件）如实记账", () => {
+ok("重评导出：rescore / rescore_of / prior_files（本次选中的历史导出）如实记账", () => {
   threeTrials();
   T.state.rescore = true; T.state.rescoreOf = ["a-ch1"];
   T.state.priorDone = ["a-ch1", "b-ch1"];
@@ -560,8 +563,11 @@ async function main() {
     el("kindFirst").checked = !!opts.kindFirst;
     el("kindLost").checked = !!opts.kindLost;
     el("rescoreChk").checked = !!opts.rescore;
-    T.state.confirmBatch = null; T.state.confirmWipe = null;
-    el("setupErr").textContent = "";
+    T.state.confirmOnce = null;
+    /* 新纪律（M11 假绿那一课）：DOM 桩跨测试复用，先把红字现场写成非默认值。
+     * 否则下面那些 eq(setupErr, "") 分不清「这次开评没报错」与「本来就是空的」，
+     * 删掉 beginSession 里清空红字那一行的变异就会假绿。 */
+    el("setupErr").textContent = "【桩】上一条测试留下的红字";
   }
 
   console.log("DP-128 §1.1（裁决 1：种子只管会话内，跨会话靠已评清单并集去重）：");
@@ -569,6 +575,10 @@ async function main() {
     /* 先把字段填上一个显眼的数：DOM 桩跨测试复用，不填的话「清空了」与「本来就是
      * 空的」分不开，M11 变异（删掉清空那一行）就会假绿。 */
     el("seed").value = "999"; el("seed").readOnly = false;
+    el("firstBox").hidden = false;                 // 该收起的，先摆成「露着」
+    el("rescoreBox").hidden = true;                // 该露出的，先摆成「收着」
+    el("rescorePick").hidden = true; el("rescorePick").innerHTML = "【桩】";
+    el("setupErr").textContent = "【桩】上一条测试留下的红字";
     el("priorFiles").files = [auditFile("p1.json", auditDoc({ seed: 4242,
       records: [{ trial_id: "a-ch1" }], cumulative_done: ["a-ch1"], cumulative_done_count: 1 }))];
     await T.onPriorChange();
@@ -576,12 +586,17 @@ async function main() {
     eq(el("seed").readOnly, true);
     eq(el("firstBox").hidden, true);
     eq(el("rescoreBox").hidden, false); eq(el("rescorePick").hidden, false);
+    if (el("rescorePick").innerHTML === "【桩】") {
+      throw new Error("重评勾选列表没重建（还是桩留下的内容）");
+    }
     eq(T.state.chainDone, ["a-ch1"]); eq(T.state.chainMaxCount, 1);
     eq(el("setupErr").textContent, "");
   });
   await okA("链里两个种子 ⇒ 不再停机：照常解析、照常并集去重，一句红字都没有", async () => {
     el("priorFiles").files = [auditFile("p1.json", auditDoc({ seed: 1, records: [{ trial_id: "a-ch1" }] })),
                               auditFile("p2.json", auditDoc({ seed: 2, records: [{ trial_id: "b-ch1" }] }))];
+    el("setupErr").textContent = "【桩】上一条测试留下的红字";
+    el("firstBox").hidden = false; el("seed").readOnly = false;
     await T.onPriorChange();
     eq(el("setupErr").textContent, "");
     eq(T.state.chainDone, ["a-ch1", "b-ch1"]);
@@ -589,6 +604,11 @@ async function main() {
   });
   await okA("清空「已评进度」⇒ 首次声明框回来，种子字段重新填好并可改", async () => {
     el("priorFiles").files = [];
+    /* 先把「该恢复的」摆成收起、「该收起的」摆成露出：这一条测的全是清理与复位，
+     * 现场不弄脏就验不到任何一件事 */
+    el("firstBox").hidden = true; el("seed").readOnly = true; el("seed").value = "";
+    el("rescoreBox").hidden = false;
+    el("chainStat").hidden = false; el("chainStat").textContent = "【桩】上一条测试留下的进度行";
     await T.onPriorChange();
     eq(el("firstBox").hidden, false); eq(el("seed").readOnly, false);
     if (!/^\d+$/.test(el("seed").value)) {
@@ -603,6 +623,7 @@ async function main() {
     await T.onManifestChange();
     el("priorFiles").files = [auditFile("p1.json", auditDoc({ seed: 1,
       records: [{ trial_id: "a-ch1" }], cumulative_done: ["a-ch1"], cumulative_done_count: 1 }))];
+    el("chainStat").hidden = true; el("chainStat").textContent = "";
     await T.onPriorChange();
     const s = el("chainStat").textContent;
     if (!s.includes("已选 1 份导出")) throw new Error("没报选中份数：" + s);
@@ -881,15 +902,78 @@ async function main() {
     eq(T.resolveFirstScoredIn("b-ch1", "own.json"), null);
     eq(T.resolveFirstScoredIn("c-ch1", "own.json"), "own.json");
   });
-  ok("buildFirstScoredIn：只有一份文件的 records 收过这一场才算定得下来，否则 null", () => {
+  ok("buildFirstScoredIn：首评候选恰好一份才写它；零份或两份以上一律 null（裁决 C）", () => {
     const m = T.buildFirstScoredIn({
-      done: new Set(["a-ch1", "b-ch1", "c-ch1"]),
-      recFiles: new Map([["a-ch1", ["f1.json"]], ["b-ch1", ["f1.json", "f2.json"]]]),
+      done: new Set(["a-ch1", "b-ch1", "c-ch1", "d-ch1"]),
+      firstCand: new Map([["a-ch1", ["f1.json"]], ["b-ch1", ["f1.json", "f2.json"]],
+                          ["d-ch1", ["f1.json", "f2.json", "f3.json"]]]),
     });
-    eq(m.get("a-ch1"), "f1.json");
-    eq(m.get("b-ch1"), null);        // 两份都收过：说不清哪份是首评
-    eq(m.get("c-ch1"), null);        // 只在 prior_done / cumulative_done 里露面：同样说不清
-    eq(m.size, 3, "链条认得的每一场都要有个交代：");
+    eq(m.get("a-ch1"), "f1.json");   // 恰好一份候选 ⇒ 写它
+    eq(m.get("b-ch1"), null);        // 两份候选：说不清哪份是首评，不许挑一份
+    eq(m.get("c-ch1"), null);        // 零份候选：只在 prior_done / cumulative_done 里露面
+    eq(m.get("d-ch1"), null);        // 三份候选：同样不许挑
+    eq(m.size, 4, "链条认得的每一场都要有个交代：");
+  });
+  ok("chainInfo：把这一场列进自己 rescore_of 的那一份不算首评候选（裁决 C 排除规则）", () => {
+    /* f1 是首评那一份；f2 是重评会话（rescore_of 列了 a-ch1），两份的 records 都有
+     * a-ch1。f2 被排除 ⇒ 候选恰好剩 f1 ⇒ first_scored_in 指得回真正的首评。 */
+    const f2 = { name: "f2.json", doc: { seed: 2, rescore: true, rescore_of: ["a-ch1"],
+                                         records: [{ trial_id: "a-ch1" }],
+                                         prior_done: ["a-ch1"],
+                                         cumulative_done: ["a-ch1"],
+                                         cumulative_done_count: 1 } };
+    const info = T.chainInfo([
+      { name: "f1.json", doc: { seed: 1, records: [{ trial_id: "a-ch1" }],
+                                cumulative_done: ["a-ch1"], cumulative_done_count: 1 } },
+      f2,
+    ]);
+    eq(info.errs, []);
+    eq(info.firstCand.get("a-ch1"), ["f1.json"], "重评那一份必须被排除：");
+    eq(T.buildFirstScoredIn(info).get("a-ch1"), "f1.json");
+    /* 反过来（裁决 C 要防的那个「说错」）：漏选首评那份、只剩重评那一份 ⇒ 候选为零
+     * ⇒ null，不许自信地写上重评那一份的名字 */
+    const only = T.chainInfo([f2]);
+    eq(only.firstCand.has("a-ch1"), false, "只剩重评那一份时不该有任何候选：");
+    eq(T.buildFirstScoredIn(only).get("a-ch1"), null);
+  });
+  ok("chainInfo：legacy（v1.4–v1.6，没有 rescore_of）两份都收过这一场 ⇒ 两候选 ⇒ null", () => {
+    /* 历史导出没有 rescore 字段，一场评两遍在它们眼里长得一样 ⇒ 「不知道」才是真话 */
+    const info = T.chainInfo([
+      { name: "old1.json", doc: { seed: 11, records: [{ trial_id: "a-ch1" }] } },
+      { name: "old2.json", doc: { seed: 22, records: [{ trial_id: "a-ch1" }] } },
+    ]);
+    eq(info.firstCand.get("a-ch1"), ["old1.json", "old2.json"]);
+    eq(T.buildFirstScoredIn(info).get("a-ch1"), null);
+  });
+  ok("chainInfo：同一份文件里这一场出现两次也只算一个候选（不去重会假报「两份」）", () => {
+    const info = T.chainInfo([
+      { name: "f1.json", doc: { seed: 1, records: [{ trial_id: "a-ch1" },
+                                                   { trial_id: "a-ch1" }] } },
+    ]);
+    eq(info.firstCand.get("a-ch1"), ["f1.json"]);
+    eq(T.buildFirstScoredIn(info).get("a-ch1"), "f1.json");
+  });
+  ok("分批会话的 partial + final 同选 ⇒ 两个候选 ⇒ 首评如实写 null（裁决 C 的直接后果）", () => {
+    /* 同一次会话分批落下两份：final 的 records 是 partial 的超集，所以 partial 里那些
+     * 场次有两份候选（同一个种子、同一次会话）。裁决 C 明说「两份以上 ⇒ null，不许挑
+     * 一份」，工具就照办：宁可说不知道。这条把后果钉在明处，将来若要按会话归并候选，
+     * 必须有新裁决并改这条测试。 */
+    const info = T.chainInfo([
+      { name: "s_partial.json", doc: { seed: 5, records: [{ trial_id: "a-ch1" }],
+                                       prior_done: [], cumulative_done: ["a-ch1"],
+                                       cumulative_done_count: 1 } },
+      { name: "s_final.json", doc: { seed: 5, records: [{ trial_id: "a-ch1" },
+                                                        { trial_id: "b-ch1" }],
+                                     prior_done: ["a-ch1"],
+                                     cumulative_done: ["a-ch1", "b-ch1"],
+                                     cumulative_done_count: 2 } },
+    ]);
+    eq(info.errs, [], "同一个种子的 partial + final 不该触发任何停机：");
+    eq(info.firstCand.get("a-ch1"), ["s_partial.json", "s_final.json"]);
+    eq(info.firstCand.get("b-ch1"), ["s_final.json"], "只在 final 里出现的那场仍然定得下来：");
+    const m = T.buildFirstScoredIn(info);
+    eq(m.get("a-ch1"), null);
+    eq(m.get("b-ch1"), "s_final.json");
   });
   ok("saveProgress：首评解析表存成二元组表（Map 进不了 JSON），恢复回来还是同一张表", () => {
     threeTrials();
@@ -944,8 +1028,10 @@ async function main() {
     localStorage.setItem("dpst:v2:R1", JSON.stringify({
       seed: 7, order: ["a-ch1", "b-ch1", "c-ch1"], assay: "TST",
       done: [mkDone("a-ch1", 1), mkDone("b-ch1", 2)], ts: 1 }));
-    T.state.confirmWipe = null; T.state.confirmBatch = null;
-    el("setupErr").textContent = "";
+    T.state.confirmOnce = null;
+    el("setupErr").textContent = "【桩】上一条测试留下的红字";
+    el("resumeBox").hidden = true;       // 该露出的先摆成收着
+    el("setup").hidden = false;
 
     T.onStart();
     await new Promise(r => setTimeout(r, 0));
@@ -956,10 +1042,122 @@ async function main() {
       throw new Error("没告诉评分员存着几场：" + el("setupErr").textContent);
     }
     if (el("resumeBox").hidden) throw new Error("没把「继续上次未完成的评分」露出来");
+    /* 这一场只有存档一件事（三场都在链条里 ⇒ 没有「没排满」），框里就不许冒出
+     * 第二条，也不许说「上面 2 件事」——合并只减少点击，不许凭空多报一件事。 */
+    const box1 = el("setupErr").textContent;
+    if (box1.includes("① 本批没排满")) throw new Error("没有缺场却报了「本批没排满」：" + box1);
+    if (box1.includes("上面 2 件事")) throw new Error("只有一件事却说「上面 2 件事」：" + box1);
+    if (!box1.includes("② 本机有存档")) throw new Error("存档那条没逐字列出：" + box1);
 
     T.onStart();                       // 明确确认后才允许重开
     await new Promise(r => setTimeout(r, 0));
     eq(localStorage.getItem("dpst:v2:R1"), null, "确认后仍没重开：");
+  });
+
+  console.log("裁决 D（DP-128 §9-(3)：两道「再点一次」合成一个框，点击减半、内容一条不少）：");
+  await okA("没排满 + 有存档 ⇒ 两条内容在同一个框里一次说清，两次点击就开评（原来要四次）", async () => {
+    /* 连跑 4 轮：裁决 1 之后每点一次「开始评分」都当场新生成种子（Math.random），
+     * 洗牌顺序轮轮不同。确认指纹要是掺了顺序，第二轮起就只能靠随机撞上同一个
+     * 顺序才开得了评（3 场名册 1/6，12 场名册等于永远开不了）——多跑几轮才钉得住。 */
+    for (let round = 1; round <= 4; round++) {
+      threeTrials();
+      localStorage.removeItem("dpst:v2:R1");
+      el("scorerId").value = "R1"; el("seed").value = "7";
+      el("manifestFile").files = [{ name: "m.csv", text: async () => MAN3 }];
+      el("videoFiles").files = [{ name: "a.mp4" }];       // 只选到一场视频
+      el("priorFiles").files = [auditFile("p.json", auditDoc({
+        records: [{ trial_id: "b-ch1" }] }))];             // 之前评过一场 ⇒ c-ch1 没安排
+      el("kindFirst").checked = false; el("kindLost").checked = false;
+      localStorage.setItem("dpst:v2:R1", JSON.stringify({
+        seed: 7, order: ["a-ch1", "b-ch1", "c-ch1"], assay: "TST",
+        done: [mkDone("a-ch1", 1), mkDone("b-ch1", 2)], ts: 1 }));
+      /* 先把现场弄脏（新纪律）：DOM 桩与 state 都跨测试复用，不写入非默认值，
+       * 「这次清掉了」和「本来就是空的」分不开。 */
+      T.state.confirmOnce = "上一条测试留下的指纹";
+      el("setupErr").textContent = "上一条测试留下的红字";
+      el("resumeBox").hidden = true; el("setup").hidden = false; el("scoring").hidden = true;
+
+      T.onStart(); await tick();
+      const box = el("setupErr").textContent;
+      if (round === 1) {
+        if (!box.includes("① 本批没排满")) throw new Error("没列第一条（本批没排满）：" + box);
+        if (!box.includes("② 本机有存档")) throw new Error("没列第二条（本机有存档）：" + box);
+        /* 第一条的四件事（少一件评分员就没法判断这次点下去会发生什么） */
+        for (const s of ["清单共 3 场", "之前已评 1 场", "本次选到 1 场视频", "还有 1 场没安排",
+                         "再点一次「开始评分」= 本批只评这 1 场", "c-ch1"]) {
+          if (!box.includes(s)) throw new Error("第一条缺了「" + s + "」：" + box);
+        }
+        /* 第二条的三件事 */
+        for (const s of ["本机存着「R1」已评 2 场的进度", "继续上次未完成的评分",
+                         "再点一次「开始评分」= 放弃这 2 场存档"]) {
+          if (!box.includes(s)) throw new Error("第二条缺了「" + s + "」：" + box);
+        }
+        if (!box.includes("上面 2 件事一次说清：再点一次「开始评分」= 两件都照办。")) {
+          throw new Error("没把「一次点击=两件都照办」说清：" + box);
+        }
+        eq(el("resumeBox").hidden, false, "没把「继续上次未完成的评分」露出来：");
+        /* 指纹逐字钉住：四段全是排序后的集合，一段都不许来自本次洗牌顺序 */
+        eq(T.state.confirmOnce, "a-ch1|b-ch1|c-ch1#b-ch1#c-ch1#2",
+           "确认指纹必须与洗牌顺序无关（每点一次都换种子）：");
+      }
+      if (localStorage.getItem("dpst:v2:R1") === null) {
+        throw new Error("第 " + round + " 轮：第一次点就把存档抹了——这正是 DP-077 缺陷②");
+      }
+      if (el("setup").hidden) {
+        throw new Error("第 " + round + " 轮：第一次点就开评了（那两条内容等于没说）");
+      }
+      /* state.started 是「按下开始观看」的旗标，不是「会话已开」的旗标；这里能证明
+       * 还没开评的是：设置页还在、存档没被抹、会话状态一个字段都还没写进去。 */
+      eq(T.state.priorDone, [], "还没确认就把链条状态写进会话了：");
+
+      T.onStart(); await tick();           // 第二次点 = 两件都照办
+      if (!el("setup").hidden) {
+        throw new Error("第 " + round + " 轮：第二次点仍没开评——「再点一次」确认不了，"
+          + "评分员会被卡在设置页反复点。红字：" + el("setupErr").textContent.split("\n")[0]);
+      }
+      eq(el("setupErr").textContent, "", "确认后还挂着红字：");
+      eq(el("scoring").hidden, false);
+      eq(T.state.priorDone, ["b-ch1"], "确认后链条的已评清单才进会话状态：");
+      eq(T.state.queue.map(m => m.trial_id), ["a-ch1"], "本批只派选到视频又没评过的那一场：");
+      eq(el("seed").readOnly, true, "续评会话的种子是当场新生成的，界面上只读：");
+      if (!/^\d+$/.test(el("seed").value)) {
+        throw new Error("新生成的种子不是非负整数：" + el("seed").value);
+      }
+      eq(localStorage.getItem("dpst:v2:R1"), null, "确认后没重开：");
+      eq(T.state.confirmOnce, null, "确认后指纹没清掉（下次情况没变也会免读直接过）：");
+    }
+  });
+
+  await okA("点完一次之后情况变了 ⇒ 指纹失效，两条内容重新摆出来重读一遍", async () => {
+    threeTrials();
+    localStorage.removeItem("dpst:v2:R1");
+    el("scorerId").value = "R1"; el("seed").value = "7";
+    el("manifestFile").files = [{ name: "m.csv", text: async () => MAN3 }];
+    el("videoFiles").files = [{ name: "a.mp4" }];
+    el("priorFiles").files = [auditFile("p.json", auditDoc({
+      records: [{ trial_id: "b-ch1" }] }))];
+    localStorage.setItem("dpst:v2:R1", JSON.stringify({
+      seed: 7, order: ["a-ch1", "b-ch1", "c-ch1"], assay: "TST",
+      done: [mkDone("a-ch1", 1)], ts: 1 }));
+    el("setupErr").textContent = "脏值"; el("setup").hidden = false;
+
+    T.onStart(); await tick();
+    if (!el("setupErr").textContent.includes("已评 1 场的进度")) {
+      throw new Error("第一次的框内容不对：" + el("setupErr").textContent);
+    }
+    /* 存档变成 3 场：要放弃的东西不一样了，旧确认不许沿用 */
+    localStorage.setItem("dpst:v2:R1", JSON.stringify({
+      seed: 7, order: ["a-ch1", "b-ch1", "c-ch1"], assay: "TST",
+      done: [mkDone("a-ch1", 1), mkDone("b-ch1", 2), mkDone("c-ch1", 3)], ts: 2 }));
+    T.onStart(); await tick();
+    const box2 = el("setupErr").textContent;
+    if (!box2.includes("已评 3 场的进度")) {
+      throw new Error("情况变了却沿用上一次的确认（或没把新数字摆出来）：" + box2);
+    }
+    eq(T.state.confirmOnce, "a-ch1|b-ch1|c-ch1#b-ch1#c-ch1#3",
+       "指纹要跟着「存着几场」变，不跟着洗牌顺序变：");
+    eq(el("setup").hidden, false, "情况变了还照样开评：");
+    if (localStorage.getItem("dpst:v2:R1") === null) throw new Error("情况变了就把存档抹了：");
   });
 
   console.log(fails ? "\n" + fails + " 条不通过" : "\n全部通过");
