@@ -73,13 +73,16 @@
     ⑦ DP-086 按键膨胀：旧计时按 timeupdate 粒度累加 [lastTime, cur]，按下后
       第一次累加把「上一次更新之后、按下之前」那段视频时间也算成在动——每按键
       中位多算 0.1146 s（60 条实测），与 DP-007 的 0.121 s 同形态。v1.7 起
-      在动秒数 = 视频时间轴上按住区间 [按下位置, 松开位置] 的并集，与审计
-      holds 逐位一致（无重看修剪时），墙钟与 timeupdate 粒度都不再参与。
+      在动秒数 = 视频时间轴上按住区间 [按下位置, 松开位置] 的并集，与审计里的
+      holds_counted 逐位恒等，墙钟与 timeupdate 粒度都不再参与。
     ⑧ 重看记账：重看（重放已看过的段落）时的按键不计入在动时长（按住区间
       在前沿处修剪），每场落 rewatch_s = 已看过区域内正向播放的秒数
       （92 条历史记录里 41 条受重看影响，最差 218.15 s）。不记账的重看会让
-      「按键总时长 vs 录像时长」交叉核对永远对不上。holds 审计仍记**全部**
-      按住区间（含重看时的），反应延迟分析靠它，一个字节不丢。
+      「按键总时长 vs 录像时长」交叉核对永远对不上。
+      每场因此落**两个**区间数组：holds = 原始按键区间（含重看时的，语义与
+      v1.4–v1.6 一致，反应延迟分析靠它，一个字节不丢）；holds_counted = 实际
+      计入秒数的那些（重看段已修剪）。真值该取哪一份是入库侧口径（DP-082/
+      DP-124），工具不替它裁，只把两份账都记全。没有重看的场次两者逐位相同。
   - v1.3：可见「暂停/继续」按钮（P 键等效；区间模型下暂停不加秒）；
     「导出当前进度」随时可导出已完成试次的 CSV+审计（文件名带
     _partial<k>of<n> 标记，只作中途保存，最终分析以全部完成后的导出为准）；
@@ -237,8 +240,17 @@
  *
  * v1.7（DP-128 §2-C，重看记账）：startHold 收第二个参数 frontier（=已看过的最远
  * 位置）。按住区间在前沿处修剪——重看（重放已看过段落）时的按键不计入在动时长；
- * 跨越前沿的按住只计前沿之后的部分。审计 holds 仍记**全部**按住区间（含重看时的
- * 原始起止），反应延迟分析靠它，一个字节不丢。 */
+ * 跨越前沿的按住只计前沿之后的部分。
+ *
+ * 于是每条记录里落**两个**区间数组，各说各的真话，谁也不覆盖谁：
+ *   holds         = 原始按键区间（含重看段），语义与 v1.4–v1.6 完全一致，一个字节不丢；
+ *   holds_counted = 实际计入 mobile_seconds 的区间（重看段已在前沿处修剪），
+ *                   恒等式 union(holds_counted) == mobile_seconds 对每一场都成立。
+ * 为什么要两个：入库侧四个下游（human_agreement 的真值并集、scorer_disagreement、
+ * export_human_timeline、salvage_truncated_audit）都拿 holds 当读数来源，而重看段的
+ * 按键按 §2-C 不许计入在动——**真值该取哪一个数组是入库侧口径（DP-082/DP-124），
+ * 工具不替它裁**，只把两份账都如实记下来，让那一步裁决有一行的余地。
+ * 没有重看的场次两个数组逐位相同（绝大多数场次如此）。 */
 function mobileAccumulator() {
   let ivals = [];
   let holding = false;
@@ -276,6 +288,9 @@ function mobileAccumulator() {
     get holding() { return holding; },
     get value() { let t = 0; for (const [a, b] of ivals) t += b - a; return t; },
     get holds() { return holdLog.slice(); },
+    /* 计入秒数的区间（已合并、已在前沿处修剪）：union(holds_counted) == value 恒成立。
+     * 与 holds 分开落盘，理由见上面那段注释——真值取哪一份是入库侧口径，工具只记账。 */
+    get counted() { return ivals.map(s => [s[0], s[1]]); },
     get bursts() { return holdLog.length; },
   };
 }
@@ -990,9 +1005,11 @@ function nextTrial() {
       d.first_pass = { mobile_seconds: d.mobile_seconds, tail_climbing: d.tail_climbing,
                        wall_support_still: d.wall_support_still, window_s: d.window_s,
                        unscoreable: d.unscoreable, note: d.note, scored_at: d.scored_at,
-                       holds: d.holds, rewatch_s: d.rewatch_s, playback_rate: d.playback_rate };
+                       holds: d.holds, holds_counted: d.holds_counted,
+                       rewatch_s: d.rewatch_s, playback_rate: d.playback_rate };
     }
     d.holds = state.acc.holds;
+    d.holds_counted = state.acc.counted;
     d.rewatch_s = Math.round(state.rewatchS * 100) / 100;   // v1.7-⑧：重做也重新记账
     d.mobile_seconds = mobile; d.window_s = state.windowS;
     Object.assign(d, q1Fields($("qTail").checked, asked));
@@ -1020,6 +1037,10 @@ function nextTrial() {
     note,
     playback_rate: state.rate,
     holds: state.acc.holds,   // 审计侧记录，CSV 11 列 schema 不变
+    /* v1.7（DP-128 §2-B/C）：实际计入 mobile_seconds 的区间。没有重看的场次与 holds
+     * 逐位相同；重看过的场次 holds 里多出的那几段就是「不计入在动」的部分。
+     * 两份都落盘 ⇒ 入库侧不必猜工具算了什么，也不许靠猜。 */
+    holds_counted: state.acc.counted,
     /* v1.7-⑧（DP-128 §2-C）：这一场重看过、重看了多少秒。不记账的重看会让
      * 「按键总时长 vs 录像时长」交叉核对永远对不上（92 条历史记录里 41 条受影响）。
      * 0 = 没重看，是真话不是缺省值。 */

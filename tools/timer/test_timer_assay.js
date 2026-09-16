@@ -322,6 +322,7 @@ ok("首看按键：value 恰等于 [按下, 松开]，不多一个 timeupdate �
   acc.endHold(12.75);
   eq(acc.value, 2.5);
   eq(acc.holds, [[10.25, 12.75]]);
+  eq(acc.counted, [[10.25, 12.75]]);          // 没重看 ⇒ 两份账逐位相同
   /* 旧版这里是 2.5 + 平均 0.115 s 的膨胀：按下后第一次 timeupdate 会把
    * [上次更新, 按下] 那段也算进去。v1.7 只在 endHold 结算，膨胀无从发生。 */
 });
@@ -331,6 +332,7 @@ ok("多段按住取并集：重叠不翻倍，审计逐次全记", () => {
   acc.startHold(15, 20); acc.endHold(25);     // 从已看区 15 按住播过前沿到 25
   eq(acc.value, 15);                          // 并集 [10,25]
   eq(acc.holds, [[10, 20], [15, 25]]);
+  eq(acc.counted, [[10, 25]]);                // 计入区间已合并
 });
 ok("重看段的按键一律不计入在动（前沿以下不计数），审计 holds 仍全记", () => {
   const acc = T.mobileAccumulator();
@@ -338,12 +340,29 @@ ok("重看段的按键一律不计入在动（前沿以下不计数），审计 
   acc.startHold(10, 40); acc.endHold(35);     // 重看 10→35：整段在前沿以下
   eq(acc.value, 10);                          // 只有 [30,40]
   eq(acc.holds, [[30, 40], [10, 35]]);        // 反应延迟分析一个字节不丢
+  eq(acc.counted, [[30, 40]]);                // 重看那段不在计入区间里
 });
 ok("跨越前沿的按住：只计前沿之后的部分", () => {
   const acc = T.mobileAccumulator();
   acc.startHold(95, 100); acc.endHold(120);   // 按下时前沿 100
   eq(acc.value, 20);                          // 计入 [100,120]
   eq(acc.holds, [[95, 120]]);
+  eq(acc.counted, [[100, 120]]);
+});
+/* 两个数组各说各的真话：holds 是原始按键（一个字节不丢），holds_counted 是
+ * 实际计入秒数的那些。恒等式 union(holds_counted) == mobile_seconds 对每一场都
+ * 成立，入库侧不必猜工具算了什么；真值取哪一份是 DP-082/DP-124 的口径。 */
+ok("holds_counted 与秒数恒等；重看场次 holds 比 counted 多出的就是不计入的部分", () => {
+  const acc = T.mobileAccumulator();
+  acc.startHold(2.5, 2.5);  acc.endHold(7.25);   // 首看 [2.5,7.25] ⇒ 计 4.75
+  acc.startHold(1, 7.25);   acc.endHold(6);      // 重看 [1,6] 全在前沿下 ⇒ 计 0
+  acc.startHold(6.5, 7.25); acc.endHold(9.75);   // 跨前沿 ⇒ 只计 [7.25,9.75]
+  eq(acc.holds, [[2.5, 7.25], [1, 6], [6.5, 9.75]]);   // 原始三段全记
+  eq(acc.bursts, 3);
+  eq(acc.counted, [[2.5, 9.75]]);                        // 相邻 ⇒ 合并成一段
+  eq(acc.value, 7.25);                                   // 9.75 − 2.5
+  const u = acc.counted.reduce((s, x) => s + (x[1] - x[0]), 0);
+  eq(Math.round(u * 100) / 100, acc.value);              // 恒等式本身
 });
 
 /* ============ DP-128 §2-C（重看记账） ============ */
@@ -374,6 +393,28 @@ ok("nextTrial 把 rewatch_s 落进记录（导出里这一场重看过多少秒�
   T.nextTrial();
   eq(T.state.done[0].rewatch_s, 12.35);
   eq(T.state.done[0].mobile_seconds, 0);      // 没按过键 = 0 秒，重看不计入在动
+  eq(T.state.done[0].holds, []);              // 两份区间数组都落进记录
+  eq(T.state.done[0].holds_counted, []);
+});
+ok("记录里 holds 与 holds_counted 分开落盘：重看场次两者不同、且 counted 的并集 == mobile_seconds", () => {
+  threeTrials();
+  const acc = T.mobileAccumulator();
+  acc.startHold(30, 30); acc.endHold(40);     // 首看 [30,40] ⇒ 计 10
+  acc.startHold(10, 40); acc.endHold(35);     // 重看 [10,35] ⇒ 计 0
+  T.state.acc = acc;
+  T.state.rate = 1; T.state.windowS = 360; T.state.rewatchS = 25;
+  T.state.queue = [{ trial_id: "a-ch1", pos: 1, file: {}, declared_empty: false }];
+  T.state.qidx = 0;
+  el("qUnsc").checked = false; el("qTail").checked = false; el("qNote").value = "";
+  el("q1Row").hidden = false;
+  T.nextTrial();
+  const d = T.state.done[0];
+  eq(d.holds, [[30, 40], [10, 35]]);          // 原始按键：重看那段也在，一个字节不丢
+  eq(d.holds_counted, [[30, 40]]);            // 计入秒数的：重看那段不在
+  eq(d.mobile_seconds, 10);
+  eq(d.rewatch_s, 25);
+  const u = d.holds_counted.reduce((s, x) => s + (x[1] - x[0]), 0);
+  eq(Math.round(u * 100) / 100, d.mobile_seconds);
 });
 
 /* ============ DP-128 §1.3（cumulative_done + 导出前自检） ============ */

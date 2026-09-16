@@ -151,14 +151,17 @@ def _v17_doc(records, **extra):
     return doc
 
 
-def _v17_record(trial_id, order, holds, rewatch_s):
+def _v17_record(trial_id, order, holds, rewatch_s, counted=None):
+    """v1.7 的记录形状。`holds` 是原始按键区间（语义同 v1.4–v1.6），
+    `holds_counted` 是实际计入 mobile_seconds 的那些（重看段已在前沿处修剪）。"""
     return {
         "trial_id": trial_id, "assay": "TST",
-        "mobile_seconds": round(sum(b - a for a, b in holds), 2),
+        "mobile_seconds": round(sum(b - a for a, b in (holds if counted is None else counted)), 2),
         "window_s": 360.0, "declared_empty": False,
         "tail_climbing": False, "wall_support_still": None,
         "unscoreable": False, "note": "", "playback_rate": 1,
         "holds": holds,
+        "holds_counted": holds if counted is None else counted,   # v1.7 新记录字段（§2-B/C）
         "rewatch_s": rewatch_s,          # v1.7 新记录字段（§2-C）
         "presentation_order": order, "scored_at": "2026-09-15",
     }
@@ -189,9 +192,40 @@ def test_ingest_eats_v17_export_shape() -> None:
         # 新字段不许渗进行模型：它们不在 TrialRow 上，也不在重算表列里
         field_names = {f.name for f in dataclasses.fields(TrialRow)}
         for alien in ("cumulative_done", "claimed_first_session", "rescore",
-                      "rescore_of", "prior_files", "rewatch_s"):
+                      "rescore_of", "prior_files", "rewatch_s", "holds_counted"):
             assert alien not in field_names, \
                 "%s 渗进了 TrialRow——工具只如实记账，入库侧口径不许被导出形状牵着走" % alien
+
+
+def test_ingest_truth_still_reads_holds_not_holds_counted() -> None:
+    """v1.7 起一条记录里有两个区间数组，**入库侧真值读的仍是 `holds`**（DP-128 一行
+    未改入库侧，§5 禁令）。这条把现状钉住：重看过的场次两个数组不同，真值取哪个是
+    DP-082/DP-124 的口径——要改必须由架构师裁决并**改这条测试**，不许静默漂过去。
+
+    夹具是一场重看过的试次：原始按键 [30,40] 与 [10,35]（并集 30 s），
+    实际计入的只有 [30,40]（10 s，重看段的按键按 §2-C 不计入在动）。
+    """
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        rec = _v17_record("v-ch9", 1, [[30.0, 40.0], [10.0, 35.0]], 25.0,
+                          counted=[[30.0, 40.0]])
+        assert rec["mobile_seconds"] == 10.0        # 工具自己算的（重看不计入）
+        p = tmp / "timer_audit_TST_测试员_2026-09-15_final_090000Z.json"
+        p.write_text(json.dumps(_v17_doc([rec], cumulative_done=["v-ch9"],
+                                        cumulative_done_count=1), ensure_ascii=False),
+                     encoding="utf-8")
+        res = build_table(tmp)
+        assert res.n_trials == 1
+        row = res.rows[0]
+        # 现状：真值并集来自 holds（原始按键），所以这一场读出 30.0 而不是 10.0
+        assert row.mobile_union_s == 30.0, \
+            "入库真值不再等于 union(holds)——这是 DP-082/DP-124 的口径，改它要有裁决"
+        assert row.mobile_seconds_DISCARDED == 10.0   # 工具那份数照旧被丢弃但留着对账
+        assert row.n_hold_segments == 2               # 段数也按 holds 数
+        for alien in ("rewatch_s", "holds_counted"):
+            assert alien not in {f.name for f in dataclasses.fields(TrialRow)}, \
+                "%s 渗进了 TrialRow——v1.7 的新记账字段不许改入库侧的行模型" % alien
+        assert res.crosscheck_mismatches == []        # 本 tmp 目录没有配套 CSV
 
 
 def test_ingest_side_constants_untouched_by_dp128() -> None:
