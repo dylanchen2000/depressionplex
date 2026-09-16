@@ -51,6 +51,30 @@ SUMMARY_CSV_MOBILE_TOL_S = 0.05 + 1e-9
 #: 抢救 CSV 无 scorer_id 列，从文件名解析：human_scores_<评分员>_<日期>_SALVAGED_*
 _SCORER_IN_NAME_RE = re.compile(r"^human_scores_(.+?)_\d{4}-\d{2}-\d{2}")
 
+#: 评分员别名（frozen）。判据见 docs/派工单/B14_抢救文件评分员归属_DP-129.md §0.1：
+#: 抢救件「张」与 timer_audit_张咸明_2026-09-04 同批 trial_id + 同 presentation_order。
+#: **只许有架构师授权的条目**；再遇到对不上的名字只报告、不许自己加。
+SCORER_ALIASES: dict[str, str] = {"张": "张咸明"}
+
+
+def resolve_scorer_id(name: str, *, source: str) -> str:
+    """文件名/字段解析出的评分员名 → 规范名；单字且不在别名表 ⇒ 停机。
+
+    正则本身不改正文「张」——文件名确实写的是「张」。别名在解析之后套。
+    """
+    name = str(name or "")
+    if name in SCORER_ALIASES:
+        return SCORER_ALIASES[name]
+    if len(name) == 1:
+        raise ValueError(
+            f"{source}: 解析到单字评分员名 {name!r}，几乎一定是被截断的名字；"
+            f"静默收下会多出一个幽灵评分员。"
+            f"若确认是某人的简称，在 depressionplex/human_agreement.py "
+            f"的别名表 SCORER_ALIASES（约第 55 行）加一行映射。"
+        )
+    return name
+
+
 TRIAL_ID_RE = re.compile(r"^(?P<video>.+)-ch(?P<chamber>[1-9][0-9]*)$")
 
 
@@ -443,7 +467,8 @@ def load_salvaged_csv(path: Path | str, *, on_reject: str = "mark") -> list[Tria
     sibling_txt = sorted(path.parent.glob("*TRUNCATED*json.txt"))
     seed = _seed_from_truncated_txt(sibling_txt[0]) if sibling_txt else None
     m = _SCORER_IN_NAME_RE.match(path.name)
-    scorer_from_name = m.group(1) if m else path.name  # 解析不出如实回退文件名
+    scorer_from_name = resolve_scorer_id(
+        m.group(1) if m else path.name, source=path.name)
     rows: list[TrialRow] = []
     with path.open(encoding="utf-8-sig", newline="") as fh:
         for rec in csv.DictReader(fh):
@@ -459,8 +484,11 @@ def load_salvaged_csv(path: Path | str, *, on_reject: str = "mark") -> list[Tria
             unsorted = parse_bool(rec.get("holds_unsorted")) is True
             zero = int(_f(rec.get("zero_length_segments")) or 0)
             rate = _f(rec.get("playback_rate"))
+            raw_scorer = str(rec.get("scorer_id") or "").strip()
+            scorer_id = (resolve_scorer_id(raw_scorer, source=path.name)
+                         if raw_scorer else scorer_from_name)
             row = TrialRow(
-                scorer_id=str(rec.get("scorer_id") or scorer_from_name),
+                scorer_id=scorer_id,
                 trial_id=trial_id, source="salvaged_csv",
                 video=video, chamber=chamber, seed=seed,
                 presentation_order=(int(v) if (v := _f(rec.get("presentation_order"))) is not None else None),

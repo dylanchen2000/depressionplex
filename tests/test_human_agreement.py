@@ -24,6 +24,7 @@ from depressionplex.human_agreement import (
     READING_FIELDS,
     REJECT_UNSCORED_TRIPLE,
     RESCORE_DECL_NAME,
+    SCORER_ALIASES,
     SESSION_TRACE_FIELDS,
     STATUS_ACCEPTED,
     STATUS_REJECTED,
@@ -45,6 +46,10 @@ REPO = Path(__file__).resolve().parents[1]
 RAW = REPO / "data" / "human_scores" / "raw"
 INCOMING = REPO / "data" / "human_scores" / "incoming"
 COMMITTED_TABLE = REPO / "data" / "human_scores" / "recomputed" / "human_scores_recomputed_DP-012.csv"
+COMMITTED_TABLE_DP129 = (
+    REPO / "data" / "human_scores" / "recomputed"
+    / "human_scores_recomputed_DP-129_54trials.csv"
+)
 
 
 def _load_salvage_ref():
@@ -317,12 +322,13 @@ def test_unknown_format_rejected() -> None:
 
 
 def test_real_data_matches_audit_baseline() -> None:
-    # 2026-09-04（DP-044）：并入张咸明重评的 14 条 ⇒ 43+14=57 试次。
+    # DP-129：抢救件「张」并入「张咸明」后，raw/ 真值 54 条（57−3）+ 3 条已声明复评。
     # 两条 `20mg_3周-ch4` 都被拒收（两人独立都给空，DP-012：空 holds 与"没评"
     # 不可区分，一律拒收不许变 0）——这正是**真空隔间**在入库口径上的表现。
     res = build_table(RAW)
-    assert res.n_trials == 57
-    assert res.n_rejected == 2 and res.n_accepted == 55
+    assert res.n_trials == 54
+    assert res.n_repeats == 3
+    assert res.n_rejected == 2 and res.n_accepted == 52
     rejected = sorted((r.scorer_id, r.trial_id) for r in res.rows
                       if r.status == STATUS_REJECTED)
     assert rejected == [("张咸明", "20mg_3周-ch4"), ("徐乐彤", "20mg_3周-ch4")]
@@ -330,12 +336,14 @@ def test_real_data_matches_audit_baseline() -> None:
         if r.status == STATUS_REJECTED:
             assert r.mobile_union_s is None  # 不许变成 0 入库 ⇒ 360
 
-    assert res.unsorted_total == 15, "审计 §5.1：王3 徐5 陈3 张1 + 张咸明3"
+    # 幽灵「张」的 1 条乱序随复评出表；真值表剩 王3 徐5 陈3 张咸明3 = 14
+    assert res.unsorted_total == 14, "DP-129：王3 徐5 陈3 张咸明3（张的 1 条已出真值表）"
     by = res.by_scorer()
+    assert set(by) == {"王娟", "陈璇", "徐乐彤", "张咸明"}
     assert {s: by[s]["unsorted"] for s in by} == {
-        "王娟": 3, "陈璇": 3, "徐乐彤": 5, "张": 1, "张咸明": 3}
+        "王娟": 3, "陈璇": 3, "徐乐彤": 5, "张咸明": 3}
     assert {s: by[s]["zero_length"] for s in by} == {
-        "王娟": 0, "陈璇": 0, "徐乐彤": 1, "张": 3, "张咸明": 3}
+        "王娟": 0, "陈璇": 0, "徐乐彤": 1, "张咸明": 3}
     assert 54.6 <= res.max_naive_inflation_s <= 54.9, "审计：最多虚高 +54.8 s"
 
     # DP-004 证据：holds 无一越 360 硬收口
@@ -343,17 +351,17 @@ def test_real_data_matches_audit_baseline() -> None:
     assert res.order_mismatches == []
     assert res.crosscheck_mismatches == []
 
-    # 审计 §3：mobile 均值（并集口径）—— 王娟 195.7 / 陈璇 167.1 / 徐乐彤 115.0 / 张 117.8
+    # 审计 §3：mobile 均值（并集口径）—— 王娟 195.7 / 陈璇 167.1 / 徐乐彤 115.0
+    # 「张」117.8 是身份未合并时的幽灵均值，DP-129 后不再出现在 by_scorer
     means = {
         "王娟": by["王娟"]["union_sum_s"] / 13,
         "陈璇": by["陈璇"]["union_sum_s"] / 13,
         "徐乐彤": by["徐乐彤"]["union_sum_s"] / 13,   # 拒绝的不计入合计，13 有效
-        "张": by["张"]["union_sum_s"] / 3,
-        # DP-044：张咸明 13 个有效（同一批、同 seed、全程 0.5x）
+        # DP-044：张咸明 13 个有效（同一批、同 seed、全程 0.5x）；3 条抢救复评不入均值
         "张咸明": by["张咸明"]["union_sum_s"] / 13,
     }
     for s, expect in {"王娟": 195.7, "陈璇": 167.1, "徐乐彤": 115.0,
-                      "张": 117.8, "张咸明": 132.7}.items():
+                      "张咸明": 132.7}.items():
         assert abs(means[s] - expect) < 0.15, f"{s}: {means[s]:.2f} vs 审计 {expect}"
 
     # 审计 §5：每按键墙钟超额（逐试次口径，合并估计 0.121 s；逐试次更抖）
@@ -368,8 +376,9 @@ def test_real_data_matches_audit_baseline() -> None:
 
     # seed 分组（PROVENANCE 铁律 3 的数据前提）：同 seed 组共享播放顺序
     # DP-081：元素带「/范式」后缀（raw 目录现全是悬尾 ⇒ /TST），分组关系不变
+    # DP-129：张并入张咸明，seed 210593506 侧只剩张咸明/徐乐彤
     assert res.seed_groups == {973678866: ["王娟/TST", "陈璇/TST"],
-                               210593506: ["张/TST", "张咸明/TST", "徐乐彤/TST"]}
+                               210593506: ["张咸明/TST", "徐乐彤/TST"]}
     w = {r.trial_id: r.presentation_order for r in res.rows if r.scorer_id == "王娟"}
     c = {r.trial_id: r.presentation_order for r in res.rows if r.scorer_id == "陈璇"}
     assert set(w) == set(c) and all(w[t] == c[t] for t in w), \
@@ -378,17 +387,39 @@ def test_real_data_matches_audit_baseline() -> None:
 
 def test_committed_table_reproducible() -> None:
     """入库的重算表 = 校验器现算输出。真值可复现是 GLP 底线，也是 ignore 失效
-    （文件在磁盘、commit 里没有/对不上）的探测器。"""
-    assert COMMITTED_TABLE.exists(), "重算表未入库——检查 .gitignore（WORKFLOW §4）"
+    （文件在磁盘、commit 里没有/对不上）的探测器。
+
+    57 条那一版（human_scores_recomputed_DP-012.csv）是身份未合并时的历史产物，
+    文件保留在仓里一个字节不许改；DP-129 之后 raw/ 的真值是 54 条，比这一份。
+    """
+    assert COMMITTED_TABLE_DP129.exists(), (
+        "DP-129 54 条重算表未入库——检查 .gitignore（WORKFLOW §4）")
     fresh = table_csv_text(build_table(RAW).rows)
-    assert fresh == COMMITTED_TABLE.read_text(encoding="utf-8")
+    assert fresh == COMMITTED_TABLE_DP129.read_text(encoding="utf-8")
+
+
+def test_dp012_published_table_bytes_frozen() -> None:
+    """已发表 57 条表原地冻结：不许被 DP-129 覆盖或改写。"""
+    assert COMMITTED_TABLE.exists()
+    text = COMMITTED_TABLE.read_text(encoding="utf-8")
+    lines = text.splitlines()
+    assert len(lines) - 1 == 57, f"DP-012 表应为 57 行，实际 {len(lines) - 1}"
+    assert "张,30mg_2周_2+20_2周2-ch1," in text
+    assert "张,30mg_2周_2+20_2周2-ch2," in text
+    assert "张,30mg_2周_1-3+20_1周1-ch3," in text
+    import hashlib
+    assert hashlib.sha256(COMMITTED_TABLE.read_bytes()).hexdigest() == (
+        "08d6567f7d383acb8417970317891913e71840c1b37aff3919a9331b303a72c2"
+    )
 
 
 def test_salvaged_loader_passthrough() -> None:
     rows = load_salvaged_csv(
         RAW / "human_scores_张_2026-09-03_SALVAGED_3of14.csv")
     assert len(rows) == 3
-    assert all(r.scorer_id == "张" for r in rows), "评分员必须从文件名解析，不是整路径"
+    # DP-129：文件名仍是「张」，别名表映射为张咸明（断言等于，不许只断言非空）
+    assert all(r.scorer_id == "张咸明" for r in rows), (
+        "评分员从文件名解析后再过别名表，必须是张咸明")
     assert all(r.seed == 210593506 for r in rows), "seed 从配套 TRUNCATED txt 头部回填"
     assert rows[0].holds_unsorted and rows[0].zero_length_segments == 3
     assert rows[0].mobile_union_s == 112.36 and rows[0].immobility_s == 247.64
@@ -1026,3 +1057,85 @@ def test_cli_writes_truth_and_repeats_to_separate_tables() -> None:
         # 复评不许出现在真值表里：同一键在两张表里各一条，但读数不同
         assert set(truth[1:]).isdisjoint(set(repeats[1:]))
         assert "重复键归并（DP-082" in r.stdout
+
+
+# ---------------------------------------------------------------- DP-129：评分员身份「张」→「张咸明」
+
+
+#: 09-04 真值（0.5x）三键的 mobile_union_s；0.25x 抢救件是 112.36/127.37/113.52
+_DP129_TRUTH_MOBILES = {
+    "30mg_2周_2+20_2周2-ch1": 114.7,
+    "30mg_2周_2+20_2周2-ch2": 140.52,
+    "30mg_2周_1-3+20_1周1-ch3": 111.16,
+}
+_DP129_SALVAGE_MOBILES = {
+    "30mg_2周_2+20_2周2-ch1": 112.36,
+    "30mg_2周_2+20_2周2-ch2": 127.37,
+    "30mg_2周_1-3+20_1周1-ch3": 113.52,
+}
+
+
+def test_dp129_raw_54_truth_with_09_04_mobiles() -> None:
+    """raw/：54 真值 + 3 已声明复评；三键真值取 09-04，排除 0.25x 三个数。"""
+    res = build_table(RAW)
+    assert res.n_trials == 54, f"真值应为 54 条，实际 {res.n_trials}"
+    assert res.n_repeats == 3, f"已声明复评应为 3 条，实际 {res.n_repeats}"
+    truth = {
+        r.trial_id: r.mobile_union_s
+        for r in res.rows
+        if r.scorer_id == "张咸明" and r.trial_id in _DP129_TRUTH_MOBILES
+    }
+    assert truth == _DP129_TRUTH_MOBILES, truth
+    for tid, bad in _DP129_SALVAGE_MOBILES.items():
+        assert truth[tid] != bad, f"{tid} 真值不许是 0.25x 的 {bad}"
+    repeats = {
+        r.trial_id: r.mobile_union_s
+        for r in res.repeat_rows
+        if r.trial_id in _DP129_SALVAGE_MOBILES
+    }
+    assert repeats == _DP129_SALVAGE_MOBILES, repeats
+
+
+def test_dp129_raw_halts_without_declarations() -> None:
+    """把 raw/ 的声明拿掉 ⇒ ConflictingReadings 停机（tempfile，不动 git 跟踪的 data/）。"""
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        for p in RAW.iterdir():
+            if p.is_file() and p.name != RESCORE_DECL_NAME:
+                shutil.copy2(p, tmp / p.name)
+        try:
+            build_table(tmp)
+        except ConflictingReadings as e:
+            assert "读数不同" in str(e)
+        else:
+            raise AssertionError("撤掉 raw 声明后必须停机")
+
+
+def test_dp129_single_char_scorer_halts() -> None:
+    """单字评分员名且不在别名表 ⇒ 停机；报错含文件名与「别名表」。"""
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        name = "human_scores_李_2026-09-03_SALVAGED_1of1.csv"
+        (tmp / name).write_text(
+            "trial_id,mobile_union_s,immobility_s,n_hold_segments,"
+            "holds_unsorted,zero_length_segments,playback_rate,"
+            "tail_climbing,unscoreable,presentation_order,scored_at,note,"
+            "mobile_seconds_DISCARDED\n"
+            "v-ch1,10.0,350.0,1,False,0,0.5,False,False,1,2026-09-03,,10.0\n",
+            encoding="utf-8",
+        )
+        try:
+            load_salvaged_csv(tmp / name)
+        except ValueError as e:
+            msg = str(e)
+            assert name in msg, msg
+            assert "别名表" in msg, msg
+            assert "李" in msg, msg
+        else:
+            raise AssertionError("单字评分员名必须停机")
+
+
+def test_dp129_scorer_aliases_only_zhang() -> None:
+    """别名表只许有架构师授权的一条；新加别名必须连着这条守卫一起改。"""
+    assert set(SCORER_ALIASES) == {"张"}
+    assert SCORER_ALIASES["张"] == "张咸明"
