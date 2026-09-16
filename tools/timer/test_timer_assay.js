@@ -1,6 +1,10 @@
-/* 秒表工具 v1.5 双范式的离线自测：只测两件真会出错的事——
+/* 秒表工具（v1.5 双范式 + v1.7 DP-128）的离线自测：只测真会出错的事——
  * ① 清单解析（assay 缺列/留空/大小写/非法值/混排/FST- 前缀防撞）；
- * ② 导出 CSV 的列与「没问到就留空」。
+ * ② 导出 CSV 的列与「没问到就留空」；
+ * ③ DP-077 三处静默丢数据缺陷的回归；
+ * ④ v1.7（DP-128）：种子从链条恢复且必须唯一（§1.1）、首次会话显式声明
+ *    （§1.2）、cumulative_done + 导出前自检（§1.3）、重评只派指定场次
+ *    （§1.4）、DP-086 按键膨胀的结构性修复与重看记账（§2 B/C）。
  * 用最小 DOM 桩把单文件工具的 <script> 原样跑起来，不复制一行被测逻辑。
  * 跑法（由 tests/test_timer_tool.py 代跑，也可手动）：
  *   node tools/timer/test_timer_assay.js <timer.html> <FST清单.csv>
@@ -42,7 +46,8 @@ global.alert = (m) => { throw new Error("alert: " + m); };
 
 const mod = { exports: {} };
 new Function("module", js + "\nmodule.exports = { parseManifest, csvFromDone, state, q1Fields,"
-  + " ASSAYS, applyAssay, markDeclaredEmpty, nextTrial, mobileAccumulator, exportSnapshot, readPriorDone, doneTidSet, nDone, remainingTrials, rebuildQueue, onStart };")(mod);
+  + " ASSAYS, applyAssay, markDeclaredEmpty, nextTrial, mobileAccumulator, exportSnapshot, readPriorDone, doneTidSet, nDone, remainingTrials, rebuildQueue, onStart,"
+  + " loadTrial, onPriorChange, buildRescorePick, chainInfo };")(mod);
 const T = mod.exports;
 
 let fails = 0;
@@ -224,6 +229,13 @@ function threeTrials() {
                        { trial_id: "b-ch1", pos: 2, file: {} },
                        { trial_id: "c-ch1", pos: 3, file: {} }];
   T.state.priorDone = []; T.state.done = []; T.state.qidx = 0;
+  /* v1.7 会话形态字段一并复位——state 是跨测试共享的单例，漏一个就会串场 */
+  T.state.claimedFirst = false; T.state.rescore = false; T.state.rescoreOf = [];
+  T.state.priorFileNames = []; T.state.chainSeed = null; T.state.chainDone = [];
+  T.state.rewatchS = 0; T.state.redoTrialId = null; T.state.started = false;
+  el("rescoreChk").checked = false;
+  el("kindFirst").checked = false; el("kindLost").checked = false;
+  el("seed").readOnly = false;
 }
 /* 把审计 JSON 包成 onStart 认得的「文件」桩 */
 function auditFile(name, doc) {
@@ -233,6 +245,8 @@ function auditDoc(over) {
   return Object.assign({
     format: "depressionplex.stopwatch-audit.v1", assay: "TST", scorer_id: "R1",
     partial: true, done_count: 1, total_trials: 3, records: [{ trial_id: "a-ch1" }],
+    /* v1.7 起链条必须带 seed（§1.1：顺序从链条恢复）；真实导出 v1.4 起就带 */
+    seed: 7,
   }, over || {});
 }
 
@@ -283,7 +297,8 @@ ok("审计 JSON：done_count 仍是本会话条数，累计另立字段", () => 
   const d = JSON.parse(audit);
   eq([d.done_count, d.cumulative_done_count, d.total_trials], [1, 3, 3]);
   eq(d.prior_done, ["a-ch1", "b-ch1"]);
-  eq(d.tool_version, "v1.6");
+  eq(d.cumulative_done, ["a-ch1", "b-ch1", "c-ch1"]);   // v1.7-③：与计数说的是同一件事
+  eq(d.tool_version, "v1.7");
 });
 
 console.log("DP-077 缺陷③（进度只存 localStorage，换机/误点就丢）：");
@@ -297,6 +312,136 @@ ok("rebuildQueue 跳过之前评过的，不会重发", () => {
   T.state.priorDone = ["a-ch1", "c-ch1"];
   T.rebuildQueue();
   eq(T.state.queue.map(m => m.trial_id), ["b-ch1"]);
+});
+
+/* ============ DP-128 §2-B（DP-086 按键膨胀的结构性修复） ============ */
+console.log("DP-086 按键膨胀（在动秒数 = 按住区间的并集，timeupdate 粒度不参与）：");
+ok("首看按键：value 恰等于 [按下, 松开]，不多一个 timeupdate 粒度", () => {
+  const acc = T.mobileAccumulator();
+  acc.startHold(10.25, 10.25);      // frontier=按下点：首看
+  acc.endHold(12.75);
+  eq(acc.value, 2.5);
+  eq(acc.holds, [[10.25, 12.75]]);
+  /* 旧版这里是 2.5 + 平均 0.115 s 的膨胀：按下后第一次 timeupdate 会把
+   * [上次更新, 按下] 那段也算进去。v1.7 只在 endHold 结算，膨胀无从发生。 */
+});
+ok("多段按住取并集：重叠不翻倍，审计逐次全记", () => {
+  const acc = T.mobileAccumulator();
+  acc.startHold(10, 10); acc.endHold(20);     // 首看 [10,20]
+  acc.startHold(15, 20); acc.endHold(25);     // 从已看区 15 按住播过前沿到 25
+  eq(acc.value, 15);                          // 并集 [10,25]
+  eq(acc.holds, [[10, 20], [15, 25]]);
+});
+ok("重看段的按键一律不计入在动（前沿以下不计数），审计 holds 仍全记", () => {
+  const acc = T.mobileAccumulator();
+  acc.startHold(30, 30); acc.endHold(40);     // 首看到 40
+  acc.startHold(10, 40); acc.endHold(35);     // 重看 10→35：整段在前沿以下
+  eq(acc.value, 10);                          // 只有 [30,40]
+  eq(acc.holds, [[30, 40], [10, 35]]);        // 反应延迟分析一个字节不丢
+});
+ok("跨越前沿的按住：只计前沿之后的部分", () => {
+  const acc = T.mobileAccumulator();
+  acc.startHold(95, 100); acc.endHold(120);   // 按下时前沿 100
+  eq(acc.value, 20);                          // 计入 [100,120]
+  eq(acc.holds, [[95, 120]]);
+});
+
+/* ============ DP-128 §2-C（重看记账） ============ */
+console.log("重看记账（rewatch_s）：");
+ok("timeupdate：前沿以下的正向播放累积 rewatch_s，前沿推进不累积", () => {
+  threeTrials();
+  T.state.queue = [{ trial_id: "a-ch1", pos: 1, file: {}, declared_empty: false }];
+  T.state.qidx = 0;
+  T.loadTrial();                              // 重置 rewatchS 并挂 ontimeupdate
+  eq(T.state.rewatchS, 0);
+  const v = el("vid");
+  v.duration = 360;
+  v.currentTime = 10;   v.ontimeupdate();     // 首帧：只立 lastTime/maxT
+  v.currentTime = 10.4; v.ontimeupdate();     // 前沿推进：不记重看
+  v.currentTime = 10;   v.ontimeupdate();     // ←键回看（负向）：不记
+  v.currentTime = 10.2; v.ontimeupdate();     // 已看区内正向：rewatch += 0.2
+  eq(Math.round(T.state.rewatchS * 100) / 100, 0.2);
+  eq(T.state.maxT, 10.4);
+});
+ok("nextTrial 把 rewatch_s 落进记录（导出里这一场重看过多少秒有据可查）", () => {
+  threeTrials();
+  T.state.acc = T.mobileAccumulator();
+  T.state.rate = 1; T.state.windowS = 360; T.state.rewatchS = 12.3456;
+  T.state.queue = [{ trial_id: "a-ch1", pos: 1, file: {}, declared_empty: false }];
+  T.state.qidx = 0;
+  el("qUnsc").checked = false; el("qTail").checked = true; el("qNote").value = "";
+  el("q1Row").hidden = false;
+  T.nextTrial();
+  eq(T.state.done[0].rewatch_s, 12.35);
+  eq(T.state.done[0].mobile_seconds, 0);      // 没按过键 = 0 秒，重看不计入在动
+});
+
+/* ============ DP-128 §1.3（cumulative_done + 导出前自检） ============ */
+console.log("v1.7 导出形状与自检：");
+function captureAudit(fn) {
+  let audit = null;
+  const realBlob = global.Blob;
+  global.Blob = class { constructor(parts) { audit = parts[0]; } };
+  try { fn(); } finally { global.Blob = realBlob; }
+  return JSON.parse(audit);
+}
+ok("续评导出：v1.7 新字段全在场且说的是真话", () => {
+  threeTrials();
+  T.state.priorDone = ["a-ch1"]; T.state.done = [mkDone("b-ch1", 2)];
+  T.state.priorFileNames = ["timer_audit_TST_R1_p1.json"];
+  const d = captureAudit(() => { dl.length = 0; T.exportSnapshot(false); });
+  eq(d.tool_version, "v1.7");
+  eq(d.cumulative_done, ["a-ch1", "b-ch1"]);
+  eq(d.cumulative_done_count, 2);
+  eq(d.claimed_first_session, false);         // 续评会话不是第一次
+  eq(d.rescore, false); eq(d.rescore_of, []);
+  eq(d.prior_files, ["timer_audit_TST_R1_p1.json"]);
+});
+ok("首次会话导出：claimed_first_session=true 落在文件里（屏幕上的确认不算确认）", () => {
+  threeTrials();
+  T.state.claimedFirst = true; T.state.done = [mkDone("a-ch1", 1)];
+  const d = captureAudit(() => { dl.length = 0; T.exportSnapshot(false); });
+  eq(d.claimed_first_session, true);
+  eq(d.cumulative_done, ["a-ch1"]);
+  eq(d.prior_files, []); eq(d.rescore, false); eq(d.rescore_of, []);
+});
+ok("重评导出：rescore / rescore_of / prior_files（首评所在文件）如实记账", () => {
+  threeTrials();
+  T.state.rescore = true; T.state.rescoreOf = ["a-ch1"];
+  T.state.priorDone = ["a-ch1", "b-ch1"];
+  T.state.priorFileNames = ["timer_audit_TST_R1_p1.json", "timer_audit_TST_R1_p2.json"];
+  T.state.done = [mkDone("a-ch1", 1)];
+  const d = captureAudit(() => { dl.length = 0; T.exportSnapshot(false); });
+  eq(d.rescore, true); eq(d.rescore_of, ["a-ch1"]);
+  eq(d.prior_files, ["timer_audit_TST_R1_p1.json", "timer_audit_TST_R1_p2.json"]);
+  eq(d.claimed_first_session, false);
+});
+ok("自检：cumulative_done 与 cumulative_done_count 打架 ⇒ 拒绝导出，一个字节不落", () => {
+  threeTrials();
+  T.state.priorDone = ["a-ch1", "z-ch9"];     // z-ch9 不在清单：集合 3 条 vs nDone 2
+  T.state.done = [mkDone("b-ch1", 2)];
+  dl.length = 0;
+  throws(() => T.exportSnapshot(false), "打架");   // node 桩里 alert 抛错；浏览器里弹窗后 return
+  eq(dl.length, 0);
+});
+
+/* ============ DP-128 §1.4（重评只派指定场次） ============ */
+console.log("重评派单（rescore）：");
+ok("rebuildQueue：rescore=true 只派指定场次，评过没指定的也不派", () => {
+  threeTrials();
+  T.state.fullOrder[0].file = {}; T.state.fullOrder[1].file = {}; T.state.fullOrder[2].file = {};
+  T.state.priorDone = ["a-ch1", "b-ch1"];
+  T.state.rescore = true; T.state.rescoreOf = ["a-ch1"];
+  T.rebuildQueue();
+  eq(T.state.queue.map(m => m.trial_id), ["a-ch1"]);
+});
+ok("rebuildQueue：不勾重评 ⇒ 已评场次一场都不派", () => {
+  threeTrials();
+  T.state.fullOrder[0].file = {}; T.state.fullOrder[1].file = {}; T.state.fullOrder[2].file = {};
+  T.state.priorDone = ["a-ch1", "b-ch1"];
+  T.state.rescore = false;
+  T.rebuildQueue();
+  eq(T.state.queue.map(m => m.trial_id), ["c-ch1"]);
 });
 
 const TIDS = new Set(["a-ch1", "b-ch1", "c-ch1"]);
@@ -334,10 +479,179 @@ async function main() {
     eq(r.errs, []);
     eq(Array.from(r.done).sort(), ["a-ch1", "b-ch1"]);
   });
+  await okA("导入进度：cumulative_done 与计数打架 ⇒ 拒收（不许挑一个信）", async () => {
+    const r = await T.readPriorDone([auditFile("x.json", auditDoc({
+      cumulative_done: ["a-ch1"], cumulative_done_count: 2 }))], "R1", "TST", TIDS);
+    eq(r.done.size, 0);
+    if (!r.errs.join("").includes("打架")) throw new Error("没报出字段打架：" + r.errs);
+  });
+  await okA("导入进度：cumulative_done 让链断一环也接得上（只选最新一份就够）", async () => {
+    const r = await T.readPriorDone([auditFile("latest.json", auditDoc({
+      records: [{ trial_id: "c-ch1" }], prior_done: ["b-ch1"],
+      cumulative_done: ["a-ch1", "b-ch1", "c-ch1"], cumulative_done_count: 3 }))],
+      "R1", "TST", TIDS);
+    eq(r.errs, []);
+    eq(Array.from(r.done).sort(), ["a-ch1", "b-ch1", "c-ch1"]);
+    eq(Array.from(r.seeds), [7]);
+    eq(r.names, ["latest.json"]);
+  });
+
+  /* ---- v1.7（DP-128）：会话形态的三套 onStart 关卡 ---- */
+  const MAN3 = "trial_id,video_filename\r\na-ch1,a.mp4\r\nb-ch1,b.mp4\r\nc-ch1,c.mp4\r\n";
+  const tick = () => new Promise(r => setTimeout(r, 0));
+  function setupStart(opts) {
+    threeTrials();                       // 复位共享 state（含 v1.7 会话形态字段）
+    localStorage.removeItem("dpst:v2:R1");
+    el("scorerId").value = "R1";
+    el("seed").value = opts.seedValue === undefined ? "7" : opts.seedValue;
+    el("manifestFile").files = [{ name: "m.csv", text: async () => MAN3 }];
+    el("videoFiles").files = (opts.videos || ["a.mp4", "b.mp4", "c.mp4"]).map(n => ({ name: n }));
+    el("priorFiles").files = opts.priors || [];
+    el("kindFirst").checked = !!opts.kindFirst;
+    el("kindLost").checked = !!opts.kindLost;
+    el("rescoreChk").checked = !!opts.rescore;
+    T.state.confirmBatch = null; T.state.confirmWipe = null;
+    el("setupErr").textContent = "";
+  }
+
+  console.log("DP-128 §1.1（种子从链条恢复；两个种子停机）：");
+  await okA("选进「已评进度」当场恢复种子（只读显示），首次声明框收起、重评列表出现", async () => {
+    el("priorFiles").files = [auditFile("p1.json", auditDoc({ seed: 4242,
+      records: [{ trial_id: "a-ch1" }], cumulative_done: ["a-ch1"], cumulative_done_count: 1 }))];
+    await T.onPriorChange();
+    eq(el("seed").value, "4242"); eq(el("seed").readOnly, true);
+    eq(el("firstBox").hidden, true);
+    eq(el("rescoreBox").hidden, false); eq(el("rescorePick").hidden, false);
+    eq(T.state.chainDone, ["a-ch1"]); eq(T.state.chainSeed, 4242);
+    eq(el("setupErr").textContent, "");
+  });
+  await okA("链里两个种子 ⇒ 当场红字，文案逐字是裁决那句", async () => {
+    el("priorFiles").files = [auditFile("p1.json", auditDoc({ seed: 1, records: [] })),
+                              auditFile("p2.json", auditDoc({ seed: 2, records: [] }))];
+    await T.onPriorChange();
+    if (!el("setupErr").textContent.includes("这几份导出不是同一个顺序，不许混在一起续评")) {
+      throw new Error("停机文案不对：" + el("setupErr").textContent);
+    }
+    eq(el("seed").value, ""); eq(el("seed").readOnly, true);
+    eq(T.state.chainSeed, null);
+  });
+  await okA("清空「已评进度」⇒ 首次声明框回来，种子字段恢复可填", async () => {
+    el("priorFiles").files = [];
+    await T.onPriorChange();
+    eq(el("firstBox").hidden, false); eq(el("seed").readOnly, false);
+    eq(el("rescoreBox").hidden, true);
+  });
+  await okA("续评 onStart：种子来自链条而不是界面字段，恢复成只读", async () => {
+    setupStart({ seedValue: "",
+      priors: [auditFile("p.json", auditDoc({ seed: 4242, records: [{ trial_id: "a-ch1" }] }))] });
+    T.onStart(); await tick();
+    eq(el("setupErr").textContent, "");
+    eq(T.state.seed, 4242);
+    eq(el("seed").value, "4242"); eq(el("seed").readOnly, true);
+    eq(T.state.claimedFirst, false); eq(T.state.rescore, false);
+    eq(T.state.priorFileNames, ["p.json"]);
+    eq(T.state.queue.map(m => m.trial_id).sort(), ["b-ch1", "c-ch1"]);
+  });
+  await okA("续评 onStart：链里两个种子 ⇒ 停机，不开评", async () => {
+    setupStart({ seedValue: "",
+      priors: [auditFile("p1.json", auditDoc({ seed: 7, records: [{ trial_id: "a-ch1" }] })),
+               auditFile("p2.json", auditDoc({ seed: 99, records: [{ trial_id: "b-ch1" }] }))] });
+    T.onStart(); await tick();
+    if (!el("setupErr").textContent.includes("这几份导出不是同一个顺序，不许混在一起续评")) {
+      throw new Error("没有按裁决停机：" + el("setupErr").textContent);
+    }
+    eq(T.state.priorFileNames, []);       // 没走到赋值 = 没开评
+  });
+  await okA("链条文件缺 seed ⇒ 拒开（无法从链条恢复顺序）", async () => {
+    const doc = auditDoc({ records: [{ trial_id: "a-ch1" }] }); delete doc.seed;
+    setupStart({ seedValue: "", priors: [auditFile("p.json", doc)] });
+    T.onStart(); await tick();
+    if (!el("setupErr").textContent.includes("缺 seed")) {
+      throw new Error("没报缺 seed：" + el("setupErr").textContent);
+    }
+  });
+
+  console.log("DP-128 §1.2（首次会话必须显式声明，声明落进导出）：");
+  await okA("没选文件又没声明 ⇒ 不许开始", async () => {
+    setupStart({});
+    T.onStart();
+    if (!el("setupErr").textContent.includes("首次会话声明")) {
+      throw new Error("没拦：" + el("setupErr").textContent);
+    }
+  });
+  await okA("声明「续评但找不到文件」⇒ 不许开始", async () => {
+    setupStart({ kindLost: true });
+    T.onStart();
+    if (!el("setupErr").textContent.includes("不许开始")) {
+      throw new Error("没拦：" + el("setupErr").textContent);
+    }
+  });
+  await okA("既选文件又声明第一次 ⇒ 矛盾，不许开始", async () => {
+    setupStart({ kindFirst: true, priors: [auditFile("p.json", auditDoc())] });
+    T.onStart();
+    if (!el("setupErr").textContent.includes("矛盾")) {
+      throw new Error("没拦：" + el("setupErr").textContent);
+    }
+  });
+  await okA("勾了首次声明 ⇒ 开始，导出里 claimed_first_session=true", async () => {
+    setupStart({ kindFirst: true });
+    T.onStart(); await tick();
+    eq(el("setupErr").textContent, "");
+    eq(T.state.claimedFirst, true); eq(T.state.seed, 7);
+    const d = captureAudit(() => { dl.length = 0; T.exportSnapshot(false); });
+    eq(d.claimed_first_session, true);
+    eq(d.seed, 7);
+  });
+
+  console.log("DP-128 §1.4（重评：只派指定场次，新种子自盲重派）：");
+  await okA("勾重评并指定场次 ⇒ 只派指定的，新种子不沿用旧链", async () => {
+    setupStart({ seedValue: "", rescore: true,
+      priors: [auditFile("p1.json", auditDoc({ seed: 7,
+        records: [{ trial_id: "a-ch1" }, { trial_id: "b-ch1" }] }))] });
+    T.state.rescoreOf = ["a-ch1"];
+    T.onStart(); await tick();
+    eq(el("setupErr").textContent, "");
+    eq(T.state.rescore, true);
+    eq(T.state.queue.map(m => m.trial_id), ["a-ch1"]);
+    eq(T.state.priorDone, ["a-ch1", "b-ch1"]);
+    if (T.state.seed === 7) throw new Error("重评会话仍沿用旧链种子——自盲重派要用新种子");
+    if (!Number.isInteger(T.state.seed) || T.state.seed < 0 || T.state.seed >= 1e9) {
+      throw new Error("新种子越界：" + T.state.seed);
+    }
+  });
+  await okA("勾了重评却没指定场次 ⇒ 不许开始", async () => {
+    setupStart({ seedValue: "", rescore: true,
+      priors: [auditFile("p1.json", auditDoc({ seed: 7, records: [{ trial_id: "a-ch1" }] }))] });
+    T.state.rescoreOf = [];
+    T.onStart(); await tick();
+    if (!el("setupErr").textContent.includes("没指定任何场次")) {
+      throw new Error("没拦：" + el("setupErr").textContent);
+    }
+  });
+  await okA("指定了没评过的场次去重评 ⇒ 不许开始", async () => {
+    setupStart({ seedValue: "", rescore: true,
+      priors: [auditFile("p1.json", auditDoc({ seed: 7, records: [{ trial_id: "a-ch1" }] }))] });
+    T.state.rescoreOf = ["c-ch1"];
+    T.onStart(); await tick();
+    if (!el("setupErr").textContent.includes("不在链条的已评清单里")) {
+      throw new Error("没拦：" + el("setupErr").textContent);
+    }
+  });
+  await okA("重评场次本次没选到视频 ⇒ 不许开始", async () => {
+    setupStart({ seedValue: "", rescore: true, videos: ["b.mp4"],
+      priors: [auditFile("p1.json", auditDoc({ seed: 7,
+        records: [{ trial_id: "a-ch1" }, { trial_id: "b-ch1" }] }))] });
+    T.state.rescoreOf = ["a-ch1"];
+    T.onStart(); await tick();
+    if (!el("setupErr").textContent.includes("没选到视频")) {
+      throw new Error("没拦：" + el("setupErr").textContent);
+    }
+  });
 
   console.log("DP-077 缺陷②（「开始评分」静默抹掉存档进度）：");
   await okA("有存档时第一次点「开始评分」只警告、不抹；再点一次才抹", async () => {
     const MAN = "trial_id,video_filename\r\na-ch1,a.mp4\r\nb-ch1,b.mp4\r\nc-ch1,c.mp4\r\n";
+    threeTrials();                       // 复位会话形态：这条测的是续评+存档确认，不是重评
     el("scorerId").value = "R1"; el("seed").value = "7";
     el("manifestFile").files = [{ name: "m.csv", text: async () => MAN }];
     el("videoFiles").files = [{ name: "a.mp4" }, { name: "b.mp4" }, { name: "c.mp4" }];
