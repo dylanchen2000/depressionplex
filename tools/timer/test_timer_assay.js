@@ -1172,9 +1172,21 @@ async function main() {
    * 「关清了指纹」与「本来就没有指纹」、「关写了红字」与「桩里残留的红字」分不开。
    * 复核意见 1：红字说的是评分员真能做的下一步。这道关打得着时他确实**选了**视频，
    * 只是选到的每一场都评过了，所以文案说「都已评过」并给两条真出路，不说「你没选
-   * 视频」（那句照做也解决不了任何事）。期望串只写一遍（ZERO_COPY），四条测试共用，
-   * 免得抄四遍抄出四种版本；引号里那个按钮标签另有一条断言去 HTML 原文里对真标签。 */
-  const ZERO_COPY = "你选的视频对应的场次都已经评过了：本批没有要评的场次。请把还没评的那几场的视频选进来；要重做已评过的场次，请勾「重做已完成试次…」并在清单里勾选。";
+   * 视频」（那句照做也解决不了任何事）。期望串只写一遍（ZERO_COPY），五条测试共用，
+   * 免得抄五遍抄出五种版本。
+   * 复核意见 2：后半句原来点名的那颗按钮在**评分页**（`<section id="scoring" hidden>`），
+   * 这道关拦住时压根没渲染，它开的下拉又只列本次会话的 state.done（此刻是空的）——
+   * 红字指了一个评分员当时看不见的控件。现在改成点名设置页上真对得上的那一组，并且
+   * 钉两件事：① 引号里那两个标签从 HTML 原文取真值来比（改任一侧就红）；② **可见性**
+   * ——这道关触发的那一刻「重评」那一栏与下面的清单必然在屏幕上。②就是抓①这类错的：
+   * 只钉标签、不钉可见性，抓不到「指了个看不见的控件」。可见性不是假设，是推出来的：
+   * nHave == 0 ⇒（「请选择视频文件」那道关保证 vids 非空、「多余视频（不在清单）」那道
+   * 关保证 vids 都在名册里）⇒ 有名册条目带着文件 ⇒ prior.done 非空 ⇒ priors 非空且
+   * 解析无误 ⇒ onPriorChange 里 chainDone 非空 ⇒「重评」那一栏已经露了出来。第 5 条
+   * 测试钉的就是这条推导唯一可能塌的那个口子（priors 为空时 nHave 还能不能等于 0）。
+   * 所以两个 0 场夹具都得先走一遍 onPriorChange：评分员选进「已评进度」那一下必然
+   * 触发 change，跳过它就等于拿上一条测试留下的残值当现场，钉子钉上去也是空的。 */
+  const ZERO_COPY = "你选的视频对应的场次都已经评过了：本批没有要评的场次。请把还没评的那几场的视频选进来；确实要重做已评过的场次，就在上面「重评」那一栏勾「本次是重评（rescore）」，再在下面的清单里勾中要重做的场次。";
   /* 这道关的 signature 片段：整串出现时它必然出现。第 3／4 条用它验「这道关没插手」，
    * 比整串比对更严——文案被改过字、只剩这一段，也照样抓得到（原来比的是旧串前半截，
    * 换成整串就等于把这两条验松了一档，不能那么换）。 */
@@ -1183,7 +1195,14 @@ async function main() {
   await okA("选到的视频全是已评过的场次 ⇒ 逐字红字拦住，不弹确认框、第二次点还是这一句", async () => {
     setupStart({ videos: ["a.mp4"], priors: [auditFile("p.json", auditDoc({
       records: [{ trial_id: "a-ch1" }] }))] });       // a 评过又选了它的视频 ⇒ nHave = 0，b/c 没安排
-    /* 先弄脏：指纹写非空（setupStart 已把 setupErr 写成「【桩】上一条测试留下的红字」） */
+    /* 复核意见 2：可见性钉子要钉在**真现场**上——评分员选进「已评进度」那一下必然
+     * 触发 change ⇒ onPriorChange。先弄脏（该露出的摆成收着、清单摆成桩内容），
+     * 否则「它露出来了」与「它本来就露着」分不开，钉子就是空的。 */
+    el("rescoreBox").hidden = true;
+    el("rescorePick").hidden = true; el("rescorePick").innerHTML = "【桩】";
+    await T.onPriorChange();
+    /* 先弄脏：指纹写非空。onPriorChange 会把 setupErr 清空，脏值必须写在它之后 */
+    el("setupErr").textContent = "【桩】上一条测试留下的红字";
     T.state.confirmOnce = "上一条测试留下的指纹";
     /* 现场摆成评分员真实看到的样子，这几条验的是「这道关没顺手改别的」 */
     el("setup").hidden = false; el("scoring").hidden = true; el("finish").hidden = true;
@@ -1191,14 +1210,48 @@ async function main() {
 
     T.onStart(); await tick();
     eq(el("setupErr").textContent, ZERO_COPY, "0 场那一道关的文案（逐字）：");
-    /* 文案里引的按钮标签必须是界面上真有的那一个（照抄，含省略号，不许另起说法）：
-     * 按钮改了名而文案没跟着改，评分员就照着一句假话找不着那个勾。 */
-    const realLabel = /<button id="redoBtn"[^>]*>([^<]+)<\/button>/.exec(html)[1];
-    eq(realLabel, "重做已完成试次…", "redoBtn 的真标签（红字里引的就是它）：");
-    if (!el("setupErr").textContent.includes("「" + realLabel + "」")) {
-      throw new Error("红字引的按钮标签与界面上的不一致（照它找不着那个勾）："
+    /* 复核意见 2 第 1 条：引号里那两个标签从 HTML 原文取真值来比（照 redoBtn 那颗钉子
+     * 的做法）——任一侧改了字，评分员就照着一句假话找不着那个勾。 */
+    const strip = s => s.replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim();
+    const legend = strip(/<fieldset id="rescoreBox"[^>]*>\s*<legend>([\s\S]*?)<\/legend>/
+      .exec(html)[1]);
+    const chkLabel = strip(/<input type="checkbox" id="rescoreChk">([\s\S]*?)<\/label>/
+      .exec(html)[1]);
+    if (!legend.startsWith("重评")) {
+      throw new Error("rescoreBox 的 legend 不以「重评」开头了（界面是 " + legend + "）");
+    }
+    if (!chkLabel.includes("本次是重评（rescore）")) {
+      throw new Error("rescoreChk 的 label 里没有「本次是重评（rescore）」了：" + chkLabel);
+    }
+    const quoted = ZERO_COPY.match(/「[^」]+」/g).map(s => s.slice(1, -1));
+    eq(quoted, ["重评", "本次是重评（rescore）"], "红字引号里引的两个标签（逐字）：");
+    if (!legend.startsWith(quoted[0]) || !chkLabel.includes(quoted[1])) {
+      throw new Error("红字引的标签与界面上的不一致（照它找不着那个勾）：legend="
+        + legend + " / label=" + chkLabel);
+    }
+    /* 复核意见 2 第 3 条：评分页那颗重做按钮，这道关的文案里 0 命中；它自己不许动 */
+    const redoLabel = /<button id="redoBtn"[^>]*>([^<]+)<\/button>/.exec(html)[1];
+    eq(redoLabel, "重做已完成试次…", "redoBtn 的真标签（本轮不许动它，也不许再引它）：");
+    if (el("setupErr").textContent.includes(redoLabel)) {
+      throw new Error("这道关的文案又点名了评分页那颗按钮——它此刻不在屏幕上，"
+        + "而且它开的下拉只列本次会话的 state.done（现在是空的）："
         + el("setupErr").textContent);
     }
+    /* 复核意见 2 第 2 条：**可见性**钉子。只钉标签不钉可见性，抓不到「红字指了一个
+     * 看不见的控件」——复核意见 1 那颗 redoBtn 钉子正是这么漏的，别省。 */
+    eq(el("rescoreBox").hidden, false,
+       "这道关拦住的那一刻「重评」那一栏不在屏幕上（红字指了个看不见的控件）：");
+    eq(el("rescorePick").hidden, false, "红字说的「下面的清单」不在屏幕上：");
+    if (el("rescorePick").innerHTML === "【桩】") {
+      throw new Error("清单那一格还是桩留下的内容——buildRescorePick 没跑过"
+        + "（真跑过会先把它清空再逐场重建）");
+    }
+    if (!(T.state.chainDone.length > 0)) {
+      throw new Error("nHave == 0 却 chainDone 为空：可见性那条推导的前提塌了");
+    }
+    /* 清单就是按 chainDone 逐场生成的（HTML 里 `for (const tid of state.chainDone)`，
+     * 契约那边钉着这条源码耦合），所以钉住 chainDone 就等于钉住清单里有哪几场。 */
+    eq(T.state.chainDone, ["a-ch1"], "清单里列的就是链条已评的那几场：");
     eq(T.state.confirmOnce, null, "0 场那次点击留下了确认指纹——那等于「再点一次就放行」：");
     eq(el("setup").hidden, false, "0 场却把设置页收起来了：");
     eq(el("scoring").hidden, true, "0 场却进了评分页：");
@@ -1224,6 +1277,11 @@ async function main() {
   await okA("0 场且本机有存档 ⇒ 这道关优先于确认框：不列②、不露「继续上次」、存档一个字节都不抹", async () => {
     setupStart({ videos: ["a.mp4"], priors: [auditFile("p.json", auditDoc({
       records: [{ trial_id: "a-ch1" }] }))] });
+    /* 同上一条：可见性钉子要钉在真现场上（选进「已评进度」⇒ 必然触发 onPriorChange） */
+    el("rescoreBox").hidden = true;
+    el("rescorePick").hidden = true; el("rescorePick").innerHTML = "【桩】";
+    await T.onPriorChange();
+    el("setupErr").textContent = "【桩】上一条测试留下的红字";
     /* 弄脏：真写一份存档进去——「没被抹」与「本来就没有」必须分得开（DP-077 缺陷②） */
     localStorage.setItem("dpst:v2:R1", JSON.stringify({
       seed: 7, order: ["a-ch1", "b-ch1", "c-ch1"], assay: "TST",
@@ -1235,6 +1293,8 @@ async function main() {
     T.onStart(); await tick();
     eq(el("setupErr").textContent, ZERO_COPY,
        "有存档时这道关的文案也得是这一句（关优先于确认框）：");
+    eq(el("rescoreBox").hidden, false,
+       "有存档这一路也一样：这道关拦住时「重评」那一栏必须在屏幕上（红字点名的就是它）：");
     if (el("setupErr").textContent.includes("② 本机有存档")) {
       throw new Error("0 场时还把存档那条列出来了——关让位给了确认框："
         + el("setupErr").textContent);
@@ -1309,6 +1369,37 @@ async function main() {
       throw new Error("收工那句话不对（还是桩里的残留）：" + el("finishMsg").textContent);
     }
     eq(T.state.confirmOnce, null, "这条路上指纹该清空：");
+  });
+
+  await okA("复核意见 2 的可达性：priors 为空 ⇒ 这道关压根打不着（名册外的视频被「多余视频」那道关先接住）", async () => {
+    /* 能让 nHave == 0 而 chainDone 为空的路只有两条：一个视频都没选（被 §1.2
+     * 「请选择视频文件」那道关先接住，另一道关），或选到的视频都不在名册里。
+     * 后者在这里钉死：它被 onStart 里「多余视频（不在清单）」那道关接住，所以红字
+     * 不是这道关那句，「重评」那一栏也没被冒出来——可见性那条推导没有别的口子。 */
+    setupStart({ videos: ["zzz_不在名册.mp4"], priors: [], kindFirst: true });
+    /* 弄脏成「露着」再走真的 onPriorChange：priors 为空 ⇒ 它必然把这一栏收回。
+     * 不先摆成露着，下面那条「收着」就分不清是真代码收的还是桩里本来就是。 */
+    el("rescoreBox").hidden = false; el("rescorePick").hidden = false;
+    await T.onPriorChange();
+    el("setupErr").textContent = "【桩】上一条测试留下的红字";
+    T.state.confirmOnce = "上一条测试留下的指纹";
+    el("setup").hidden = false; el("scoring").hidden = true;
+    dl.length = 0;
+
+    T.onStart(); await tick();
+    const box = el("setupErr").textContent;
+    if (!box.includes("多余视频（不在清单）")) {
+      throw new Error("名册外的视频没被那道关接住（可达性推导的前提就塌了）：" + box);
+    }
+    if (box.includes(ZERO_SIG)) {
+      throw new Error("priors 为空却触发了 0 场那道关——那它的红字会指一个不在屏幕上的控件："
+        + box);
+    }
+    eq(el("rescoreBox").hidden, true,
+       "priors 为空时「重评」那一栏必然收着：这条路上 0 场那道关要真打得着，红字就又在指一个看不见的控件：");
+    eq(el("scoring").hidden, true, "却开了评：");
+    eq(el("setup").hidden, false, "却把设置页收起来了：");
+    eq(dl.length, 0, "却落了文件：");
   });
 
   console.log(fails ? "\n" + fails + " 条不通过" : "\n全部通过");

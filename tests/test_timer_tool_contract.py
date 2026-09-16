@@ -447,8 +447,16 @@ def test_dp131_zero_selected_is_a_stop_not_a_confirmation() -> None:
        **0 命中**（含注释）；§1.2 那道「一个视频文件都没选」的关
        （`if (!vids.length) err.push("请选择视频文件");`）一个字不许动、也不许跟这道
        合并——那是另一道关，合并就等于把两种不同的现场说成一句话。
-       另钉「文案不许另起说法」：红字引号里那个按钮标签必须与界面上 `redoBtn` 的
-       真标签逐字相同（含省略号），按钮改名而文案没跟着改就是红。
+       另钉「文案不许另起说法」（**复核意见 2**）：红字引号里那两个标签必须与界面上
+       的真值逐字相同——`rescoreBox` 的 legend 以「重评」开头、`rescoreChk` 的 label
+       含「本次是重评（rescore）」，改任一侧就红；评分页那颗重做按钮（`redoBtn`）在这
+       道关的文案里 **0 命中**，它自己与 `openRedoPanel`／`redoSel` 一个字不许动（复核
+       意见 1 那版红字点名的就是它，而它 hidden 在 `<section id="scoring">` 里、这道关
+       拦住时压根没渲染，它开的下拉只列本次会话的 state.done，此刻是空的）。
+    ⑤ **可见性**（复核意见 2 第 2 条，抓的就是「红字指了一个看不见的控件」这类错）：
+       「重评」那一栏必须由 `state.chainDone` 驱动露出、清单必须由 `buildRescorePick`
+       按 `state.chainDone` 逐场生成——nHave == 0 蕴含 chainDone 非空，蕴含这一栏在
+       屏幕上。只钉标签不钉可见性，抓不到这类错（复核意见 1 那颗钉子正是这么漏的）。
 
     行为归 node（test_timer_assay.js 里 DP-131 那四条：0 场拦住、0 场 + 存档时关优先、
     nHave ≥ 1 不许被误伤、名册全评完仍直接补出最终文件）；这里钉契约文本。
@@ -456,8 +464,9 @@ def test_dp131_zero_selected_is_a_stop_not_a_confirmation() -> None:
     text = _html_text()
     body = _on_start_body()
     zero_copy = ("你选的视频对应的场次都已经评过了：本批没有要评的场次。"
-                 "请把还没评的那几场的视频选进来；要重做已评过的场次，"
-                 "请勾「重做已完成试次…」并在清单里勾选。")
+                 "请把还没评的那几场的视频选进来；"
+                 "确实要重做已评过的场次，就在上面「重评」那一栏勾「本次是重评（rescore）」，"
+                 "再在下面的清单里勾中要重做的场次。")
     assert re.search(
         r'if \(!nHave\) \{\s*\$\("setupErr"\)\.textContent = "%s";\s*'
         r'state\.confirmOnce = null; return;\s*\}' % re.escape(zero_copy), body), (
@@ -496,14 +505,61 @@ def test_dp131_zero_selected_is_a_stop_not_a_confirmation() -> None:
         "评过了」是两种现场，合并就等于把两种现场说成一句话"
         % text.count('if (!vids.length) err.push("请选择视频文件");'))
 
-    # 文案不许另起说法：红字引号里那个标签必须与界面上 redoBtn 的真标签逐字相同
-    btn = re.search(r'<button id="redoBtn"[^>]*>([^<]+)</button>', text)
-    assert btn, (
-        "界面上找不到 `redoBtn` 那个按钮了：红字里引的「重做已完成试次…」成了空指")
-    assert "「%s」" % btn.group(1) in zero_copy, (
-        "红字引的按钮标签与界面上的不一致（界面是 %r）：复核意见 1 要求照抄现有标签、"
-        "含省略号，不许另起说法；按钮改了名而文案没跟着改，评分员就照着一句假话"
-        "找不着那个勾" % btn.group(1))
+    # 复核意见 2 第 1 条：红字引号里那两个标签，必须与界面上的真值逐字相同（改任一侧就红）
+    legend = re.search(r'<fieldset id="rescoreBox"[^>]*>\s*<legend>(.*?)</legend>', text, re.S)
+    assert legend, (
+        "界面上找不到 rescoreBox 那个 legend 了：红字里引的「重评」成了空指")
+    legend_txt = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", "", legend.group(1))).strip()
+    chk = re.search(r'<input type="checkbox" id="rescoreChk">(.*?)</label>', text, re.S)
+    assert chk, (
+        "界面上找不到 rescoreChk 那个 label 了：红字里引的那个勾成了空指")
+    chk_txt = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", "", chk.group(1))).strip()
+    assert legend_txt.startswith("重评"), (
+        "rescoreBox 的 legend 不以「重评」开头了（界面是 %r）：红字点名的是这一栏，栏改了名"
+        "而文案没跟着改，评分员就照着一句假话找不着它" % legend_txt)
+    assert "本次是重评（rescore）" in chk_txt, (
+        "rescoreChk 的 label 里没有「本次是重评（rescore）」了（界面是 %r）：红字引的就是它，"
+        "label 改了字而文案没跟着改就是红" % chk_txt)
+    quoted = re.findall(r"「([^」]+)」", zero_copy)
+    assert quoted == ["重评", "本次是重评（rescore）"], (
+        "红字引号里引的应当恰好是界面上这两个标签（复核意见 2 逐字给的），实际 %r" % (quoted,))
+    assert legend_txt.startswith(quoted[0]) and quoted[1] in chk_txt, (
+        "红字引的标签与界面上的不一致（照它找不着那个勾）：legend=%r / label=%r"
+        % (legend_txt, chk_txt))
+
+    # 复核意见 2 第 3 条：评分页那颗重做按钮，这道关的文案里 0 命中；它自己一个字不许动
+    # 取「这道关那一段」（注释 + if 块）。`state.confirmOnce = null; return;` 全文有 7 处，
+    # 必须从注释锚点往后找第一个——不往后找的话这段会切成空串（首个 return 在锚点之前），
+    # 下面那条断言就成了空转的假绿，所以顺手钉住它不许切空。
+    i_dp131 = text.index("/* DP-131（裁决①")
+    gate_block = text[i_dp131:text.index("state.confirmOnce = null; return;", i_dp131)]
+    assert zero_copy in gate_block and len(gate_block) > 200, (
+        "取「这道关那一段」的锚点失效了（切出来 %d 字节）：那会让下面几条断言空转成假绿，"
+        "先修锚点再看结论" % len(gate_block))
+    assert "重做已完成试次" not in gate_block, (
+        "这道关（含它上面那段注释）又点名了评分页那颗重做按钮：那颗按钮 hidden 在 "
+        "`<section id=\"scoring\">` 里，这道关拦住时压根没渲染，它开的下拉只列**本次会话**的 "
+        "state.done（此刻是空的）——红字指了一个评分员当时看不见的控件，注释里的原句同样"
+        "会被下一次「顺手恢复」抄回去")
+    for pin in ('<button id="redoBtn" type="button">重做已完成试次…</button>',
+                '$("redoBtn").onclick = openRedoPanel;',
+                "function openRedoPanel() {",
+                '<select id="redoSel">'):
+        assert text.count(pin) == 1, (
+            "评分页那颗重做按钮相关的这一处被动了（本单不许动它，它是另一条路的入口）："
+            "%r 应当恰好一处，实际 %d 处" % (pin, text.count(pin)))
+
+    # 复核意见 2 第 2 条：可见性钉子的源码侧——「重评」那一栏由 chainDone 驱动露出，
+    # 且露出的同时按 chainDone 逐场重建清单（nHave == 0 ⇒ chainDone 非空 ⇒ 它在屏幕上）
+    assert re.search(r'if \(state\.chainDone\.length\) \{\s*'
+                     r'\$\("rescoreBox"\)\.hidden = false;\s*buildRescorePick\(\);\s*\}',
+                     text), (
+        "「重评」那一栏的可见性不再由 state.chainDone 驱动了：0 场那道关的红字点名了这一栏，"
+        "这一栏要是不必然在屏幕上，红字就又在指一个看不见的控件（复核意见 2 抓的就是这类错）")
+    assert re.search(r"function buildRescorePick\(\) \{[\s\S]{0,200}?"
+                     r"for \(const tid of state\.chainDone\)", text), (
+        "重评清单不再按 state.chainDone 逐场生成了：红字说的「再在下面的清单里勾中要重做的"
+        "场次」就没有对应的东西——那句话又成了假话")
 
     # beginSession 那句兜底还在——但它从此只是兜底，不再是 0 场时评分员读到的第一句话
     begin = _body_of("beginSession", "")
