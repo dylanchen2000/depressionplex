@@ -237,6 +237,10 @@ class TrialRow:
     wall_support_still: bool | None = None  # FST 收尾第一问；TST 不问 ⇒ None
     declared_empty: bool | None = None      # 清单声明的空杯（G10 对照用）
     tool_version: str = ""          # 导出工具版本（文件头），用于分层
+    # DP-082：这一行读数来自哪份导出。**故意不进重算表**（见 NON_CSV_FIELDS）——
+    # 重算表是已发表数字的出处，加一列就让 DP-012 的逐字节回归失效；它的用处是
+    # 冲突停机时能指名道姓说出「打架的是哪两份文件」。
+    source_file: str = ""
 
     def csv_fields(self) -> dict[str, str]:
         def fmt(v: Any) -> str:
@@ -247,7 +251,10 @@ class TrialRow:
             return str(v)
         d = asdict(self)
         d["warnings"] = ";".join(self.warnings)
-        return {k: fmt(v) for k, v in d.items()}
+        # 显式按 CSV_COLUMNS 取值：新加的字段要么进 CSV_COLUMNS、要么在
+        # NON_CSV_FIELDS 里表态，守卫会盯着（「忘了导出」和「决定不导出」
+        # 在代码里长得一模一样，只有守卫能把两者分开）。
+        return {k: fmt(d[k]) for k in CSV_COLUMNS}
 
 
 CSV_COLUMNS = (
@@ -260,6 +267,10 @@ CSV_COLUMNS = (
     "naive_inflation_s", "per_key_excess_wallclock_s",
     "reject_reason", "note", "scored_at", "tool_version", "warnings",
 )
+
+#: DP-082：TrialRow 上**故意不进重算表**的字段。加字段时必须在这里表态、或者
+#: 加进 CSV_COLUMNS，二者都不做就会被 test_trialrow_fields_are_all_declared 拦下。
+NON_CSV_FIELDS = frozenset({"source_file"})
 
 
 def split_trial_id(trial_id: str) -> tuple[str, int | None]:
@@ -306,7 +317,8 @@ def load_audit_json(path: Path | str, *, on_reject: str = "mark") -> tuple[dict,
     rows: list[TrialRow] = []
     for rec in doc.get("records", []):
         row = _row_from_record(rec, scorer=scorer, seed=seed, delivered=delivered,
-                               doc_assay=doc_assay, tool_version=tool_version)
+                               doc_assay=doc_assay, tool_version=tool_version,
+                               source_file=path.name)
         if row.status == STATUS_REJECTED and on_reject == "raise":
             raise TrialRejected(scorer, row.trial_id, row.reject_reason)
         rows.append(row)
@@ -321,7 +333,7 @@ def load_audit_json(path: Path | str, *, on_reject: str = "mark") -> tuple[dict,
 
 def _row_from_record(rec: dict, *, scorer: str, seed: Any,
                      delivered: Sequence[str], doc_assay: Any = None,
-                     tool_version: str = "") -> TrialRow:
+                     tool_version: str = "", source_file: str = "") -> TrialRow:
     trial_id = str(rec.get("trial_id", ""))
     video, chamber = split_trial_id(trial_id)
     assay, assay_src = resolve_assay(rec, trial_id, doc_assay)
@@ -356,7 +368,8 @@ def _row_from_record(rec: dict, *, scorer: str, seed: Any,
             naive_inflation_s=None, per_key_excess_wallclock_s=None,
             reject_reason=REJECT_UNSCORED_TRIPLE,
             note=str(rec.get("note", "")), scored_at=str(rec.get("scored_at", "")),
-            warnings=warns, window_source="", **passthrough,
+            warnings=warns, window_source="", source_file=source_file,
+            **passthrough,
         )
 
     # rule 1+2+4
@@ -402,7 +415,8 @@ def _row_from_record(rec: dict, *, scorer: str, seed: Any,
         per_key_excess_wallclock_s=_excess_wallclock(discarded, union, u.n_segments, rate),
         note=str(rec.get("note", "")), scored_at=str(rec.get("scored_at", "")),
         warnings=warns,
-        window_source=("record" if w_from_rec else "tst_default"), **passthrough,
+        window_source=("record" if w_from_rec else "tst_default"),
+        source_file=source_file, **passthrough,
     )
 
 
@@ -467,6 +481,7 @@ def load_salvaged_csv(path: Path | str, *, on_reject: str = "mark") -> list[Tria
                 window_source=("record" if _f(rec.get("window_s")) else "tst_default"),
                 wall_support_still=None, declared_empty=None,
                 tool_version=str(rec.get("tool_version", "") or ""),
+                source_file=path.name,
             )
             if _rule3_violation(discarded, n_seg, unscoreable):
                 row.status = STATUS_REJECTED
@@ -546,6 +561,233 @@ def crosscheck_summary_csv(
     return mismatches
 
 
+# ---------------------------------------------------------------- DP-082：入库归并
+
+#: DP-124 口径：入库唯一键。**presentation_order 不在键里** —— 它是会话内的呈现
+#: 序号，换一次会话就会撞（09-07 与 09-08 两批里都有 order=27）。拿它当身份，会
+#: 把两场不同的试次说成同一场、也会把同一场说成两场。
+KEY_FIELDS = ("scorer_id", "trial_id")
+
+#: 会话痕迹：同一份读数被工具跨会话重派一次，这些字段**必然**不同。判「两条是不
+#: 是同一份读数」时一律不看，否则永远判「不同」，于是永远停机。
+SESSION_TRACE_FIELDS = (
+    "source", "seed", "presentation_order", "scored_at", "tool_version",
+    "note", "warnings", "source_file",
+)
+
+#: 读数本身及其判定条件。这些字段里任何一个不同，两条读数就是**两次不同的评分**，
+#: 不许自动合并（DP-124：报错停机）。倍速在这里而不在会话痕迹里 —— 它是受控实验
+#: 参数，换速就换了测量条件（DP-046：一处倍速错配把 ICC 由 0.864 打到 0.344）。
+READING_FIELDS = (
+    "assay", "assay_source", "video", "chamber", "playback_rate",
+    "tail_climbing", "wall_support_still", "declared_empty", "unscoreable",
+    "status", "n_hold_segments", "holds_unsorted", "zero_length_segments",
+    "mobile_union_s", "window_s", "window_source", "immobility_s",
+    "mobile_seconds_DISCARDED", "naive_inflation_s",
+    "per_key_excess_wallclock_s", "reject_reason",
+)
+
+#: 重评声明文件名。放在数据目录下，**跟数据一起走**：一份读数为什么有两条，答案
+#: 必须跟数据同在一处，不许留在某个人的记忆或某条 commit message 里。
+RESCORE_DECL_NAME = "rescore_declarations.csv"
+DECL_COLUMNS = ("scorer_id", "trial_id", "primary_export", "repeat_export",
+                "attribution")
+
+
+class ConflictingReadings(ValueError):
+    """同一 `(scorer_id, trial_id)` 有多条读数且**读数不同** ⇒ 停机（DP-124）。
+
+    不许静默取后者、不许取平均、不许按 presentation_order 挑一条。哪一条算真值
+    是科学判断：可能是计时工具跨会话把评过的场次又派了一遍（事故），也可能是有意
+    的重评（数据）。两种的处置完全不同，而代码分不出来——所以停机，等人签字。
+    """
+
+
+@dataclass(frozen=True)
+class RescoreDeclaration:
+    """人签过字的一条重评声明：这一键的两条读数，哪条是首评、哪条是复评、为什么。"""
+    scorer_id: str
+    trial_id: str
+    primary_export: str
+    repeat_export: str
+    attribution: str
+
+
+def reading_key(row: TrialRow) -> tuple[str, str]:
+    return (row.scorer_id, row.trial_id)
+
+
+def _reading_signature(row: TrialRow) -> tuple:
+    return tuple(getattr(row, f) for f in READING_FIELDS)
+
+
+def _dump_order(row: TrialRow) -> tuple:
+    """展示/取首评的排序：先按落盘时间，再按文件名。两者都没有才退到 order。
+
+    首评 = 最早落盘的那条。理由不是"早的更准"，而是**晚的那条已经被素材污染**
+    ——评分员第二次看到同一段视频时，记得上一次按了多久。
+    """
+    return (str(row.scored_at or ""), str(row.source_file or ""),
+            row.presentation_order or 0)
+
+
+def _reading_lines(rows: Sequence[TrialRow]) -> list[str]:
+    return [
+        f"  - {r.source_file or '(未知来源)'}: mobile_union_s={r.mobile_union_s}"
+        f" 丢弃列 mobile_seconds={r.mobile_seconds_DISCARDED}"
+        f" status={r.status} 段数={r.n_hold_segments}"
+        f" 倍速={r.playback_rate} presentation_order={r.presentation_order}"
+        f" seed={r.seed} scored_at={r.scored_at}"
+        for r in sorted(rows, key=_dump_order)
+    ]
+
+
+def _conflict_message(key: tuple[str, str], rows: Sequence[TrialRow],
+                      why: str) -> str:
+    lines = [f"入库冲突（DP-124 口径：报错停机）：{key[0]} / {key[1]} 有 "
+             f"{len(rows)} 条读数，{why}"]
+    lines += _reading_lines(rows)
+    lines.append("  不许静默取后者、不许取平均、不许按 presentation_order 挑一条"
+                 "——哪一条是首评属于科学判断，代码不猜。")
+    lines.append(f"  出路：在数据目录下的 {RESCORE_DECL_NAME} 里为这一键写明首评与"
+                 f"复评（列：{','.join(DECL_COLUMNS)}）；复评会另存进重评表，"
+                 f"不进真值表、不参与评分员间一致性。")
+    return "\n".join(lines)
+
+
+def load_rescore_declarations(
+        path: Path | str) -> dict[tuple[str, str], RescoreDeclaration]:
+    """读重评声明。文件不存在 ⇒ 空字典（于是有冲突就停机）。
+
+    任何格式问题都**报错停机**，不降级成警告：一份读不懂的声明比没有声明更坏
+    ——它会让人以为"已经声明过了"。允许 `#` 开头的注释行，声明文件要自己带口径。
+    """
+    path = Path(path)
+    if not path.exists():
+        return {}
+    text = path.read_text(encoding="utf-8")
+    body = [ln for ln in text.splitlines()
+            if ln.strip() and not ln.lstrip().startswith("#")]
+    if not body:
+        raise ValueError(f"{path.name} 只有注释没有内容 ⇒ 拒绝当成"
+                         f"「已声明」（要么删掉文件，要么写清楚）")
+    rdr = csv.DictReader(body)
+    if tuple(rdr.fieldnames or ()) != DECL_COLUMNS:
+        raise ValueError(f"{path.name} 表头必须是 {','.join(DECL_COLUMNS)}，"
+                         f"实际是 {rdr.fieldnames}")
+    out: dict[tuple[str, str], RescoreDeclaration] = {}
+    for i, rec in enumerate(rdr, start=1):
+        vals = {c: str(rec.get(c) or "").strip() for c in DECL_COLUMNS}
+        missing = [c for c in DECL_COLUMNS if not vals[c]]
+        if missing:
+            raise ValueError(f"{path.name} 第 {i} 条声明缺 {missing}"
+                             f"（归因为空等于没归因）")
+        if vals["primary_export"] == vals["repeat_export"]:
+            raise ValueError(f"{path.name} 第 {i} 条声明首评与复评是同一份导出 "
+                             f"{vals['primary_export']} ⇒ 这不是重评")
+        key = (vals["scorer_id"], vals["trial_id"])
+        if key in out:
+            raise ValueError(f"{path.name} 对 {key[0]}/{key[1]} 声明了两次 ⇒ "
+                             f"拒绝挑一条")
+        out[key] = RescoreDeclaration(**vals)
+    return out
+
+
+def check_declarations_against_rows(
+        decls: dict[tuple[str, str], RescoreDeclaration],
+        rows: Sequence[TrialRow]) -> None:
+    """声明必须对得上数据，对不上就停机。
+
+    一份没人核对过的声明比没有声明更坏：它把「谁是首评」这件事写成了既成事实，
+    而没有任何东西检查它说的那两份导出真的存在、真的装着这一键的两条读数。
+    """
+    groups: dict[tuple[str, str], list[TrialRow]] = {}
+    for r in rows:
+        groups.setdefault(reading_key(r), []).append(r)
+    for key, d in sorted(decls.items()):
+        g = groups.get(key)
+        if not g:
+            raise ValueError(f"{RESCORE_DECL_NAME} 声明了 {key[0]}/{key[1]} 的重评，"
+                             f"但数据里根本没有这一键 ⇒ 声明过期或写错了")
+        if len(g) < 2:
+            raise ValueError(f"{RESCORE_DECL_NAME} 声明了 {key[0]}/{key[1]} 的重评，"
+                             f"但数据里这一键只有 1 条读数 ⇒ 声明与数据不符")
+        have = {r.source_file for r in g}
+        want = {d.primary_export, d.repeat_export}
+        if not want <= have:
+            raise ValueError(
+                f"{RESCORE_DECL_NAME} 对 {key[0]}/{key[1]} 声明的导出是 "
+                f"{sorted(want)}，数据里这一键来自 {sorted(have)} ⇒ 对不上")
+
+
+def _split_by_declaration(rows: Sequence[TrialRow], d: RescoreDeclaration
+                          ) -> tuple[TrialRow, TrialRow]:
+    by_file = {r.source_file: r for r in rows}
+    primary, repeat = by_file.get(d.primary_export), by_file.get(d.repeat_export)
+    if primary is None or repeat is None:
+        raise ValueError(
+            f"{RESCORE_DECL_NAME} 对 {d.scorer_id}/{d.trial_id} 声明的导出 "
+            f"{d.primary_export} / {d.repeat_export} 在数据里找不到"
+            f"（这一键来自 {sorted(by_file)}）")
+    return primary, repeat
+
+
+def dedupe_readings(rows: Sequence[TrialRow],
+                    decls: dict[tuple[str, str], RescoreDeclaration] | None = None,
+                    ) -> tuple[list[TrialRow], list[TrialRow], list[str]]:
+    """按 `(scorer_id, trial_id)` 归并成真值表，返回 `(真值, 复评, 台账)`。
+
+    四种形状，处置各不相同（DP-124）：
+
+    | 形状 | 处置 |
+    |---|---|
+    | 一个键一条读数 | 它就是真值 |
+    | 多条、读数完全相同 | 取一条入库，记一条「同源副本」，原始导出一份都不删 |
+    | 两条、读数不同、**有声明** | 首评进真值表，复评另存 |
+    | 两条、读数不同、**没声明** | `ConflictingReadings` 停机 |
+    | 一个键三条以上、读数不同 | 停机（没定过口径的形状不许放过） |
+
+    归并**必须在统计之前**跑。在它之前，`n_trials` 数的是读数而不是试次——
+    incoming/ 上就多算了 28 场，每一个下游数字都跟着虚高。
+    """
+    decls = decls or {}
+    groups: dict[tuple[str, str], list[TrialRow]] = {}
+    for r in rows:
+        groups.setdefault(reading_key(r), []).append(r)
+
+    truth: list[TrialRow] = []
+    repeats: list[TrialRow] = []
+    notes: list[str] = []
+    for key, g in groups.items():
+        if len(g) == 1:
+            truth.append(g[0])
+            continue
+        if len({_reading_signature(r) for r in g}) == 1:
+            keep = sorted(g, key=_dump_order)[0]
+            truth.append(keep)
+            notes.append(
+                f"同源副本: {key[0]}/{key[1]} 在 "
+                f"{sorted(r.source_file or '?' for r in g)} 里各有一条，读数完全"
+                f"相同（presentation_order {[r.presentation_order for r in g]}"
+                f" 不同，不参与判身份）⇒ 取最早落盘的 1 条入库，原始导出都不动")
+            continue
+        if len(g) > 2:
+            raise ConflictingReadings(_conflict_message(
+                key, g, "读数不同，且**三条以上**——这个形状没定过口径"))
+        d = decls.get(key)
+        if d is None:
+            raise ConflictingReadings(_conflict_message(
+                key, g, f"读数不同，且 {RESCORE_DECL_NAME} 里没有这一键的声明"))
+        primary, repeat = _split_by_declaration(g, d)
+        truth.append(primary)
+        repeats.append(repeat)
+        notes.append(
+            f"已声明重评: {key[0]}/{key[1]} 首评 {d.primary_export} "
+            f"(union {primary.mobile_union_s}) 进真值表，复评 {d.repeat_export} "
+            f"(union {repeat.mobile_union_s}) 另存；归因「{d.attribution}」")
+    return truth, repeats, notes
+
+
 # ---------------------------------------------------------------- 装配 + 报告
 
 
@@ -570,6 +812,13 @@ class TableResult:
     # DP-081：同一（评分员, 范式）在不同批次导出里出现了不同 seed。
     # 这是**正常的**（重评批次本来就该换种子），只记账不报错。
     seed_rebatches: list[str] = field(default_factory=list)
+    # DP-082：被声明为重评的读数。**不进真值表**——同一个人的两次读数进了表，
+    # 评分员间一致性就会把他自己和自己算一遍。但绝不丢：它们是免费的组内重测
+    # 一致性样本（28 对，其中 12 对是徐乐彤的）。
+    repeat_rows: list[TrialRow] = field(default_factory=list)
+    n_repeats: int = 0
+    #: 归并台账：每一次「取了一条、放下一条」都要留下一行说明。
+    duplicate_notes: list[str] = field(default_factory=list)
 
     def by_scorer(self) -> dict[str, dict[str, Any]]:
         out: dict[str, dict[str, Any]] = {}
@@ -634,7 +883,18 @@ def build_table(data_dir: Path | str) -> TableResult:
             if r.seed is not None:
                 _record_seed(result, r.scorer_id, r.assay, int(r.seed), p.name)
 
+    # DP-082：先按 (scorer_id, trial_id) 归并，再排序、再统计。顺序不能换——
+    # 归并放在统计之后，n_trials 数的就是读数而不是试次。
+    decls = load_rescore_declarations(data_dir / RESCORE_DECL_NAME)
+    check_declarations_against_rows(decls, result.rows)
+    truth, repeats, notes = dedupe_readings(result.rows, decls)
+    result.rows = truth
+    result.repeat_rows = repeats
+    result.n_repeats = len(repeats)
+    result.duplicate_notes = notes
+
     result.rows.sort(key=lambda r: (r.scorer_id, r.presentation_order or 0, r.trial_id))
+    result.repeat_rows.sort(key=lambda r: (r.scorer_id, r.presentation_order or 0, r.trial_id))
 
     for r in result.rows:
         result.n_trials += 1
@@ -710,7 +970,11 @@ def format_report(res: TableResult) -> str:
         f"配套 CSV 交叉核对: {res.crosscheck_mismatches or '全部一致'}",
         f"seed 分组: { {s: g for s, g in res.seed_groups.items()} }",
         f"seed 换批次记账: {res.seed_rebatches or '无'}",
+        f"重复键归并（DP-082，键=(scorer_id, trial_id)）: 真值 {res.n_trials} 条"
+        f" / 已声明重评另存 {res.n_repeats} 条",
     ]
+    for n in res.duplicate_notes:
+        lines.append(f"  · {n}")
     if res.per_key_estimates:
         import statistics
         m = statistics.mean(res.per_key_estimates)
