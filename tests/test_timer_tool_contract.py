@@ -17,6 +17,10 @@
   警告；被推翻的旧文案（含本单首版自己写的那句「从链条恢复」）逐字禁止回潮；
 - 裁决 3：逐条 `first_scored_in` + 顶层 `first_scored_unresolved` 两个键名，
   以及「条数不等 ⇒ 拒绝导出」这道自检必须在第一个 download 之前。
+- DP-131 裁决①：本次选到 0 场视频是一道「不许开始」（逐字文案 + 关在源码里的
+  位置 + 那句假出路的字面全文件禁留，含注释）；裁决②：§1.2 三道关与 §1.4 派题
+  口径的**源码级**钉子——那道钉子只证明关还在源码里，不证明行为，行为归 node
+  （为什么源码级也要钉：看守链太长，理由见该测试自己的 docstring）。
 - 裁决 2：入库侧一行未改（口径归 DP-130），所以
   test_ingest_truth_still_reads_holds_not_holds_counted 现在**应当是绿的**；
   它哪天变红，说明有人动了入库侧口径，那要有裁决、且要连这条测试一起改。
@@ -416,6 +420,138 @@ def test_ruling_d_one_confirmation_box_lists_both_notes() -> None:
         "的成因（实测 HEAD 上要点到第 5 次）")
 
 
+# ------------------------------------------------- DP-131（裁决①／裁决②）
+
+
+def test_dp131_zero_selected_is_a_stop_not_a_confirmation() -> None:
+    """DP-131 裁决①：本次选到 **0 场**视频 ⇒ 一道「不许开始」，不是「再点一次就评 0 场」。
+
+    原来 0 场照样弹确认框，把「本批要评几场」写成 0 还劝人再点一次；评分员点第二次
+    才被 beginSession 用**另一句**话（「本次所选视频都已评过或不在剩余清单里」）拦住。
+    那不是措辞问题，是缺一道关：先读一段假出路，再被告知走不通。现在 0 场就是不许
+    开始，文案按裁决逐字钉死。N ≥ 1 的现有文案是真话，一个字不许动。
+
+    三件事一起钉，少一件这道关就是假的：
+    ① 条件 `if (!nHave)` 必须与那句文案、`state.confirmOnce = null`、`return;` 绑在
+       一起——换成 `if (false)`、或只写红字不 return（降级成提醒），都等于放行；
+    ② 这道关必须在 `if (missing.length)` 那一支里、且在 `notes.push("① 本批没排满：")`
+       **之前**——挪到后面就等于先把假出路说完再拦；
+    ③ 那句假出路的字面（「本批只评这 0 场」）在整个文件里一处都不许留，含注释：
+       注释里的原句会被下一次「顺手恢复」抄回去（与 test_old_false_promise_copy_is_gone
+       同一条纪律）；活着的「本批只评这 …场」只能有一处，就是 N ≥ 1 那条路。
+
+    行为归 node（test_timer_assay.js 里 DP-131 那四条：0 场拦住、0 场 + 存档时关优先、
+    nHave ≥ 1 不许被误伤、名册全评完仍直接补出最终文件）；这里钉契约文本。
+    """
+    text = _html_text()
+    body = _on_start_body()
+    assert re.search(
+        r'if \(!nHave\) \{\s*\$\("setupErr"\)\.textContent = '
+        r'"本次没有选到任何视频，选好视频再开始";\s*'
+        r'state\.confirmOnce = null; return;\s*\}', body), (
+        "DP-131 裁决①那道关不在了：`if (!nHave)` 必须与逐字文案「本次没有选到任何视频，"
+        "选好视频再开始」、清空确认指纹、`return;` 绑在一起（放行/降级成提醒都要红）。"
+        "实际 onStart 里 missing 那一支：%r"
+        % body[body.index("if (missing.length) {"):body.index("if (missing.length) {") + 700])
+    assert text.count("本次没有选到任何视频，选好视频再开始") == 1, (
+        "那道关的文案应当逐字出现一次，实际 %d 次" % text.count("本次没有选到任何视频，选好视频再开始"))
+
+    i_missing = body.index("if (missing.length) {")
+    i_gate = body.index("if (!nHave) {")
+    i_note = body.index('notes.push("① 本批没排满：')
+    assert i_missing < i_gate < i_note, (
+        "那道关的位置不对（missing 支起点 %d、关 %d、①那条 %d）：必须在 "
+        "`if (missing.length)` 里面、且在说出「本批没排满」之前——顺序反了就等于"
+        "先给假出路再拦" % (i_missing, i_gate, i_note))
+
+    assert "本批只评这 0 场" not in text, (
+        "那句假出路又出现了（含注释也算）：裁决①明说「本批只评这 0 场」随之消失——"
+        "0 场不许开始，就没有「再点一次就评 0 场」这回事")
+    assert body.count('本批只评这 " + nHave + " 场') == 1, (
+        "N ≥ 1 的现有文案是真话，一个字不许动：「本批只评这 …场」在 onStart 里"
+        "应当恰好一处，实际 %d 处" % body.count('本批只评这 " + nHave + " 场'))
+    assert text.count("本批只评这") == 1, (
+        "全文件「本批只评这」应当只剩 N ≥ 1 那一处（0 场那处已随裁决①消失），"
+        "实际 %d 处" % text.count("本批只评这"))
+
+    # beginSession 那句兜底还在——但它从此只是兜底，不再是 0 场时评分员读到的第一句话
+    begin = _body_of("beginSession", "")
+    assert "本次所选视频都已评过或不在剩余清单里" in begin, (
+        "beginSession 的兜底被删了：0 场那道关是**加**一道，不是把兜底换掉")
+
+
+def test_dp131_source_level_pins_for_session_shape_gates() -> None:
+    """DP-131 裁决②：§1.2 三道关 + §1.4 派题口径，在契约侧补源码级钉子。
+
+    **这道钉子只证明那道关还在源码里，不证明行为；行为归 node**
+    （tools/timer/test_timer_assay.js，套件里由 tests/test_timer_tool.py 一条代跑）。
+
+    为什么源码级也要钉：看守链太长。node 那 89 条全靠 test_timer_tool 这一条代理
+    测试代跑——代理不可用时（node 不在 PATH、CI 换镜像、超时被当成跳过），那两道关
+    就没人看了，而它们正是「谎报第一次」与「不勾重评却把已评场次重新派一遍」的
+    **唯一防线**。DP-128 交付前自查的变异 M25／M26 实测过这件事：把 §1.2 的矛盾关
+    与入口条件放行，契约侧 **0 红**，只有 node 红。这条钉子就是把那一环补上。
+    """
+    body = _on_start_body()
+
+    # ---- §1.2：会话形态三道关，全部经 err → 唯一通道，不许各自写红字、不许降级 ----
+    assert body.count("if (!priors.length) {") == 2, (
+        "§1.2 的入口条件 `if (!priors.length)`（另一处是种子那一支）应当恰好两处，"
+        "实际 %d 处——M26 那种换成 if (false) 的放行会改变这个数"
+        % body.count("if (!priors.length) {"))
+    i_entry = body.index("if (!priors.length) {")
+    i_channel = body.index("if (err.length)")
+    assert i_entry < i_channel, (
+        "§1.2 的入口条件不在 err 通道之前了（入口 %d、通道 %d）：三道关成了死分支"
+        % (i_entry, i_channel))
+    region = body[i_entry:i_channel]
+    for cond, frag in (
+        (r'if \(\$\("kindLost"\)\.checked\) \{',
+         "你声明了「不是第一次、但找不到之前导出的文件」——不许开始。"),
+        (r'else if \(!\$\("kindFirst"\)\.checked\) \{',
+         "续评必须选文件，不选就不许开始"),
+        (r'else if \(\$\("kindFirst"\)\.checked \|\| \$\("kindLost"\)\.checked\) \{',
+         "既选了「已评进度」文件、又勾了首次会话声明——两者矛盾"),
+    ):
+        m = re.search(cond, region)
+        assert m, (
+            "§1.2 的条件 %r 不在源码里了（M25／M26 那种放行就是把它换成 if (false)）："
+            "这道关是「谎报第一次」的唯一防线，源码里没有就等于没人看守" % cond)
+        tail = region[m.end():m.end() + 500]
+        assert "err.push(" in tail, (
+            "§1.2 的 %r 这一支不再往 err 里推——不推进通道就等于不拦" % cond)
+        assert frag in tail, (
+            "§1.2 的 %r 这一支的文案缺了 %r：文案是产品行为的一部分，"
+            "「不为空」不算验收，「说的是真话」才算" % (cond, frag))
+    assert body.count("if (err.length)") == 1, (
+        "§1.2 只能有**一条**通道（err 汇总后一次说出），实际 %d 条"
+        % body.count("if (err.length)"))
+    assert re.search(r'if \(err\.length\) \{ \$\("setupErr"\)\.textContent = '
+                     r'err\.join\("\\n"\); return; \}', body), (
+        "§1.2 的唯一通道被改了：err 非空 ⇒ 红字（err.join）+ return，"
+        "少掉 return 就是把「不许开始」降级成「提醒一句照样开始」")
+
+    # ---- §1.4：重评只派指定场次；非重评只派「选到视频又没评过」的场次 ----
+    for frag in ("勾了「重评」却没指定任何场次",
+                 "指定重评的场次不在链条的已评清单里",
+                 "指定重评的场次本次没选到视频"):
+        i = body.index(frag)
+        assert "return;" in body[i:i + 400], (
+            "§1.4 的 %r 后面没有 return——停机被降级成提醒（报错停机是产品行为，"
+            "绝不放宽）" % frag)
+    queue = _body_of("rebuildQueue", "")
+    assert "state.queue = state.fullOrder.filter(m => m.file && !doneTids.has(m.trial_id));" in queue, (
+        "§1.4／裁决 1 的派题口径被改了：非重评会话只派「选到视频又没评过」的场次。"
+        "去掉 !doneTids.has(m.trial_id) 就是把评过的场次重新派一遍——那正是 DP-077 "
+        "缺陷②实测两位评分员各被重发 4 场的成因。实际 rebuildQueue：%r" % queue)
+    assert "state.queue = state.fullOrder.filter(m => m.file && pick.has(m.trial_id));" in queue, (
+        "重评会话只派被指定场次这一支被改了（v1.7-④）：%r" % queue)
+    assert "const doneTids = doneTidSet();" in queue, (
+        "「已评」必须取 doneTidSet()（本次会话 ∪ 链条并集），"
+        "只数本次会话就会把之前评过的重新派一遍：%r" % queue)
+    assert queue.index("pick.has(m.trial_id)") < queue.index("!doneTids.has(m.trial_id)"), (
+        "两支的归属变了：`state.rescore` 那一支（pick）必须在前，"
+        "否则重评会话会走非重评的口径、把没勾的场次也派出去")
 # ---------------------------------------------------------------- §4(5)：入库侧吃得下新形状
 
 

@@ -615,6 +615,16 @@ function onStart() {
     const notes = [];
     if (missing.length) {
       const nHave = full.filter(m => !prior.done.has(m.trial_id) && m.file).length;
+      /* DP-131（裁决①）：本次选到 **0 场**视频 ⇒ 不许开始，不是「再点一次就评 0 场」。
+       * 原来这里照样弹确认框，把「本批要评几场」写成 0 还劝人「再点一次」，
+       * 评分员点第二次才被 beginSession 用**另一句**话拦住——先读一段假出路，
+       * 再被告知走不通。这不是措辞问题，是缺一道关：0 场就是不许开始。
+       * 只在「还有场次没安排」时拦（missing 非空）。名册全都评过、missing 为空时
+       * 照旧走 beginSession 那条「全部已评完 ⇒ 直接补出最终文件」，不受这道关影响。 */
+      if (!nHave) {
+        $("setupErr").textContent = "本次没有选到任何视频，选好视频再开始";
+        state.confirmOnce = null; return;
+      }
       notes.push("① 本批没排满：清单共 " + full.length + " 场，之前已评 " + priorDone.length
         + " 场，本次选到 " + nHave + " 场视频，还有 " + missing.length + " 场没安排。\n"
         + "再点一次「开始评分」= 本批只评这 " + nHave + " 场（剩下 " + missing.length

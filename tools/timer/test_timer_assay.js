@@ -6,7 +6,10 @@
  *    （§1.1，按裁决 1 改判：多 seed 不停机）、首次会话显式声明（§1.2）、
  *    cumulative_done + 导出前自检（§1.3）、重评只派指定场次（§1.4）+ 逐条
  *    first_scored_in / 顶层 first_scored_unresolved + 导出前自检（裁决 3）、
- *    DP-086 按键膨胀的结构性修复与重看记账（§2 B/C）。
+ *    DP-086 按键膨胀的结构性修复与重看记账（§2 B/C）；
+ * ⑤ DP-131 裁决①：本次选到 0 场视频是一道「不许开始」——0 场拦住（含存档在场时
+ *    关优先于确认框、存档一个字节不抹）、nHave ≥ 1 不许被误伤、名册全评完仍照旧
+ *    直接补出最终文件。契约侧另有源码级钉子（tests/test_timer_tool_contract.py）。
  * 用最小 DOM 桩把单文件工具的 <script> 原样跑起来，不复制一行被测逻辑。
  * 跑法（由 tests/test_timer_tool.py 代跑，也可手动）：
  *   node tools/timer/test_timer_assay.js <timer.html> <FST清单.csv>
@@ -1158,6 +1161,137 @@ async function main() {
        "指纹要跟着「存着几场」变，不跟着洗牌顺序变：");
     eq(el("setup").hidden, false, "情况变了还照样开评：");
     if (localStorage.getItem("dpst:v2:R1") === null) throw new Error("情况变了就把存档抹了：");
+  });
+
+  /* ---- DP-131 裁决①：N == 0 时不许开始 ----
+   * 这道关打得着的形态只有一种：本次**选了**视频文件，但选到的每一场都已经在链条的
+   * 已评清单里 ⇒ nHave == 0 而 missing 非空。「一个视频文件都没选」轮不到它——§1.2
+   * 那句「请选择视频文件」先拦住了；「名册全都评过」也不归它——那时 missing 为空，
+   * 照旧走 beginSession 的「直接补出最终文件」（最后一条测试钉的就是这条不许被误伤）。
+   * 每条测试都先弄脏这道关自己会写的两个字段（setupErr、confirmOnce），否则
+   * 「关清了指纹」与「本来就没有指纹」、「关写了红字」与「桩里残留的红字」分不开。 */
+  console.log("DP-131 裁决①（N == 0 不许开始：0 场是一道「不许开始」，不是「再点一次就评 0 场」）：");
+  await okA("选到的视频全是已评过的场次 ⇒ 逐字红字拦住，不弹确认框、第二次点还是这一句", async () => {
+    setupStart({ videos: ["a.mp4"], priors: [auditFile("p.json", auditDoc({
+      records: [{ trial_id: "a-ch1" }] }))] });       // a 评过又选了它的视频 ⇒ nHave = 0，b/c 没安排
+    /* 先弄脏：指纹写非空（setupStart 已把 setupErr 写成「【桩】上一条测试留下的红字」） */
+    T.state.confirmOnce = "上一条测试留下的指纹";
+    /* 现场摆成评分员真实看到的样子，这几条验的是「这道关没顺手改别的」 */
+    el("setup").hidden = false; el("scoring").hidden = true; el("finish").hidden = true;
+    dl.length = 0;
+
+    T.onStart(); await tick();
+    eq(el("setupErr").textContent, "本次没有选到任何视频，选好视频再开始", "0 场那一道关的文案（逐字）：");
+    eq(T.state.confirmOnce, null, "0 场那次点击留下了确认指纹——那等于「再点一次就放行」：");
+    eq(el("setup").hidden, false, "0 场却把设置页收起来了：");
+    eq(el("scoring").hidden, true, "0 场却进了评分页：");
+    eq(el("finish").hidden, true, "0 场却跳到收工页：");
+    eq(dl.length, 0, "0 场却落了文件：");
+    eq(T.state.priorDone, [], "还没开评就把链条状态写进会话了：");
+    /* 那句假出路必须消失：原来这里照样弹确认框，写着「本批只评这 0 场」 */
+    for (const s of ["① 本批没排满", "本批只评这 0 场", "再点一次「开始评分」"]) {
+      if (el("setupErr").textContent.includes(s)) {
+        throw new Error("0 场时还挂着假出路「" + s + "」：" + el("setupErr").textContent);
+      }
+    }
+    /* 第二次点仍是**这一句** ⇒ 拦住的是这道关，不是 beginSession 那句兜底
+     * （「本次所选视频都已评过或不在剩余清单里」——那是原来点第二次才读到的另一句话） */
+    T.onStart(); await tick();
+    eq(el("setupErr").textContent, "本次没有选到任何视频，选好视频再开始",
+       "第二次点没被这道关拦住（或换成了 beginSession 那句兜底）：");
+    eq(el("scoring").hidden, true, "第二次点就开评了：");
+    eq(el("setup").hidden, false, "第二次点把设置页收起来了：");
+    eq(dl.length, 0, "第二次点落了文件：");
+  });
+
+  await okA("0 场且本机有存档 ⇒ 这道关优先于确认框：不列②、不露「继续上次」、存档一个字节都不抹", async () => {
+    setupStart({ videos: ["a.mp4"], priors: [auditFile("p.json", auditDoc({
+      records: [{ trial_id: "a-ch1" }] }))] });
+    /* 弄脏：真写一份存档进去——「没被抹」与「本来就没有」必须分得开（DP-077 缺陷②） */
+    localStorage.setItem("dpst:v2:R1", JSON.stringify({
+      seed: 7, order: ["a-ch1", "b-ch1", "c-ch1"], assay: "TST",
+      done: [mkDone("a-ch1", 1)], ts: 1 }));
+    T.state.confirmOnce = "上一条测试留下的指纹";
+    el("resumeBox").hidden = true;      // 真实现场：「继续上次」收着；②那条会把它露出来
+    el("setup").hidden = false; el("scoring").hidden = true;
+
+    T.onStart(); await tick();
+    eq(el("setupErr").textContent, "本次没有选到任何视频，选好视频再开始",
+       "有存档时这道关的文案也得是这一句（关优先于确认框）：");
+    if (el("setupErr").textContent.includes("② 本机有存档")) {
+      throw new Error("0 场时还把存档那条列出来了——关让位给了确认框："
+        + el("setupErr").textContent);
+    }
+    eq(el("resumeBox").hidden, true, "0 场却把「继续上次未完成的评分」露出来了：");
+    eq(T.state.confirmOnce, null, "0 场那次点击留下了确认指纹：");
+    if (localStorage.getItem("dpst:v2:R1") === null) {
+      throw new Error("0 场那次点击就把存档抹了——这正是 DP-077 缺陷②");
+    }
+    eq(el("setup").hidden, false, "0 场却开了评：");
+
+    T.onStart(); await tick();
+    eq(el("setupErr").textContent, "本次没有选到任何视频，选好视频再开始", "第二次点没拦住：");
+    if (localStorage.getItem("dpst:v2:R1") === null) throw new Error("第二次点把存档抹了：");
+  });
+
+  await okA("关不许过宽：nHave ≥ 1 且还有场次没排满 ⇒ 照旧弹确认框，N ≥ 1 的文案一个字都没动", async () => {
+    setupStart({ videos: ["a.mp4"], priors: [auditFile("p.json", auditDoc({
+      records: [{ trial_id: "b-ch1" }] }))] });       // a 选到视频又没评过 ⇒ nHave = 1；c 没安排
+    T.state.confirmOnce = "上一条测试留下的指纹";
+    el("setup").hidden = false; el("scoring").hidden = true;
+    dl.length = 0;
+
+    T.onStart(); await tick();
+    const box = el("setupErr").textContent;
+    if (!box.includes("① 本批没排满")) {
+      throw new Error("nHave = 1 时确认框没了（新关过宽，把能评的批次也拦了）：" + box);
+    }
+    for (const s of ["清单共 3 场", "之前已评 1 场", "本次选到 1 场视频", "还有 1 场没安排",
+                     "再点一次「开始评分」= 本批只评这 1 场", "c-ch1"]) {
+      if (!box.includes(s)) throw new Error("N ≥ 1 的文案缺了「" + s + "」：" + box);
+    }
+    if (box.includes("本次没有选到任何视频")) {
+      throw new Error("nHave = 1 也被 0 场那道关拦了：" + box);
+    }
+    eq(T.state.confirmOnce, "a-ch1|b-ch1|c-ch1#b-ch1#c-ch1#0",
+       "确认指纹（没存档 ⇒ 末段是 0），且与洗牌顺序无关：");
+    eq(el("setup").hidden, false, "第一次点就开评了：");
+    eq(dl.length, 0, "第一次点就落文件了：");
+
+    T.onStart(); await tick();                       // 第二次点 = 确认
+    eq(el("setupErr").textContent, "", "确认后还挂着红字：");
+    eq(el("setup").hidden, true, "第二次点没开评：");
+    eq(el("scoring").hidden, false, "第二次点没进评分页：");
+    eq(T.state.queue.map(m => m.trial_id), ["a-ch1"], "本批只派选到视频又没评过的那一场：");
+    eq(T.state.priorDone, ["b-ch1"], "确认后链条的已评清单才进会话状态：");
+    eq(T.state.confirmOnce, null, "确认后指纹没清掉：");
+  });
+
+  await okA("关不许误伤：名册全都评过（missing 空、nHave 0）⇒ 照旧直接补出最终文件", async () => {
+    setupStart({ videos: ["a.mp4"], priors: [auditFile("p.json", auditDoc({
+      records: [{ trial_id: "a-ch1" }, { trial_id: "b-ch1" }, { trial_id: "c-ch1" }],
+      done_count: 3 }))] });                          // 三场全评过 ⇒ missing 为空，不进那道关
+    T.state.confirmOnce = "上一条测试留下的指纹";
+    el("setup").hidden = false; el("scoring").hidden = true;
+    el("finish").hidden = true;                       // 弄脏：收工页先摆成收着
+    el("finishMsg").textContent = "【桩】上一条测试留下的收工话";
+    dl.length = 0;
+
+    T.onStart(); await tick();
+    if (el("setupErr").textContent.includes("本次没有选到任何视频")) {
+      throw new Error("名册全评完那条路被 0 场那道关拦了——评分员再也补不出最终文件："
+        + el("setupErr").textContent);
+    }
+    eq(el("setup").hidden, true, "全部已评完 ⇒ 本该直接收工，设置页却还露着：");
+    eq(el("finish").hidden, false, "没走 finishSession（最终文件补不出来）：");
+    eq(dl.length, 2, "补出的最终文件该是 CSV + 审计两份：");
+    if (!dl.every(n => n.includes("_final_"))) {
+      throw new Error("落盘的不是最终文件：" + dl.join(" | "));
+    }
+    if (!el("finishMsg").textContent.includes("全部 3/3 个试次已评分")) {
+      throw new Error("收工那句话不对（还是桩里的残留）：" + el("finishMsg").textContent);
+    }
+    eq(T.state.confirmOnce, null, "这条路上指纹该清空：");
   });
 
   console.log(fails ? "\n" + fails + " 条不通过" : "\n全部通过");
