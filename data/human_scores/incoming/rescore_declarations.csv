@@ -1,0 +1,60 @@
+# DP-082 重评声明（起草于 data/human_scores/incoming，由 scripts/dp082_draft_rescore_declarations.py 生成，人工 review 后 commit）
+# 口径：同一 (scorer_id, trial_id) 有两条读数且读数不同 ⇒ 必须在此声明，否则入库停机（DP-124）。
+# 首评 = 先落盘的那一条（复评时评分员已记得上一次按了多久，晚的那条被素材污染），进真值表；复评另存，只用于同一评分员的组内重测一致性。
+# 读数完全相同的重复不在此列（入库自动取一条并记「同源副本」）：1 个键。
+scorer_id,trial_id,primary_export,repeat_export,attribution
+# 张咸明/FST-20mg 2周-ch1: union 212.93 → 200.91（差 12.02 s） order 3→27 seed 446237714→942674390
+张咸明,FST-20mg 2周-ch1,timer_audit_FST_张咸明_2026-09-07_partial12of28.json,timer_audit_FST_张咸明_2026-09-08_partial8of28_023111Z.json,工具跨会话重派（新seed下又派到已评场次；非有意重评）
+# 张咸明/FST-20mg 2周-ch2: union 379.32 → 347.58（差 31.74 s） order 24→23 seed 446237714→942674390
+张咸明,FST-20mg 2周-ch2,timer_audit_FST_张咸明_2026-09-07_partial12of28.json,timer_audit_FST_张咸明_2026-09-08_partial8of28_023111Z.json,工具跨会话重派（新seed下又派到已评场次；非有意重评）
+# 张咸明/FST-20mg 2周-ch3: union 328.8 → 316.18（差 12.62 s） order 2→28 seed 446237714→942674390
+张咸明,FST-20mg 2周-ch3,timer_audit_FST_张咸明_2026-09-07_partial12of28.json,timer_audit_FST_张咸明_2026-09-08_partial8of28_023111Z.json,工具跨会话重派（新seed下又派到已评场次；非有意重评）
+# 张咸明/FST-20mg 2周-ch4: union 357.89 → 319.95（差 37.94 s） order 5→7 seed 446237714→942674390
+张咸明,FST-20mg 2周-ch4,timer_audit_FST_张咸明_2026-09-07_partial12of28.json,timer_audit_FST_张咸明_2026-09-08_partial8of28_023111Z.json,工具跨会话重派（新seed下又派到已评场次；非有意重评）
+# 徐乐彤/FST-10mg 2周-ch1: union 311.68 → 271.51（差 40.17 s） order 17→8 seed 446237714→99133242
+徐乐彤,FST-10mg 2周-ch1,timer_audit_FST_徐乐彤_2026-09-07_partial12of28.json,timer_audit_FST_徐乐彤_2026-09-09_partial5of28_060639Z.json,工具跨会话重派（新seed下又派到已评场次；非有意重评）
+# 徐乐彤/FST-10mg 2周-ch2: union 285.78 → 230.51（差 55.27 s） order 21→4 seed 446237714→99133242
+徐乐彤,FST-10mg 2周-ch2,timer_audit_FST_徐乐彤_2026-09-07_partial12of28.json,timer_audit_FST_徐乐彤_2026-09-09_partial5of28_060639Z.json,工具跨会话重派（新seed下又派到已评场次；非有意重评）
+# 徐乐彤/FST-10mg 2周-ch3: union 377.38 → 375.23（差 2.15 s） order 12→1 seed 446237714→99133242
+徐乐彤,FST-10mg 2周-ch3,timer_audit_FST_徐乐彤_2026-09-07_partial12of28.json,timer_audit_FST_徐乐彤_2026-09-09_partial5of28_060639Z.json,工具跨会话重派（新seed下又派到已评场次；非有意重评）
+# 徐乐彤/FST-10mg 2周-ch4: union 288.43 → 254.26（差 34.17 s） order 28→9 seed 446237714→300537564
+徐乐彤,FST-10mg 2周-ch4,timer_audit_FST_徐乐彤_2026-09-07_partial12of28.json,timer_audit_FST_徐乐彤_2026-09-09_partial5of28_085128Z.json,工具跨会话重派（新seed下又派到已评场次；非有意重评）
+# 徐乐彤/FST-20mg 2周-ch1: union 215.99 → 181.6（差 34.39 s） order 3→27 seed 446237714→942674390
+徐乐彤,FST-20mg 2周-ch1,timer_audit_FST_徐乐彤_2026-09-07_partial12of28.json,timer_audit_FST_徐乐彤_2026-09-08_partial8of28_023656Z.json,工具跨会话重派（新seed下又派到已评场次；非有意重评）
+# 徐乐彤/FST-20mg 2周-ch2: union 379.09 → 375.43（差 3.66 s） order 24→23 seed 446237714→942674390
+徐乐彤,FST-20mg 2周-ch2,timer_audit_FST_徐乐彤_2026-09-07_partial12of28.json,timer_audit_FST_徐乐彤_2026-09-08_partial8of28_023656Z.json,工具跨会话重派（新seed下又派到已评场次；非有意重评）
+# 徐乐彤/FST-20mg 2周-ch3: union 353.55 → 338.76（差 14.79 s） order 2→28 seed 446237714→942674390
+徐乐彤,FST-20mg 2周-ch3,timer_audit_FST_徐乐彤_2026-09-07_partial12of28.json,timer_audit_FST_徐乐彤_2026-09-08_partial8of28_023656Z.json,工具跨会话重派（新seed下又派到已评场次；非有意重评）
+# 徐乐彤/FST-20mg 2周-ch4: union 360.11 → 354.6（差 5.51 s） order 5→7 seed 446237714→942674390
+徐乐彤,FST-20mg 2周-ch4,timer_audit_FST_徐乐彤_2026-09-07_partial12of28.json,timer_audit_FST_徐乐彤_2026-09-08_partial8of28_023656Z.json,工具跨会话重派（新seed下又派到已评场次；非有意重评）
+# 徐乐彤/FST-20mg1周-ch1: union 345.54 → 309.78（差 35.76 s） order 27→5 seed 446237714→327286741
+徐乐彤,FST-20mg1周-ch1,timer_audit_FST_徐乐彤_2026-09-07_partial12of28.json,timer_audit_FST_徐乐彤_2026-09-09_partial5of28_072636Z.json,工具跨会话重派（新seed下又派到已评场次；非有意重评）
+# 徐乐彤/FST-20mg1周-ch2: union 380.66 → 379.8（差 0.86 s） order 1→6 seed 446237714→327286741
+徐乐彤,FST-20mg1周-ch2,timer_audit_FST_徐乐彤_2026-09-07_partial12of28.json,timer_audit_FST_徐乐彤_2026-09-09_partial5of28_072636Z.json,工具跨会话重派（新seed下又派到已评场次；非有意重评）
+# 徐乐彤/FST-20mg1周-ch3: union 375.59 → 361.16（差 14.43 s） order 22→8 seed 446237714→327286741
+徐乐彤,FST-20mg1周-ch3,timer_audit_FST_徐乐彤_2026-09-07_partial12of28.json,timer_audit_FST_徐乐彤_2026-09-09_partial5of28_072636Z.json,工具跨会话重派（新seed下又派到已评场次；非有意重评）
+# 徐乐彤/FST-20mg1周-ch4: union 323.31 → 316.99（差 6.32 s） order 25→3 seed 446237714→99133242
+徐乐彤,FST-20mg1周-ch4,timer_audit_FST_徐乐彤_2026-09-07_partial12of28.json,timer_audit_FST_徐乐彤_2026-09-09_partial5of28_060639Z.json,工具跨会话重派（新seed下又派到已评场次；非有意重评）
+# 陈璇/FST-抑郁4-7-ch1: union 359.17 → 341.45（差 17.72 s） order 10→22 seed 486806161→95495125
+陈璇,FST-抑郁4-7-ch1,timer_audit_FST_陈璇_2026-09-07_partial16of28.json,timer_audit_FST_陈璇_2026-09-10_partial8of28_034532Z.json,工具跨会话重派（新seed下又派到已评场次；非有意重评）
+# 陈璇/FST-抑郁4-7-ch2: union 360.97 → 354.32（差 6.65 s） order 20→20 seed 486806161→95495125
+陈璇,FST-抑郁4-7-ch2,timer_audit_FST_陈璇_2026-09-07_partial16of28.json,timer_audit_FST_陈璇_2026-09-10_partial8of28_034532Z.json,工具跨会话重派（新seed下又派到已评场次；非有意重评）
+# 陈璇/FST-抑郁4-7-ch3: union 321.22 → 247.66（差 73.56 s） order 3→10 seed 486806161→95495125
+陈璇,FST-抑郁4-7-ch3,timer_audit_FST_陈璇_2026-09-07_partial16of28.json,timer_audit_FST_陈璇_2026-09-10_partial8of28_034532Z.json,工具跨会话重派（新seed下又派到已评场次；非有意重评）
+# 陈璇/FST-抑郁4-7-ch4: union 276.22 → 223.61（差 52.61 s） order 13→28 seed 486806161→95495125
+陈璇,FST-抑郁4-7-ch4,timer_audit_FST_陈璇_2026-09-07_partial16of28.json,timer_audit_FST_陈璇_2026-09-10_partial8of28_034532Z.json,工具跨会话重派（新seed下又派到已评场次；非有意重评）
+# 陈璇/FST-抑郁8-10-ch1: union 223.7 → 347.55（差 123.85 s） order 7→26 seed 486806161→716412651
+陈璇,FST-抑郁8-10-ch1,timer_audit_FST_陈璇_2026-09-07_partial16of28.json,timer_audit_FST_陈璇_2026-09-08_partial8of28_030748Z.json,工具跨会话重派（新seed下又派到已评场次；非有意重评）
+# 陈璇/FST-抑郁8-10-ch2: union 330.73 → 262.35（差 68.38 s） order 8→2 seed 486806161→716412651
+陈璇,FST-抑郁8-10-ch2,timer_audit_FST_陈璇_2026-09-07_partial16of28.json,timer_audit_FST_陈璇_2026-09-08_partial8of28_030748Z.json,工具跨会话重派（新seed下又派到已评场次；非有意重评）
+# 陈璇/FST-抑郁8-10-ch3: union 315.17 → 198.48（差 116.69 s） order 2→6 seed 486806161→716412651
+陈璇,FST-抑郁8-10-ch3,timer_audit_FST_陈璇_2026-09-07_partial16of28.json,timer_audit_FST_陈璇_2026-09-08_partial8of28_030748Z.json,工具跨会话重派（新seed下又派到已评场次；非有意重评）
+# 陈璇/FST-正常1-4-ch1: union 391.38 → 351.1（差 40.28 s） order 5→14 seed 486806161→95495125
+陈璇,FST-正常1-4-ch1,timer_audit_FST_陈璇_2026-09-07_partial16of28.json,timer_audit_FST_陈璇_2026-09-10_partial8of28_034532Z.json,工具跨会话重派（新seed下又派到已评场次；非有意重评）
+# 陈璇/FST-正常1-4-ch2: union 336.45 → 285.43（差 51.02 s） order 6→12 seed 486806161→95495125
+陈璇,FST-正常1-4-ch2,timer_audit_FST_陈璇_2026-09-07_partial16of28.json,timer_audit_FST_陈璇_2026-09-10_partial8of28_034532Z.json,工具跨会话重派（新seed下又派到已评场次；非有意重评）
+# 陈璇/FST-正常1-4-ch3: union 226.39 → 178.97（差 47.42 s） order 14→26 seed 486806161→95495125
+陈璇,FST-正常1-4-ch3,timer_audit_FST_陈璇_2026-09-07_partial16of28.json,timer_audit_FST_陈璇_2026-09-10_partial8of28_034532Z.json,工具跨会话重派（新seed下又派到已评场次；非有意重评）
+# 陈璇/FST-正常1-4-ch4: union 376.04 → 356.82（差 19.22 s） order 25→7 seed 486806161→95495125
+陈璇,FST-正常1-4-ch4,timer_audit_FST_陈璇_2026-09-07_partial16of28.json,timer_audit_FST_陈璇_2026-09-10_partial8of28_034532Z.json,工具跨会话重派（新seed下又派到已评场次；非有意重评）
+# 共 27 条声明；同源副本 1 个键；需人工先定口径 0 个键。

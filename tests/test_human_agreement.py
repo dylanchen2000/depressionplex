@@ -8,22 +8,34 @@
 
 from __future__ import annotations
 
+import collections
+import dataclasses
 import importlib
 import json
 import random
+import shutil
 import tempfile
 from pathlib import Path
 
 from depressionplex.human_agreement import (
+    DECL_COLUMNS,
+    KEY_FIELDS,
+    NON_CSV_FIELDS,
+    READING_FIELDS,
     REJECT_UNSCORED_TRIPLE,
+    RESCORE_DECL_NAME,
+    SESSION_TRACE_FIELDS,
     STATUS_ACCEPTED,
     STATUS_REJECTED,
     TST_WINDOW_S,
+    ConflictingReadings,
     TrialRejected,
+    TrialRow,
     CSV_COLUMNS,
     build_table,
     crosscheck_summary_csv,
     load_audit_json,
+    load_rescore_declarations,
     load_salvaged_csv,
     table_csv_text,
     union_holds,
@@ -31,6 +43,7 @@ from depressionplex.human_agreement import (
 
 REPO = Path(__file__).resolve().parents[1]
 RAW = REPO / "data" / "human_scores" / "raw"
+INCOMING = REPO / "data" / "human_scores" / "incoming"
 COMMITTED_TABLE = REPO / "data" / "human_scores" / "recomputed" / "human_scores_recomputed_DP-012.csv"
 
 
@@ -543,3 +556,314 @@ def test_same_scorer_same_assay_new_seed_is_logged_as_rebatch() -> None:
         assert "111222333" in msg and "444555666" in msg
         assert msg == ("测试员/FST: 111222333 → 444555666 "
                        "(timer_audit_测试员_fst_b2.json)")
+
+
+# ------------------------------------------- DP-082：入库归并（DP-124 定的口径）
+
+
+def _rec(trial_id="v-ch1", *, union_end=10.0, order=1, at="2026-09-07",
+         rate=0.5, unscoreable=False):
+    """一条读数。union 由 holds 决定（mobile_seconds 一律丢弃，规则 1）。"""
+    r = _mk_record(trial_id=trial_id, mobile=union_end + 0.3,
+                   holds=[] if unscoreable else [[0.0, union_end]],
+                   unscoreable=unscoreable)
+    r["presentation_order"] = order
+    r["scored_at"] = at
+    r["playback_rate"] = rate
+    return r
+
+
+def _two_exports(tmp: Path, rec_a, rec_b, *, seed_b=2):
+    """把两条读数写成两份**不同会话**的导出（同一评分员）。"""
+    a = _write_doc(tmp, [rec_a], "timer_audit_测试员_a.json")
+    b = _write_doc(tmp, [rec_b], "timer_audit_测试员_b.json", seed=seed_b)
+    return a, b
+
+
+def _write_decl(tmp: Path, rows, *, header=DECL_COLUMNS,
+                comment="# 测试用声明\n") -> Path:
+    p = tmp / RESCORE_DECL_NAME
+    body = [comment.rstrip("\n"), ",".join(header)]
+    body += [",".join(r) for r in rows]
+    p.write_text("\n".join(body) + "\n", encoding="utf-8")
+    return p
+
+
+def test_conflicting_readings_halt_and_name_both_files() -> None:
+    """DP-124：同一 (scorer, trial) 两条读数不同 ⇒ **报错停机**。
+
+    不许静默取后者、不许取平均。报错必须把两份导出和两个读数都摆出来，并说出
+    出路——一条只说"冲突"的报错，等于把排查成本转给下一个人。
+    """
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        _two_exports(tmp, _rec(union_end=10.0), _rec(union_end=12.5, at="2026-09-08"))
+        try:
+            build_table(tmp)
+        except ConflictingReadings as e:
+            msg = str(e)
+        else:
+            raise AssertionError("同一键两条不同读数必须停机，不许静默入库两条")
+        assert "v-ch1" in msg
+        assert "timer_audit_测试员_a.json" in msg and "timer_audit_测试员_b.json" in msg, msg
+        assert "10.0" in msg and "12.5" in msg, f"两个读数都要摆出来：{msg}"
+        assert RESCORE_DECL_NAME in msg, f"报错必须说出路在哪：{msg}"
+
+
+def test_identical_duplicate_collapses_and_ignores_session_traces() -> None:
+    """读数完全相同 ⇒ 取一条入库 + 记「同源副本」，**不停机**。
+
+    两条的 presentation_order 与 warnings 都不同（27 与 delivered_order 不符会
+    带 presentation_order_mismatch），照样判为同一份读数：会话痕迹不参与判身份
+    （DP-124：order 是会话内序号，跨会话必撞）。
+    """
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        _two_exports(tmp, _rec(order=1, at="2026-09-07"),
+                     _rec(order=27, at="2026-09-08"))
+        res = build_table(tmp)
+        assert res.n_trials == 1, f"同源副本必须归并成 1 条，实际 {res.n_trials}"
+        assert res.n_repeats == 0
+        assert len(res.duplicate_notes) == 1 and "同源副本" in res.duplicate_notes[0]
+        keep = res.rows[0]
+        assert keep.scored_at == "2026-09-07", "同源副本取最早落盘那条"
+        assert keep.source_file == "timer_audit_测试员_a.json"
+
+
+def test_same_presentation_order_different_trials_stay_two_rows() -> None:
+    """两份导出里 order 都是 27、但是两场不同的试次 ⇒ 老老实实两条。
+
+    这是真数据里的形状（09-07 与 09-08 两批都有 order=27）。把 order 放进键会
+    把这两场合成一场——那是丢真值，比多算更坏。
+    """
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        _two_exports(tmp, _rec("v-ch1", order=27, union_end=10.0),
+                     _rec("v-ch2", order=27, union_end=12.5, at="2026-09-08"))
+        res = build_table(tmp)
+        assert res.n_trials == 2, f"两场不同试次不许合并，实际 {res.n_trials}"
+        assert res.duplicate_notes == []
+        assert {r.trial_id for r in res.rows} == {"v-ch1", "v-ch2"}
+
+
+def test_playback_rate_change_is_not_a_same_source_copy() -> None:
+    """读数秒数一样但倍速不同 ⇒ 仍然是冲突，不许当同源副本收下。
+
+    倍速是受控实验参数（DP-046：一处错配把 ICC 由 0.864 打到 0.344）。同一段
+    视频在 0.5x 与 1.0x 下按出同样的秒数，是两次不同条件的测量凑巧相等，不是
+    同一份读数。
+
+    这里是**双保险**：倍速本身算读数字段，而 per_key_excess_wallclock_s（每按键
+    墙钟超额）本身又按倍速缩放。所以只把 playback_rate 挪进会话痕迹**不会**让这
+    条测试变红——做变异时发现的，写在这里，不假装它是单点守卫。
+    """
+    assert "playback_rate" in READING_FIELDS
+    assert "playback_rate" not in SESSION_TRACE_FIELDS
+    assert "per_key_excess_wallclock_s" in READING_FIELDS
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        _two_exports(tmp, _rec(rate=0.5), _rec(rate=1.0, at="2026-09-08"))
+        try:
+            build_table(tmp)
+        except ConflictingReadings as e:
+            assert "倍速=0.5" in str(e) and "倍速=1.0" in str(e), str(e)
+        else:
+            raise AssertionError("换了倍速必须停机")
+
+
+def test_declared_rescore_splits_primary_and_repeat() -> None:
+    """有声明 ⇒ 首评进真值表，复评另存（不进真值表、不参与评分员间一致性）。"""
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        _two_exports(tmp, _rec(union_end=10.0), _rec(union_end=12.5, at="2026-09-08"))
+        _write_decl(tmp, [("测试员", "v-ch1", "timer_audit_测试员_a.json",
+                           "timer_audit_测试员_b.json", "工具跨会话重派")])
+        res = build_table(tmp)
+        assert res.n_trials == 1 and res.n_repeats == 1
+        assert res.rows[0].mobile_union_s == 10.0, "真值必须是声明里指名的首评"
+        assert res.rows[0].source_file == "timer_audit_测试员_a.json"
+        assert res.repeat_rows[0].mobile_union_s == 12.5
+        assert any("已声明重评" in n and "工具跨会话重派" in n
+                   for n in res.duplicate_notes), res.duplicate_notes
+        # 复评绝不能悄悄丢：它是免费的组内重测样本
+        assert res.repeat_rows[0].trial_id == "v-ch1"
+
+
+def test_declaration_must_match_the_data() -> None:
+    """声明对不上数据 ⇒ 停机。一份没人核对过的声明比没有声明更坏。"""
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        _two_exports(tmp, _rec(union_end=10.0), _rec(union_end=12.5, at="2026-09-08"))
+        # a) 声明了数据里不存在的键
+        _write_decl(tmp, [("测试员", "根本没有这场-ch1", "timer_audit_测试员_a.json",
+                           "timer_audit_测试员_b.json", "x")])
+        try:
+            build_table(tmp)
+        except ValueError as e:
+            assert "根本没有这一键" in str(e), str(e)
+        else:
+            raise AssertionError("声明了不存在的键必须停机")
+        # b) 声明的导出名不是这一键的那两份
+        _write_decl(tmp, [("测试员", "v-ch1", "timer_audit_测试员_a.json",
+                           "timer_audit_测试员_不存在.json", "x")])
+        try:
+            build_table(tmp)
+        except ValueError as e:
+            assert "对不上" in str(e), str(e)
+        else:
+            raise AssertionError("声明的导出名对不上必须停机")
+
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        # c) 这一键只有一条读数，却给它声明了重评
+        _write_doc(tmp, [_rec(union_end=10.0)], "timer_audit_测试员_a.json")
+        _write_decl(tmp, [("测试员", "v-ch1", "timer_audit_测试员_a.json",
+                           "timer_audit_测试员_b.json", "x")])
+        try:
+            build_table(tmp)
+        except ValueError as e:
+            assert "只有 1 条读数" in str(e), str(e)
+        else:
+            raise AssertionError("声明与数据不符必须停机")
+
+
+def test_declaration_file_format_problems_all_halt() -> None:
+    """声明文件任何格式问题都停机，不降级成警告。"""
+    good = ("测试员", "v-ch1", "a.json", "b.json", "工具跨会话重派")
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        # 文件不存在 ⇒ 空字典（于是有冲突照样停机，这条不算"格式问题"）
+        assert load_rescore_declarations(tmp / RESCORE_DECL_NAME) == {}
+        p = _write_decl(tmp, [good])
+        assert list(load_rescore_declarations(p)) == [("测试员", "v-ch1")]
+
+        for rows, header, why in [
+            ([good], ("scorer_id", "trial_id", "primary", "repeat", "attribution"), "表头"),
+            ([("测试员", "v-ch1", "a.json", "b.json", "")], DECL_COLUMNS, "归因为空"),
+            ([("测试员", "v-ch1", "a.json", "a.json", "x")], DECL_COLUMNS, "首评复评同一份"),
+            ([good, good], DECL_COLUMNS, "同一键声明两次"),
+        ]:
+            p = _write_decl(tmp, rows, header=header)
+            try:
+                load_rescore_declarations(p)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError(f"{why} 必须停机")
+        # 只有注释、连表头都没有 ⇒ 同样停机
+        (tmp / RESCORE_DECL_NAME).write_text("# 什么都没写\n", encoding="utf-8")
+        try:
+            load_rescore_declarations(tmp / RESCORE_DECL_NAME)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("只有注释的声明文件必须停机")
+
+
+def test_three_readings_on_one_key_always_halt() -> None:
+    """一个键三条读数 ⇒ 停机，**即便有声明**。没定过口径的形状不许放过。"""
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        _write_doc(tmp, [_rec(union_end=10.0, at="2026-09-07")], "timer_audit_测试员_a.json")
+        _write_doc(tmp, [_rec(union_end=12.5, at="2026-09-08")], "timer_audit_测试员_b.json", seed=2)
+        _write_doc(tmp, [_rec(union_end=14.0, at="2026-09-09")], "timer_audit_测试员_c.json", seed=3)
+        _write_decl(tmp, [("测试员", "v-ch1", "timer_audit_测试员_a.json",
+                           "timer_audit_测试员_b.json", "工具跨会话重派")])
+        try:
+            build_table(tmp)
+        except ConflictingReadings as e:
+            assert "三条以上" in str(e), str(e)
+        else:
+            raise AssertionError("三条读数必须停机")
+
+
+def test_trialrow_fields_are_all_classified() -> None:
+    """TrialRow 每个字段都必须表过态：进不进 CSV、算键/会话痕迹/读数。
+
+    新加字段时「忘了分类」和「决定不分类」在代码里长得一模一样。没有这条守卫，
+    一个新字段会默默地既不进重算表、又不参与判身份——于是两条不同的读数被当成
+    同一份收下，静默丢真值。
+    """
+    names = {f.name for f in dataclasses.fields(TrialRow)}
+    assert names == set(CSV_COLUMNS) | set(NON_CSV_FIELDS), (
+        f"字段与 CSV_COLUMNS/NON_CSV_FIELDS 不闭合：{names ^ (set(CSV_COLUMNS) | set(NON_CSV_FIELDS))}")
+    buckets = [set(KEY_FIELDS), set(SESSION_TRACE_FIELDS), set(READING_FIELDS)]
+    assert set().union(*buckets) == names, (
+        f"未分类字段：{names - set().union(*buckets)}")
+    assert sum(len(b) for b in buckets) == len(names), "同一字段不许落进两类"
+
+
+def test_source_file_never_reaches_the_recomputed_table() -> None:
+    """来源文件名进得了内存、进不了重算表。
+
+    重算表是已发表数字的出处（DP-012），加一列就让逐字节回归失去意义。
+    """
+    res = build_table(INCOMING)
+    assert all(r.source_file for r in res.rows), "每条真值都要知道自己来自哪份导出"
+    head = table_csv_text(res.rows).splitlines()[0]
+    assert head == ",".join(CSV_COLUMNS)
+    assert "source_file" not in head
+
+
+def test_real_incoming_ingests_88_truth_rows_with_declarations() -> None:
+    """真数据（`data/human_scores/incoming/`）：116 条读数 → 88 条真值 + 27 条复评。
+
+    归并之前 `build_table` 把 116 条读数当 116 场试次数（28 个键各有两条），
+    每个下游 FST 数字都跟着虚高。数字全部由本机跑出来，不是估的。
+    """
+    res = build_table(INCOMING)
+    assert res.n_trials == 88, f"真值应为 88 条，实际 {res.n_trials}"
+    assert res.n_repeats == 27, f"已声明复评应为 27 条，实际 {res.n_repeats}"
+    assert len(res.duplicate_notes) == 28, "27 条声明重评 + 1 个同源副本"
+    assert sum("同源副本" in n for n in res.duplicate_notes) == 1
+    keys = collections.Counter((r.scorer_id, r.trial_id) for r in res.rows)
+    assert not [k for k, n in keys.items() if n > 1], "真值表里不许再有重复键"
+    per = collections.Counter((r.scorer_id, r.assay) for r in res.rows)
+    assert dict(per) == {
+        ("张咸明", "FST"): 16, ("张咸明", "TST"): 12,
+        ("徐乐彤", "FST"): 28, ("徐乐彤", "TST"): 12,
+        ("陈璇", "FST"): 20,
+    }, dict(per)
+    tst = [r for r in res.rows if r.assay == "TST"]
+    assert len({(r.scorer_id, r.trial_id) for r in tst}) == len(tst) == 24, (
+        "TST 本来就没有重复键（DP-124 记的 24 条），归并不许动它")
+
+
+def test_incoming_halts_when_the_declarations_are_taken_away() -> None:
+    """把声明文件拿掉，真数据必须停机——守卫在真数据上是活的，不只在夹具上。"""
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        for p in INCOMING.iterdir():
+            if p.is_file() and p.name != RESCORE_DECL_NAME:
+                shutil.copy2(p, tmp / p.name)
+        try:
+            build_table(tmp)
+        except ConflictingReadings as e:
+            assert "读数不同" in str(e)
+        else:
+            raise AssertionError("撤掉声明后必须停机")
+
+
+def test_cli_writes_truth_and_repeats_to_separate_tables() -> None:
+    """CLI 真跑一次 incoming/：真值表 88 行、复评表 27 行，互不混。
+
+    走 `python -m`（桌面端与冻结 exe 唯一的调用方式），不 import main 后改 argv。
+    """
+    import subprocess
+    import sys as _sys
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        out, rep = tmp / "truth.csv", tmp / "repeats.csv"
+        r = subprocess.run(
+            [_sys.executable, "-m", "depressionplex.cli.recompute_human_scores",
+             "-d", str(INCOMING), "-o", str(out), "--repeats-output", str(rep)],
+            cwd=REPO, capture_output=True, text=True, encoding="utf-8")
+        assert out.exists() and rep.exists(), r.stdout + r.stderr
+        truth = out.read_text(encoding="utf-8").splitlines()
+        repeats = rep.read_text(encoding="utf-8").splitlines()
+        assert len(truth) - 1 == 88, f"真值表应 88 行，实际 {len(truth) - 1}"
+        assert len(repeats) - 1 == 27, f"复评表应 27 行，实际 {len(repeats) - 1}"
+        assert truth[0] == repeats[0] == ",".join(CSV_COLUMNS)
+        # 复评不许出现在真值表里：同一键在两张表里各一条，但读数不同
+        assert set(truth[1:]).isdisjoint(set(repeats[1:]))
+        assert "重复键归并（DP-082" in r.stdout
