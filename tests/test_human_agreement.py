@@ -474,6 +474,165 @@ def test_crosscheck_refuses_empty_path_list() -> None:
             assert "假装" in str(e)
 
 
+# ---------------------------------------------------------------- DP-127：逐份导出对账
+
+
+def test_crosscheck_pairs_csv_to_one_export_not_scorer_dict() -> None:
+    """两份导出、两条不同读数、CSV 只对应其中一份 ⇒ 不报不一致。
+
+    这是 incoming/ 上那 38 条假警报的最小复现：全评分员字典让后者覆盖前者，
+    CSV 对到了错误那一份的读数。
+    """
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        a = _mk_record(trial_id="v-ch1", mobile=10.0)
+        a["presentation_order"] = 1
+        b = _mk_record(trial_id="v-ch1", mobile=99.0)
+        b["presentation_order"] = 27  # 不同会话的 order，配对必须把它们分开
+        _, rows_a = load_audit_json(
+            _write_doc(tmp, [a], name="timer_audit_测试员_2026-09-07.json"))
+        _, rows_b = load_audit_json(
+            _write_doc(tmp, [b], name="timer_audit_测试员_2026-09-08.json"))
+        csv_p = _write_summary_csv(
+            tmp, "human_scores_测试员_2026-09-07_partial1of1.csv",
+            [("v-ch1", "10.0", 1)])
+        out = crosscheck_summary_csv(rows_a + rows_b, [csv_p])
+        assert out == [], out
+
+
+def test_crosscheck_none_none_is_consistent_one_side_names_the_gap() -> None:
+    """两边 mobile 都空 ⇒ 一致；只有一边空 ⇒ 报，且报文说得出缺哪边。"""
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        both = _mk_record(trial_id="v-ch1", mobile=None, holds=[])
+        both["mobile_seconds"] = None
+        both["unscoreable"] = True  # 避免 rule 3 三联；mobile 仍是 None
+        _, rows = load_audit_json(_write_doc(tmp, [both]))
+        assert rows[0].mobile_seconds_DISCARDED is None
+
+        def _csv(name: str, mob: str) -> Path:
+            # unscoreable 必须与 JSON 一致，否则干扰本条要测的 mobile 口径
+            text = ("scorer_id,trial_id,mobile_seconds,tail_climbing,unscoreable,"
+                    "note,scored_at,presentation_order\n"
+                    f"测试员,v-ch1,{mob},false,true,,2026-09-07,1\n")
+            p = tmp / name
+            p.write_text(text, encoding="utf-8")
+            return p
+
+        assert crosscheck_summary_csv(rows, [_csv("ok.csv", "")]) == [], \
+            "None/None 不许报不一致"
+
+        out_csv = crosscheck_summary_csv(rows, [_csv("csv_has.csv", "10.0")])
+        assert len(out_csv) == 1, out_csv
+        assert "JSON 缺" in out_csv[0] and "CSV=" in out_csv[0], out_csv[0]
+
+        only_json_rec = _mk_record(trial_id="v-ch2", mobile=12.0)
+        only_json_rec["presentation_order"] = 2
+        _, rows2 = load_audit_json(
+            _write_doc(tmp, [only_json_rec], name="timer_audit_测试员_y.json"))
+        text2 = ("scorer_id,trial_id,mobile_seconds,tail_climbing,unscoreable,"
+                 "note,scored_at,presentation_order\n"
+                 "测试员,v-ch2,,false,false,,2026-09-07,2\n")
+        empty_csv = tmp / "json_has.csv"
+        empty_csv.write_text(text2, encoding="utf-8")
+        out_json = crosscheck_summary_csv(rows2, [empty_csv])
+        assert len(out_json) == 1, out_json
+        assert "CSV 缺" in out_json[0] and "JSON=" in out_json[0], out_json[0]
+
+
+def test_crosscheck_order_is_pairing_key_not_a_mismatch() -> None:
+    """同一 trial_id 在两份导出里 order 不同 ⇒ 配对分开，不产生 order 不一致。"""
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        a = _mk_record(trial_id="v-ch1", mobile=10.0)
+        a["presentation_order"] = 27
+        b = _mk_record(trial_id="v-ch1", mobile=10.0)
+        b["presentation_order"] = 4
+        _, rows_a = load_audit_json(
+            _write_doc(tmp, [a], name="timer_audit_测试员_2026-09-07.json"))
+        _, rows_b = load_audit_json(
+            _write_doc(tmp, [b], name="timer_audit_测试员_2026-09-08.json"))
+        csv_p = _write_summary_csv(
+            tmp, "human_scores_测试员_2026-09-08_partial1of1.csv",
+            [("v-ch1", "10.0", 4)])
+        out = crosscheck_summary_csv(rows_a + rows_b, [csv_p])
+        assert out == [], out
+        assert all("presentation_order" not in m for m in out)
+
+
+def test_crosscheck_reports_unpaired_csv_with_closest_diffs() -> None:
+    """一份 CSV 配不上任何导出 ⇒ 报「配不上」+ 最接近那份的差异。"""
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        a = _mk_record(trial_id="v-ch1", mobile=10.0)
+        a["presentation_order"] = 1
+        _, rows = load_audit_json(
+            _write_doc(tmp, [a], name="timer_audit_测试员_2026-09-07.json"))
+        csv_p = _write_summary_csv(
+            tmp, "human_scores_测试员_2026-09-07_partial1of1.csv",
+            [("v-ch9", "10.0", 1)])  # 完全不同的 trial
+        out = crosscheck_summary_csv(rows, [csv_p])
+        assert any("配不上任何一份导出" in m for m in out), out
+        assert any("最接近 timer_audit_测试员_2026-09-07.json" in m for m in out), out
+        assert any("CSV 有 JSON 无 → v-ch9" in m for m in out), out
+
+
+def test_crosscheck_refuses_to_pick_when_pairing_is_ambiguous() -> None:
+    """一份 CSV 同时配上两份内容一致的导出 ⇒ 报「配对不唯一」，不许挑一份。"""
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        rec = _mk_record(trial_id="v-ch1", mobile=10.0)
+        rec["presentation_order"] = 1
+        _, rows_a = load_audit_json(
+            _write_doc(tmp, [rec], name="timer_audit_测试员_2026-09-07_a.json"))
+        _, rows_b = load_audit_json(
+            _write_doc(tmp, [rec], name="timer_audit_测试员_2026-09-07_b.json"))
+        csv_p = _write_summary_csv(
+            tmp, "human_scores_测试员_2026-09-07_partial1of1.csv",
+            [("v-ch1", "10.0", 1)])
+        out = crosscheck_summary_csv(rows_a + rows_b, [csv_p])
+        assert len(out) == 1, out
+        assert "配对不唯一" in out[0], out[0]
+        assert "timer_audit_测试员_2026-09-07_a.json" in out[0]
+        assert "timer_audit_测试员_2026-09-07_b.json" in out[0]
+
+
+#: DP-127 修完后 incoming/ 交叉核对的钉死清单。
+#: 架构师预期是 5 条（徐乐彤 09-10 CSV 未交）；本机跑出 7 条——多出来的
+#: 「陈璇 09-08 CSV 配不上」是同源副本归并后第二份导出的行从内存里消失造成的，
+#: **不许为凑成 5 而改守卫**，清单原样钉住，口径由架构师定。
+INCOMING_CROSSCHECK_AFTER_DP127 = [
+    "human_scores_FST_徐乐彤_2026-09-07_partial12of28.csv 等 8 份: "
+    "JSON 有 CSV 无 → 徐乐彤/FST-抑郁4-7-ch1",
+    "human_scores_FST_徐乐彤_2026-09-07_partial12of28.csv 等 8 份: "
+    "JSON 有 CSV 无 → 徐乐彤/FST-抑郁4-7-ch2",
+    "human_scores_FST_徐乐彤_2026-09-07_partial12of28.csv 等 8 份: "
+    "JSON 有 CSV 无 → 徐乐彤/FST-正常1-4-ch1",
+    "human_scores_FST_徐乐彤_2026-09-07_partial12of28.csv 等 8 份: "
+    "JSON 有 CSV 无 → 徐乐彤/FST-正常1-4-ch3",
+    "human_scores_FST_徐乐彤_2026-09-07_partial12of28.csv 等 8 份: "
+    "JSON 有 CSV 无 → 徐乐彤/FST-正常5+抑郁1-3-ch1",
+    "human_scores_FST_陈璇_2026-09-08_partial8of28_030748Z.csv: "
+    "配不上任何一份导出（最接近 "
+    "timer_audit_FST_陈璇_2026-09-08_partial8of28_030748Z.json）",
+    "  CSV 有 JSON 无 → FST-抑郁8-10-ch4",
+]
+
+
+def test_incoming_crosscheck_mismatches_are_pinned() -> None:
+    """真数据守卫：把修完后的清单钉死，不是断言「少于 48 条」。"""
+    res = build_table(INCOMING)
+    assert res.crosscheck_mismatches == INCOMING_CROSSCHECK_AFTER_DP127, (
+        "清单变了——原样贴出来给架构师，不许改守卫凑数：\n"
+        + "\n".join(res.crosscheck_mismatches))
+
+
+def test_raw_crosscheck_still_empty_after_dp127() -> None:
+    """raw/ 没有重复键，这一单不许动它的核对结果。"""
+    res = build_table(RAW)
+    assert res.crosscheck_mismatches == []
+
+
 def test_build_table_handles_multiple_partial_exports_per_scorer() -> None:
     """端到端：一个评分员两份分次导出（现在的常态）必须核对干净。
 
