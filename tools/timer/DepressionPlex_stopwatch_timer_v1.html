@@ -50,9 +50,20 @@
   - v1.7（DP-128）：「已评进度」不再靠人记得——28 个重复键（12 个键那次会话没选
     文件 + 16 个键选了但漏了文件 + 0 个键过滤逻辑出错）全部来自「可选步骤」。
     六条结构性改动（架构师裁定，派工单 B13 §1/§2）：
-    ① 顺序种子由**链条**决定：续评时从「已评进度」恢复、界面只显示不可编辑，
-      不再每次会话新生成（旧版 6 次会话 6 个 seed，delivered_order 每次都变，
-      「顺序按种子全局固定」当时是假的）。链里出现两个不同 seed ⇒ 停机拒开。
+    ① 顺序种子只管**本次会话内**（架构师裁决，推翻本单首版的「从链条恢复」）：
+      首次、续评、重评三种会话都由工具当场新生成一个种子并写进导出，会话内的
+      顺序与呈现号由它固定；**跨会话不保证顺序**，跨会话靠「已评进度」的已评
+      清单去重，不靠顺序。旧版那句「顺序、呈现号按种子全局固定」从来没成立过
+      （6 次会话 6 个 seed）；本单首版改成「从链条恢复、两个种子就停机」是换了
+      一句同样做不到的承诺——实测三条链把历史导出全选上之后，已评清单 100%
+      恢复（漏 0 场），多 seed 根本不妨碍去重，故按裁决改回新种子 + 并集去重。
+      正因去重只认选进来的文件，「已评进度」**必须选全部历史导出**（不是只选
+      最新一份：实测只选最新一份分别漏 0 / 8 / 4 场）。界面当场把选中份数与
+      名册、cumulative_done_count 摆在一起显示「已选 K 份 · 清单共 T 场 ·
+      已恢复 N 场、剩余 M 场」，漏没漏评分员自己看得见。
+      停机只留三条，**一条都不许降级成警告**：并集里出现名册外的 trial_id；
+      len(cumulative_done) != cumulative_done_count；同一评分员同一范式出现两个
+      会话都声称 claimed_first_session: true。
     ② 「这是第一次会话」必须显式声明并写进导出（claimed_first_session）——
       只在屏幕上出现过的确认等于没有确认；谎报第一次在入库侧看得见。
       声明「续评但找不到之前的文件」⇒ 不许开始。
@@ -61,14 +72,23 @@
       len(cumulative_done) == cumulative_done_count，打架 ⇒ 停机拒绝导出
       （两个说同一件事的字段打架时，不许挑一个信）。
     ④ 有意重评与无意重派分开：勾「本次是重评（rescore）」才许派已评场次、
-      且只派被指定的那些；导出写 rescore / rescore_of / prior_files（首评所在
-      文件名，入库侧可据此自动生成重评声明）。不勾 ⇒ 已评场次一场都不派。
+      且只派被指定的那些；导出写 rescore / rescore_of / prior_files（**会话级**：
+      本次「已评进度」里选中的文件名，原名不动）。另加两个键（裁决 3）：
+      记录级 first_scored_in = 这一条重评对应的**首评所在导出文件名**（字符串或
+      null），顶层 first_scored_unresolved = 确定不了首评文件的 trial_id 列表；
+      导出前自检两者条数相等，不等 ⇒ 拒绝导出。确定不了就如实写 null，**不为
+      此拦住评分员**——停机放在入库侧（DP-130），不放在人的脸上。
+      不勾重评 ⇒ 已评场次一场都不派。
     ⑤ 界面文案不许承诺工具做不到的事：旧版那两句「评过的一律不再重发」式的
       打包票与「少选了文件就得重来」式的甩锅提示全部替换/删除——工具能保证的
       只有「选进「已评进度」的都不会重发」，续评必须选文件，不选就不许开始。
-      能靠结构挡住的事，不许靠提示语挡。
-    ⑥ 删「复制种子」按钮：手抄种子会让两个人跑到同一个顺序上（DP-081 记的
-      共享种子已真实发生 3 次）；①之后种子从链里来，这个按钮没有存在理由。
+      关于顺序，v1.7 的真话只有一句（首版那句「种子从链里恢复」同样是假的，
+      一并改掉）：**顺序在本次会话内由种子固定，跨会话不保证；跨会话靠已评
+      清单去重，不靠顺序**。能靠结构挡住的事，不许靠提示语挡。
+    ⑥ 删「复制种子」按钮：手抄种子会让两个人跑到同一个顺序上——DP-081 台账
+      记的跨评分员共享种子实测是 **4 个**（204129075 / 446237714 / 711819040 /
+      942674390，全是张咸明+徐乐彤成对），不是台账写的 3 次；①之后种子由工具
+      每次会话当场生成、只管会话内，这个按钮更没有存在理由。
     另修两笔记账（同单 §2 B/C）：
     ⑦ DP-086 按键膨胀：旧计时按 timeupdate 粒度累加 [lastTime, cur]，按下后
       第一次累加把「上一次更新之后、按下之前」那段视频时间也算成在动——每按键
@@ -136,23 +156,28 @@
      所以不许自己划 4 分钟窗口（DP-057）；一次只评一个杯子，其余杯子请按 SOP 用纸物理遮住。</p>
   <p class="hint"><b>可以分批评！</b>每次只选部分视频文件（清单 CSV 始终选全量那份），
      评完本批自动导出 partial 进度。<b>续评必须选文件，不选就不许开始</b>：下次回来把之前导出的
-     <code>timer_audit_*.json</code> 选进下面的「已评进度」——<b>选进「已评进度」的都不会重发</b>，
-     工具也会明说还差哪几场（localStorage 换机不共享、会丢，别只靠它；v1.7 的导出自带
-     累积清单 cumulative_done，选最新一份就能接上全部历史）。
-     顺序、呈现号按种子全局固定，与分几批无关；续评时种子从「已评进度」里恢复，
-     填不了也不用填。分批只能分"天"，不能分"人"。</p>
+     <code>timer_audit_*.json</code> <b>全部</b>选进下面的「已评进度」（不是只选最新一份）——
+     <b>选进「已评进度」的都不会重发</b>，没选进来的工具无从知道、就会重新发一遍
+     （localStorage 换机不共享、会丢，别只靠它）。
+     关于顺序，工具能做到的只有这一句：<b>顺序在本次会话内由种子固定，跨会话不保证；
+     跨会话靠已评清单去重，不靠顺序</b>。分批只能分"天"，不能分"人"。</p>
   <p>评分员编号 <input type="text" id="scorerId" placeholder="如 张三 或 R1"></p>
   <p>试次清单 CSV（列头 <code>trial_id,video_filename</code>，可选 <code>assay</code>、<code>declared_empty</code>）
      <input type="file" id="manifestFile" accept=".csv,text/csv"></p>
   <p>视频文件（全部一起选） <input type="file" id="videoFiles" accept="video/*" multiple></p>
-  <p>已评进度（分批续评时必选，可多选）
+  <p>已评进度（分批续评时必选，可多选；<b>之前导出的每一份都要选上</b>）
      <input type="file" id="priorFiles" accept=".json,application/json" multiple>
-     <span class="hint">之前导出的 <code>timer_audit_*.json</code>。续评必须选文件，
-     不选就不许开始；选进「已评进度」的都不会重发</span></p>
+     <span class="hint">之前导出的 <code>timer_audit_*.json</code>，<b>全部</b>选上，
+     不是只选最新一份。续评必须选文件，不选就不许开始；选进「已评进度」的都不会重发，
+     没选进来的工具无从知道、就会重新发一遍</span></p>
+  <!-- 裁决 1（DP-128）：把「选了几份、恢复了几场、还剩几场」当场摆给人看，
+       少选了文件自己就能看见（剩余会偏多），不靠提示语打包票 -->
+  <p class="hint" id="chainStat" style="white-space:pre-wrap" hidden></p>
   <p>随机种子 <input type="number" id="seed" style="width:120px">
-     <span class="hint">首次会话由工具随机生成（不用管它）并记入审计文件；续评时从
-     「已评进度」自动恢复、字段变只读。没有复制按钮——两个人手抄到同一个种子
-     就会跑到同一个顺序上（DP-081）</span></p>
+     <span class="hint">每次会话（首次/续评/重评）都由工具当场生成一个种子并记入审计
+     文件，不用管它；续评与重评时这个字段清空并变只读，点「开始评分」时才生成。
+     它只固定<b>本次会话内</b>的顺序，跨会话不保证顺序。没有复制按钮——两个人手抄到
+     同一个种子就会跑到同一个顺序上（DP-081 实测跨评分员共享种子 4 个）</span></p>
   <fieldset id="firstBox">
     <legend>首次会话声明（写进导出文件，入库侧能核对）</legend>
     <p><label><input type="radio" name="firstKind" id="kindFirst">
@@ -312,6 +337,13 @@ function shuffled(arr, rand) {
   }
   return a;
 }
+/* 裁决 1（DP-128 §1.1 改判）：种子只管**本次会话内**的顺序，跨会话不保证。
+ * 所以首次、续评、重评三种会话都当场新生成一个，并如实写进导出——既不假装
+ * 它能从链条里恢复（做不到），也不再因为链里有两个种子就停机（多 seed 并不
+ * 妨碍去重：实测三条链把历史导出全选上，已评清单 100% 恢复）。 */
+function newSessionSeed() {
+  return Math.floor(Math.random() * 1e9);
+}
 
 const $ = (id) => document.getElementById(id);
 /* v1.4 分批模型：fullOrder=该评分员种子序下的全部场次(含 pos 全局呈现序)，
@@ -327,8 +359,14 @@ const state = { scorer: "", seed: 0, fullOrder: [], queue: [], qidx: 0, done: []
                 rescore: false,         // 本次是有意重评（导出 rescore）
                 rescoreOf: [],          // 被指定重评的 trial_id（导出 rescore_of）
                 priorFileNames: [],     // 「已评进度」里选中的文件名（导出 prior_files）
-                chainSeed: null,        // 从链条恢复的种子（null = 还没有可信链条）
-                chainDone: [],          // 链条已完成集合（排序），供重评勾选
+                chainDone: [],          // 链条已评并集（排序），供重评勾选与「已恢复 N 场」
+                chainMaxCount: null,    // 选中文件里 cumulative_done_count 的最大值（对照用）
+                manifestTids: null,     // 已解析清单的 trial_id（算「剩余 M 场」的分母）
+                /* 裁决 3（DP-128）：链条里每一场已评试次 → 首评所在导出文件名；
+                 * 定不了（多份文件的 records 都有它，或只在 prior_done/cumulative_done
+                 * 里露面）⇒ 值为 null，导出如实写 null 并列进 first_scored_unresolved。
+                 * null（整个 Map 不存在）= 本次会话没有可信链条。 */
+                firstScoredIn: null,
                 rewatchS: 0 };          // 当前试次：已看过区域内正向播放的秒数
 const TRIAL_ID_RE = /^(.+)-ch([1-9][0-9]*)$/;
 
@@ -370,6 +408,9 @@ function saveProgress() {
       assay: state.assay, done: state.done, priorDone: state.priorDone,
       claimedFirst: state.claimedFirst, rescore: state.rescore,
       rescoreOf: state.rescoreOf, priorFileNames: state.priorFileNames,
+      /* 裁决 3：首评文件的解析表随存档走（Map → 二元组表）。不存的话，中途关掉
+       * 再「继续上次未完成的评分」，重评场次导出时就丢了 first_scored_in。 */
+      firstScoredIn: state.firstScoredIn ? Array.from(state.firstScoredIn.entries()) : [],
       ts: Date.now(),
     }));
   } catch (e) { /* 隐私模式等：无存档继续，导出不受影响 */ }
@@ -377,15 +418,18 @@ function saveProgress() {
 
 /* ---------------- 设置 ---------------- */
 document.addEventListener("DOMContentLoaded", () => {
-  $("seed").value = String(Math.floor(Math.random() * 1e9));
+  $("seed").value = String(newSessionSeed());
   for (const s of Object.keys(localStorage)) {
     if (s.startsWith("dpst:v2:")) { $("resumeBox").hidden = false; }
   }
   /* v1.7-⑥（DP-128 §2-A）：「复制种子」按钮删掉了——手抄种子会让两个人跑到
-   * 同一个顺序上（DP-081 记的共享种子已真实发生 3 次）；v1.7-① 之后续评种子
-   * 从「已评进度」链条恢复，首次会话种子是工具生成的，两种情形都轮不到手抄。 */
+   * 同一个顺序上（DP-081 记的跨评分员共享种子实测是 4 个：204129075 /
+   * 446237714 / 711819040 / 942674390，全是张咸明+徐乐彤成对，不是台账写的
+   * 3 次）；v1.7-① 之后每次会话的种子都由工具当场生成、只固定本次会话内的
+   * 顺序，手抄种子既没用处也没理由，这个按钮不再回来。 */
   $("startBtn").onclick = onStart;
   $("priorFiles").onchange = onPriorChange;
+  $("manifestFile").onchange = onManifestChange;
   $("resumeBtn").onclick = onResume;
   $("beginBtn").onclick = () => { state.started = true; $("vid").play(); };
   $("nextBtn").onclick = nextTrial;
@@ -487,7 +531,8 @@ function onStart() {
 
     /* 先认出之前评过的，后面每一句「还差几场」才是真话（DP-077）。
      * 有任何一份对不上就停下报错，不带着可疑的进度往下走。
-     * v1.7-①：先读链条再定种子——续评的顺序由链条决定，不由界面字段决定。 */
+     * 裁决 1（DP-128 §1.1 改判）：链条只用来**去重**（剩余 = 名册 − 已评并集），
+     * 不用来恢复顺序——顺序由本次会话当场新生成的种子固定，跨会话不保证。 */
     const prior = await readPriorDone(priors, state.scorer, state.assay,
                                       new Set(manifest.map(m => m.trial_id)));
     if (prior.errs.length) {
@@ -496,10 +541,11 @@ function onStart() {
     }
     const priorDone = Array.from(prior.done).sort();
 
-    /* v1.7-①②④：种子与会话形态。三种来源，各走各的关——
-     * 首次会话：工具生成的随机种子 + 显式声明（上面已强制）；
-     * 续评：种子必须**唯一地**从链条恢复，两个种子 = 两条顺序，停机；
-     * 重评：新种子自盲重派（历史链多 seed 是旧版造成的，不受唯一性限制）。 */
+    /* v1.7-①②④（①按裁决 1 改判）：三种会话都**新生成**种子，各走各的关——
+     * 首次会话：界面字段里工具预填的那个（可以改，必须是非负整数）+ 显式声明；
+     * 续评：当场新生成，链里有几个种子都不管（种子只固定本次会话内的顺序，
+     *       跨会话靠已评清单去重，不靠顺序）；
+     * 重评：当场新生成，自盲重派。 */
     let seed, claimedFirst = false, rescore = false, rescoreOf = [];
     if (!priors.length) {
       if (!/^\d+$/.test($("seed").value)) {
@@ -522,16 +568,15 @@ function onStart() {
           "指定重评的场次不在链条的已评清单里：" + notDone.join("、") + "——重评只能重派评过的场次";
         state.confirmBatch = null; return;
       }
-      seed = Math.floor(Math.random() * 1e9);
+      seed = newSessionSeed();
     } else {
-      if (prior.seeds.size !== 1) {
-        $("setupErr").textContent =
-          "「已评进度」里出现了 " + prior.seeds.size + " 个不同的顺序种子（"
-          + Array.from(prior.seeds).join("、") + "）——这几份导出不是同一个顺序，不许混在一起续评。\n"
-          + "只选真正属于这一条链的导出文件；确要重评旧场次，勾「重评」（重评用新种子，不受此限）。";
-        state.confirmBatch = null; return;
-      }
-      seed = Array.from(prior.seeds)[0];
+      /* 裁决 1（DP-128 §1.1 改判）：这里原来有一道「链里两个种子 ⇒ 停机拒开」，
+       * 现按裁决删掉——种子只管会话内，不管跨会话，多 seed 不影响去重。
+       * 剩余清单 = 名册 − 已评并集（rebuildQueue 做的正是这件事），按新种子洗牌。
+       * 停机只留三条，全在 readPriorDone 里，一条都不降级成警告：
+       * ① 并集里出现名册外的 trial_id；② len(cumulative_done) != cumulative_done_count；
+       * ③ 同一评分员同一范式出现两个会话都声称 claimed_first_session: true。 */
+      seed = newSessionSeed();
       $("seed").value = String(seed); $("seed").readOnly = true;
     }
 
@@ -563,7 +608,7 @@ function onStart() {
           "清单共 " + full.length + " 场：之前已评 " + priorDone.length + " 场，本次选到 "
           + nHave + " 场视频，还有 " + missing.length + " 场没安排。\n"
           + "再点一次「开始评分」= 本批只评这 " + nHave + " 场（剩下 " + missing.length
-          + " 场下次接着评，届时记得把本次导出的审计文件也选进「已评进度」）。\n"
+          + " 场下次接着评，届时把本次导出的审计文件连同之前的**全部**选进「已评进度」）。\n"
           + "既没评过也没选视频的试次：" + missing.slice(0, 8).map(m => m.trial_id).join("、")
           + (missing.length > 8 ? " 等" : "");
         return;
@@ -594,6 +639,9 @@ function onStart() {
     state.claimedFirst = claimedFirst;
     state.rescore = rescore; state.rescoreOf = rescore ? rescoreOf.slice() : [];
     state.priorFileNames = prior.names.slice();
+    /* 裁决 3：链条里每场已评试次的首评所在文件（定不了的值为 null）。导出时逐条
+     * 写进 records 的 first_scored_in，并汇总成顶层 first_scored_unresolved。 */
+    state.firstScoredIn = prior.firstScoredIn || new Map();
     state.done = []; state.files = vids;
     rebuildQueue();
     try { localStorage.removeItem("dpst:v2:" + state.scorer);
@@ -632,19 +680,27 @@ async function parseAuditFile(f) {
   return { doc: d, err: null };
 }
 
-/* 链条提取：seeds = 出现过的全部顺序种子；done = records ∪ prior_done ∪
- * cumulative_done 的并集（v1.7-③：有了累积清单，链断一环也能接上全部历史）。
+/* 链条提取（裁决 1 之后的口径）：
+ * done     = records ∪ prior_done ∪ cumulative_done 的并集（v1.7-③：有了累积
+ *            清单，链断一环也能接上全部历史）——**去重靠它，不靠顺序**；
+ * seeds    = 出现过的全部顺序种子。裁决 1 之后只作诊断，不参与任何停机；
+ * claims   = 声称 claimed_first_session: true 的文件（停机条件③的输入）；
+ * recFiles = trial_id → records 里含它的文件名列表（裁决 3 定 first_scored_in）；
+ * maxCum   = 选中文件里 cumulative_done_count 的最大值——界面拿它与「已恢复 N 场」
+ *            对照（裁决 1 要求把选中份数与 cumulative_done_count/名册摆在一起）。
  * 完整性关（不过 ⇒ errs，这份文件整个不可信，它的内容一概不采）：
- * - 缺 seed：无法从链条恢复顺序（v1.4 起的导出都带 seed）；
- * - cumulative_done 与 cumulative_done_count 打架：两个说同一件事的字段
- *   打架时，不许挑一个信（DP-128 §1.3）。 */
+ * - 停机条件②：cumulative_done 与 cumulative_done_count 打架——两个说同一件事
+ *   的字段打架时，不许挑一个信（DP-128 §1.3）；
+ * - 停机条件③：同一评分员同一范式出现两个会话都声称是第一次会话。
+ * 这里原来还有一道「缺 seed ⇒ 这份不可信」：裁决 1 之后顺序不再从链里恢复，
+ * 缺 seed 对去重毫无影响，再拿它把人拦在门口就是让评分员替工具的旧假设买单，
+ * 故删掉（v1.4 起的导出本来就都带 seed，删这道关不会放进新形状）。 */
 function chainInfo(items) {
-  const seeds = new Set(), done = new Set(), errs = [], names = [];
+  const seeds = new Set(), done = new Set(), errs = [], names = [], claims = [];
+  const recFiles = new Map();
+  let maxCum = null;          // 选中文件里 cumulative_done_count 的最大值（对照用）
   for (const it of items) {
     const name = it.name, d = it.doc;
-    if (d.seed === undefined || d.seed === null) {
-      errs.push(name + "：审计文件缺 seed，无法从链条恢复顺序"); continue;
-    }
     if (Array.isArray(d.cumulative_done)
         && d.cumulative_done.length !== d.cumulative_done_count) {
       errs.push(name + "：cumulative_done 有 " + d.cumulative_done.length
@@ -653,20 +709,66 @@ function chainInfo(items) {
       continue;
     }
     names.push(name);
-    seeds.add(Number(d.seed));
-    for (const r of (d.records || [])) done.add(r.trial_id);
+    if (d.seed !== undefined && d.seed !== null) seeds.add(Number(d.seed));
+    if (typeof d.cumulative_done_count === "number"
+        && (maxCum === null || d.cumulative_done_count > maxCum)) {
+      maxCum = d.cumulative_done_count;
+    }
+    if (d.claimed_first_session === true) {
+      claims.push({ name: name, scorer: String(d.scorer_id || ""),
+                    assay: String(d.assay || "TST"), seed: String(d.seed) });
+    }
+    for (const r of (d.records || [])) {
+      done.add(r.trial_id);
+      if (!recFiles.has(r.trial_id)) recFiles.set(r.trial_id, []);
+      const l = recFiles.get(r.trial_id);
+      if (!l.includes(name)) l.push(name);       // 同一份文件里重复出现只记一次
+    }
     for (const t of (d.prior_done || [])) done.add(t);
     for (const t of (Array.isArray(d.cumulative_done) ? d.cumulative_done : [])) done.add(t);
   }
-  return { seeds, done, errs, names };
+  return { seeds, done, errs: errs.concat(claimConflictErrs(claims)), names,
+           claims, recFiles, maxCum };
+}
+
+/* 停机条件③（裁决 1，DP-128）：同一评分员同一范式出现两个**会话**都声称
+ * claimed_first_session: true——至多一份能是真的，链条不可信，不许开始，
+ * 不降级成警告。
+ * 数的是会话不是文件，会话以 (评分员, 范式, 种子) 认：同一次会话分批导出会落
+ * partial + final 多份文件，每份都带着同一句声明，而工具又要求「全部选上」——
+ * 按文件数会把每个老实分批的评分员都停在门口，那是假红，不是守卫。 */
+function claimConflictErrs(claims) {
+  /* 不用字符串拼 key：评分员编号里出现分隔符就会撞车。三层 Map，各层各认一件事。 */
+  const perScorer = new Map();         // 评分员 → 范式 → 种子 → 该会话的文件名
+  for (const c of claims) {
+    if (!perScorer.has(c.scorer)) perScorer.set(c.scorer, new Map());
+    const byAssay = perScorer.get(c.scorer);
+    if (!byAssay.has(c.assay)) byAssay.set(c.assay, new Map());
+    const bySeed = byAssay.get(c.assay);
+    if (!bySeed.has(c.seed)) bySeed.set(c.seed, []);
+    bySeed.get(c.seed).push(c.name);
+  }
+  const errs = [];
+  for (const [scorer, byAssay] of perScorer) {
+    for (const [assay, bySeed] of byAssay) {
+      if (bySeed.size < 2) continue;
+      const groups = Array.from(bySeed.values());
+      errs.push("「" + scorer + "」在 " + assay + " 下有 " + groups.length
+        + " 个会话都声称是第一次会话（claimed_first_session: true）："
+        + groups.map(g => g.join(" + ")).join(" ／ ")
+        + "——至多一份能是真的，链条不可信，不许开始");
+    }
+  }
+  return errs;
 }
 
 /* 从之前导出的审计 JSON 认出已评过的试次。任何一份对不上（评分员不符、范式不符、
- * 试次不在本清单、缺 seed、累积清单与计数打架）就报出来并**拒绝开始**——
- * 把别人的进度悄悄并进来会污染真值。
- * 也认 prior_done / cumulative_done 字段，所以只选最近那一份也能顺着链条接上。
- * 返回 {done, errs, seeds, names}：seeds 供 §1.1 的唯一性裁决，names 落进导出
- * 的 prior_files（重评会话里它们就是首评所在文件，DP-128 §1.4）。 */
+ * 并集里出现名册外的 trial_id、cumulative_done 与计数打架、两个会话都声称是第一次）
+ * 就报出来并**拒绝开始**——把别人的进度悄悄并进来会污染真值。
+ * 也认 prior_done / cumulative_done 字段，所以链断一环也能接上全部历史。
+ * 返回 {done, errs, seeds, names, firstScoredIn}：names 原名不动落进导出的
+ * prior_files（DP-128 §1.4）；firstScoredIn 供裁决 3 的记录级 first_scored_in；
+ * seeds 只作诊断——裁决 1 之后没有任何一道关再看它。 */
 async function readPriorDone(files, scorer, assay, tidSet) {
   const errs = [], items = [];
   for (const f of files) {
@@ -684,31 +786,73 @@ async function readPriorDone(files, scorer, assay, tidSet) {
   }
   const info = chainInfo(items);
   const done = new Set(Array.from(info.done).filter(t => tidSet.has(t)));
+  /* 停机条件①（裁决 1）：并集里出现名册外的 trial_id ⇒ 拒开。并集有三个来源
+   * （records / prior_done / cumulative_done），三个都得查——只查 records 的话，
+   * 一份把别条清单的场次写进 prior_done 的导出就能悄悄混进来，而 done 那边
+   * 只是静默过滤掉，谁也不会发现少了一场。 */
   for (const it of items) {
     for (const rec of (it.doc.records || [])) {
       if (!tidSet.has(rec.trial_id)) {
         errs.push(it.name + "：记录里的 " + rec.trial_id + " 不在本清单里");
       }
     }
+    for (const t of (it.doc.prior_done || [])) {
+      if (!tidSet.has(t)) errs.push(it.name + "：prior_done 里的 " + t + " 不在本清单里");
+    }
     for (const t of (Array.isArray(it.doc.cumulative_done) ? it.doc.cumulative_done : [])) {
       if (!tidSet.has(t)) errs.push(it.name + "：cumulative_done 里的 " + t + " 不在本清单里");
     }
   }
-  return { done, errs: errs.concat(info.errs), seeds: info.seeds, names: info.names };
+  return { done, errs: errs.concat(info.errs), seeds: info.seeds, names: info.names,
+           firstScoredIn: buildFirstScoredIn(info) };
 }
 
-/* v1.7-①④：选进「已评进度」当场解析链条——种子恢复显示（字段只读）、重评勾选
- * 列表据此生成、解析错误当场红字，不用等到点「开始评分」才发现。这里只做与
- * 清单/评分员无关的检查；三重校验仍在 onStart 的 readPriorDone，两边同一份逻辑。 */
+/* 裁决 3（DP-128）：链条里每一场已评试次 → 它的首评所在导出文件名。
+ * records 里出现过、且只出现在一份文件里 ⇒ 就是那一份；出现在多份（历史上被
+ * 重派过，说不清哪份是首评）或只在 prior_done / cumulative_done 里露面（首评
+ * 那份没选上）⇒ 确定不了，值为 null。null 会如实写进导出并列进
+ * first_scored_unresolved——停机放在入库侧（DP-130），这里不拦评分员。 */
+function buildFirstScoredIn(info) {
+  const m = new Map();
+  for (const tid of info.done) {
+    const names = info.recFiles.get(tid) || [];
+    m.set(tid, names.length === 1 ? names[0] : null);
+  }
+  return m;
+}
+
+/* 导出时逐条取 first_scored_in。三种答案，各是真话：
+ * - 链条里这一场的首评文件唯一 ⇒ 那个文件名；
+ * - 链条里根本没有这一场（本次是它的第一遍）⇒ 本导出文件自己的名字；
+ * - 链条知道这一场评过、但说不清首评在哪份（多份 records 都有它，或只在
+ *   prior_done / cumulative_done 里露面）⇒ null，同时列进 first_scored_unresolved。
+ * null 不拦人：裁决 3 明确「停机放在入库侧（DP-130），不放在人的脸上」。 */
+function resolveFirstScoredIn(tid, ownName) {
+  const m = state.firstScoredIn;
+  if (m === null || m === undefined) return null;
+  if (!m.has(tid)) return ownName;
+  const v = m.get(tid);
+  return v === null ? null : String(v);
+}
+
+/* v1.7-①④（①按裁决 1 改判）：选进「已评进度」当场解析链条——重评勾选列表据此
+ * 生成、「已恢复 N 场、剩余 M 场」当场显示、解析错误当场红字，不用等到点
+ * 「开始评分」才发现。这里只做与清单/评分员无关的检查；名册三重校验仍在
+ * onStart 的 readPriorDone，两边共用 chainInfo 那一份逻辑。 */
 async function onPriorChange() {
   const files = Array.from($("priorFiles").files || []);
-  state.chainSeed = null; state.chainDone = []; state.rescoreOf = [];
+  state.chainDone = []; state.chainMaxCount = null;
+  state.rescoreOf = []; state.firstScoredIn = null;
   $("rescoreChk").checked = false;
   $("rescorePick").innerHTML = ""; $("rescorePick").hidden = true;
   $("rescoreBox").hidden = true;
   if (!files.length) {
     $("firstBox").hidden = false;
+    /* 字段交还给首次会话：清空过就得重新填一个，否则点「开始评分」只会得到一句
+     * 「种子必须是非负整数」，评分员不知道为什么。 */
+    $("seed").value = String(newSessionSeed());
     $("seed").readOnly = false;
+    updateChainStat();
     return;
   }
   const items = [], errs = [];
@@ -722,30 +866,71 @@ async function onPriorChange() {
     $("setupErr").textContent = "「已评进度」文件有问题，先解决再开始：\n" + allErrs.join("\n");
     $("firstBox").hidden = false;
     $("seed").readOnly = false;
+    updateChainStat();
     return;
   }
   $("firstBox").hidden = true;    // 有可信链条 ⇒ 不是第一次会话，声明框收起
   state.chainDone = Array.from(info.done).sort();
-  if (info.seeds.size === 1) {
-    state.chainSeed = Array.from(info.seeds)[0];
-    $("seed").value = String(state.chainSeed);
-    $("seed").readOnly = true;
-    $("setupErr").textContent = "";
-  } else if (info.seeds.size > 1) {
-    /* 停机裁决（v1.7-①）：链里两个种子 = 两条顺序。重评模式豁免——历史链本来就
-     * 多 seed（旧版每次会话新生成），重评用新种子自盲重派。 */
-    state.chainSeed = null;
-    $("seed").value = "";
-    $("seed").readOnly = true;
-    $("setupErr").textContent =
-      "「已评进度」里出现了 " + info.seeds.size + " 个不同的顺序种子（"
-      + Array.from(info.seeds).join("、") + "）——这几份导出不是同一个顺序，不许混在一起续评。\n"
-      + "只选真正属于这一条链的导出；确要重评旧场次，勾下面的「重评」（重评用新种子，不受此限）。";
-  }
+  state.chainMaxCount = (info.maxCum === null ? null : info.maxCum);
+  /* 裁决 1：链里有几个种子都不停机（多 seed 不妨碍去重）。种子只固定**本次会话内**
+   * 的顺序，点「开始评分」时当场新生成——这里先把字段清空并置只读，免得屏幕上
+   * 挂着一个其实不会被用到的数字（那就是又一句假话）。 */
+  $("seed").value = "";
+  $("seed").readOnly = true;
+  $("setupErr").textContent = "";
+  updateChainStat();
   if (state.chainDone.length) {
     $("rescoreBox").hidden = false;
     buildRescorePick();
   }
+}
+
+/* 清单也当场解析一次：「剩余 M 场」的分母是名册，没有名册这句话就说不出口。
+ * onStart 仍自己再解析一遍，两处不共用缓存——显示用的数不许变成开评用的数。 */
+async function onManifestChange() {
+  const f = $("manifestFile").files[0];
+  state.manifestTids = null;
+  if (f) {
+    try {
+      state.manifestTids = parseManifest(await f.text()).map(r => r.trial_id);
+    } catch (e) { /* 清单本身有问题由 onStart 报错停机，这里不抢话也不猜 */ }
+  }
+  updateChainStat();
+}
+
+/* 裁决 1（DP-128）：把「选了几份、恢复了几场、还剩几场」与选中文件自己声称的
+ * cumulative_done_count 摆在一起给评分员看——少选了历史导出，剩余 M 就会偏多，
+ * 漏没漏自己看得见，不靠提示语打包票。
+ * 这一行只是**显示**，不是关卡：三条停机全在 readPriorDone / exportSnapshot 里，
+ * 一条都没被降级成这里的提醒。 */
+function updateChainStat() {
+  const box = $("chainStat");
+  const K = ($("priorFiles").files || []).length;
+  if (!K) { box.textContent = ""; box.hidden = true; return; }
+  const union = state.chainDone || [];
+  const C = state.chainMaxCount;
+  const cum = (C === null ? ""
+    : "\n选中的这些文件里 cumulative_done_count 最大的是 " + C
+      + " 场（v1.6 及更早的导出没有这个字段，只能靠把它们每一份都选上补齐）");
+  const tids = state.manifestTids;
+  let line;
+  if (tids && tids.length) {
+    const inMan = new Set(tids);
+    const N = union.filter(t => inMan.has(t)).length;
+    const out = union.length - N;
+    line = "已选 " + K + " 份导出 · 清单共 " + tids.length + " 场 · 已恢复 " + N
+      + " 场、剩余 " + (tids.length - N) + " 场"
+      + (out ? "\n另有 " + out + " 场不在本清单里 ⇒ 不许开始（点「开始评分」会报出是哪几场）" : "")
+      + (C !== null && C > N ? "\n对不上：选中的文件自称已评到 " + C + " 场，这里只恢复了 "
+        + N + " 场——先别开始，报架构师" : "");
+  } else {
+    line = "已选 " + K + " 份导出 · 已恢复 " + union.length
+      + " 场（还没选清单 CSV；选上之后这里会显示清单共几场、剩余几场）";
+  }
+  box.textContent = line + cum
+    + "\n续评要把之前导出的 timer_audit_*.json 全部选上，不是只选最新一份："
+    + "工具只能跳过你选进来的那些，少选一份就会把评过的场次重新发一遍。";
+  box.hidden = false;
 }
 
 /* 重评勾选列表：链条里所有已评场次逐个列出，勾中的才会被重派（v1.7-④）。
@@ -811,6 +996,12 @@ function onResume() {
     state.rescore = saved.rescore === true;
     state.rescoreOf = Array.isArray(saved.rescoreOf) ? saved.rescoreOf : [];
     state.priorFileNames = Array.isArray(saved.priorFileNames) ? saved.priorFileNames : [];
+    /* 裁决 3：首评文件的解析表随存档走（saveProgress 存成二元组表）。旧存档没有
+     * 这个字段时按会话形态兜底——不是重评 ⇒ 本次每条都是首评（空表，导出写本
+     * 文件名，是真话）；是重评 ⇒ 定不了，如实写 null 交入库侧（DP-130），不猜。 */
+    state.firstScoredIn = Array.isArray(saved.firstScoredIn)
+      ? new Map(saved.firstScoredIn)
+      : (saved.rescore === true ? null : new Map());
     state.files = vids;
     rebuildQueue();
     beginSession();
@@ -1064,10 +1255,13 @@ function batchDone() {
   $("finishMsg").textContent = "本批完成。累计已评 " + nDone() + "/" + state.fullOrder.length
     + " 场；本批这 " + state.done.length + " 场已自动导出（文件名带 partial 与导出时刻）。\n"
     + "还差 " + left.length + " 场：" + left.join("、") + "\n"
-    + "下次接着评：打开本文件 → 填同一评分员编号 → 选同一份清单 CSV → 把刚下载的"
-    + " timer_audit_*.json 选进「已评进度」（v1.7 的导出自带累积清单 cumulative_done，"
-    + "选最新一份就能接上全部历史；v1.6 及更早的导出没有它，仍须每一份都选上）"
-    + " → 只选上面列出的那几场视频 → 「开始评分」。续评必须选文件，不选就不许开始。\n"
+    + "下次接着评：打开本文件 → 填同一评分员编号 → 选同一份清单 CSV → 把**之前导出的"
+    + "每一份** timer_audit_*.json 都选进「已评进度」（不是只选最新一份：v1.7 的导出自带"
+    + "累积清单 cumulative_done，但只有你选进来的那些才算数，少选一份就会把评过的场次"
+    + "重新发一遍）→ 只选上面列出的那几场视频 → 「开始评分」。设置页会显示「已选 K 份 ·"
+    + " 清单共 T 场 · 已恢复 N 场、剩余 M 场」，剩余对不上就是漏选了文件。\n"
+    + "续评必须选文件，不选就不许开始。顺序只在本次会话内由种子固定，跨会话不保证；"
+    + "跨会话靠已评清单去重，不靠顺序。\n"
     + "每份导出只含它那一次会话的记录，所以**每一份都要留着、都要交回**。\n"
     + "注意：分批只能分天，不能分人——每场都必须由两位评分员各自盲评。";
 }
@@ -1121,9 +1315,28 @@ function exportSnapshot(final) {
   const stamp = iso.slice(11, 19).replace(/:/g, "") + "Z";
   const n = state.done.length, m = state.fullOrder.length;
   const suffix = (final ? "_final" : "_partial" + n + "of" + m) + "_" + stamp;
-  download("human_scores_" + state.assay + "_" + state.scorer + "_" + date + suffix + ".csv",
-           csvFromDone(), "text/csv");
-  download("timer_audit_" + state.assay + "_" + state.scorer + "_" + date + suffix + ".json",
+  const csvName = "human_scores_" + state.assay + "_" + state.scorer + "_" + date + suffix + ".csv";
+  const auditName = "timer_audit_" + state.assay + "_" + state.scorer + "_" + date + suffix + ".json";
+  /* 裁决 3（DP-128）导出前自检：每条记录写 first_scored_in（这一条的首评在哪份
+   * 导出里；本次就是首评 ⇒ 本文件名），顶层写 first_scored_unresolved（定不了
+   * 首评文件的 trial_id）。两者各算一遍：条数不等 ⇒ 拒绝导出，一个字节都不落盘。
+   * 「定不了」本身不是错——如实写 null、不拦评分员，停机在入库侧（DP-130）；
+   * 两个字段互相矛盾才是错，那说明工具的账自己都对不上。 */
+  const recOut = state.done.map(d => Object.assign({}, d, {
+    first_scored_in: resolveFirstScoredIn(d.trial_id, auditName),
+  }));
+  const nullCount = recOut.filter(r => r.first_scored_in === null).length;
+  const firstScoredUnresolved = Array.from(new Set(
+    state.done.map(d => d.trial_id)
+      .filter(t => resolveFirstScoredIn(t, auditName) === null))).sort();
+  if (firstScoredUnresolved.length !== nullCount) {
+    alert("内部错误：first_scored_unresolved 有 " + firstScoredUnresolved.length
+      + " 条，first_scored_in 为 null 的记录有 " + nullCount
+      + " 条——两个字段打架，本次导出已拒绝（DP-128 裁决 3），请联系开发");
+    return;
+  }
+  download(csvName, csvFromDone(), "text/csv");
+  download(auditName,
            JSON.stringify({
     format: "depressionplex.stopwatch-audit.v1",
     assay: state.assay,
@@ -1140,14 +1353,18 @@ function exportSnapshot(final) {
      * 入库侧才核对得了「声称第一次」与「链上真的没有更早导出」是否一致。 */
     claimed_first_session: state.claimedFirst === true,
     /* v1.7-④：有意重评的记账。rescore=false 时 rescore_of 恒为空表；
-     * prior_files = 本次「已评进度」里选中的文件名——重评会话里它们就是
-     * 首评所在文件，入库侧据此自动生成重评声明（rescore_declarations）。 */
+     * prior_files = 本次「已评进度」里选中的文件名（**会话级**，原名不动）——
+     * 入库侧据此自动生成重评声明（rescore_declarations）。会话级说不清哪一条
+     * 来自哪一份，所以逐条那一份另记在 records[].first_scored_in（裁决 3）。 */
     rescore: state.rescore === true,
     rescore_of: (state.rescoreOf || []).slice(),
     prior_files: (state.priorFileNames || []).slice(),
+    /* 裁决 3：定不了首评文件的 trial_id 列表（与 records 里 first_scored_in 为
+     * null 的条数恒等——上面自检过才走到这里）。空表 = 每条都说得出首评在哪一份。 */
+    first_scored_unresolved: firstScoredUnresolved,
     scorer_id: state.scorer, seed: state.seed,
     delivered_order: state.fullOrder.map(o => o.trial_id),   // 恒为该种子序全量，含未评场次
-    tool_version: "v1.7", exported_at: iso, records: state.done,
+    tool_version: "v1.7", exported_at: iso, records: recOut,
   }, null, 2), "application/json");
 }
 
@@ -1163,7 +1380,9 @@ function finishSession() {
        : "")
     + (state.rescore
        ? "本次是重评会话：导出里 rescore=true、rescore_of 列了重评的场次、prior_files"
-         + " 是首评所在文件——交回时说明一声，入库侧会按重评登记。"
+         + " 是本次选中的历史导出（会话级），每条记录另带 first_scored_in 指明它自己的"
+         + "首评在哪一份（定不了的写 null 并列进 first_scored_unresolved，由入库侧"
+         + " DP-130 处理，工具不拦你）——交回时说明一声，入库侧会按重评登记。"
        : "")
     + "请原样交回，不要手工改动 CSV（改动会被 §2.1 校验拒收）。";
 }

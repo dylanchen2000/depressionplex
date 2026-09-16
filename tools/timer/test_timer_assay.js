@@ -2,9 +2,11 @@
  * ① 清单解析（assay 缺列/留空/大小写/非法值/混排/FST- 前缀防撞）；
  * ② 导出 CSV 的列与「没问到就留空」；
  * ③ DP-077 三处静默丢数据缺陷的回归；
- * ④ v1.7（DP-128）：种子从链条恢复且必须唯一（§1.1）、首次会话显式声明
- *    （§1.2）、cumulative_done + 导出前自检（§1.3）、重评只派指定场次
- *    （§1.4）、DP-086 按键膨胀的结构性修复与重看记账（§2 B/C）。
+ * ④ v1.7（DP-128）：种子只管本次会话、跨会话靠已评清单并集去重 + 三条停机
+ *    （§1.1，按裁决 1 改判：多 seed 不停机）、首次会话显式声明（§1.2）、
+ *    cumulative_done + 导出前自检（§1.3）、重评只派指定场次（§1.4）+ 逐条
+ *    first_scored_in / 顶层 first_scored_unresolved + 导出前自检（裁决 3）、
+ *    DP-086 按键膨胀的结构性修复与重看记账（§2 B/C）。
  * 用最小 DOM 桩把单文件工具的 <script> 原样跑起来，不复制一行被测逻辑。
  * 跑法（由 tests/test_timer_tool.py 代跑，也可手动）：
  *   node tools/timer/test_timer_assay.js <timer.html> <FST清单.csv>
@@ -47,7 +49,9 @@ global.alert = (m) => { throw new Error("alert: " + m); };
 const mod = { exports: {} };
 new Function("module", js + "\nmodule.exports = { parseManifest, csvFromDone, state, q1Fields,"
   + " ASSAYS, applyAssay, markDeclaredEmpty, nextTrial, mobileAccumulator, exportSnapshot, readPriorDone, doneTidSet, nDone, remainingTrials, rebuildQueue, onStart,"
-  + " loadTrial, onPriorChange, buildRescorePick, chainInfo };")(mod);
+  + " loadTrial, onPriorChange, buildRescorePick, chainInfo, claimConflictErrs, buildFirstScoredIn,"
+  + " resolveFirstScoredIn, updateChainStat, onManifestChange, newSessionSeed, saveProgress,"
+  + " onResume };")(mod);
 const T = mod.exports;
 
 let fails = 0;
@@ -231,7 +235,11 @@ function threeTrials() {
   T.state.priorDone = []; T.state.done = []; T.state.qidx = 0;
   /* v1.7 会话形态字段一并复位——state 是跨测试共享的单例，漏一个就会串场 */
   T.state.claimedFirst = false; T.state.rescore = false; T.state.rescoreOf = [];
-  T.state.priorFileNames = []; T.state.chainSeed = null; T.state.chainDone = [];
+  T.state.priorFileNames = []; T.state.chainDone = [];
+  /* 裁决 1/3 新增的会话状态也一并复位（chainSeed 已随裁决 1 删除：种子不再从
+   * 链里恢复）——漏一个，上一条测试的链条就会串到下一条 */
+  T.state.chainMaxCount = null; T.state.manifestTids = null;
+  T.state.firstScoredIn = null;
   T.state.rewatchS = 0; T.state.redoTrialId = null; T.state.started = false;
   el("rescoreChk").checked = false;
   el("kindFirst").checked = false; el("kindLost").checked = false;
@@ -245,7 +253,8 @@ function auditDoc(over) {
   return Object.assign({
     format: "depressionplex.stopwatch-audit.v1", assay: "TST", scorer_id: "R1",
     partial: true, done_count: 1, total_trials: 3, records: [{ trial_id: "a-ch1" }],
-    /* v1.7 起链条必须带 seed（§1.1：顺序从链条恢复）；真实导出 v1.4 起就带 */
+    /* 真实导出 v1.4 起就带 seed；裁决 1 之后它只作诊断用（顺序不再从链里恢复），
+     * 所以链条文件缺 seed 也照样收——见下面「缺 seed 不再拒开」那条 */
     seed: 7,
   }, over || {});
 }
@@ -555,61 +564,174 @@ async function main() {
     el("setupErr").textContent = "";
   }
 
-  console.log("DP-128 §1.1（种子从链条恢复；两个种子停机）：");
-  await okA("选进「已评进度」当场恢复种子（只读显示），首次声明框收起、重评列表出现", async () => {
+  console.log("DP-128 §1.1（裁决 1：种子只管会话内，跨会话靠已评清单并集去重）：");
+  await okA("选进「已评进度」⇒ 声明框收起、重评列表出现，种子字段清空只读（不再从链里恢复）", async () => {
+    /* 先把字段填上一个显眼的数：DOM 桩跨测试复用，不填的话「清空了」与「本来就是
+     * 空的」分不开，M11 变异（删掉清空那一行）就会假绿。 */
+    el("seed").value = "999"; el("seed").readOnly = false;
     el("priorFiles").files = [auditFile("p1.json", auditDoc({ seed: 4242,
       records: [{ trial_id: "a-ch1" }], cumulative_done: ["a-ch1"], cumulative_done_count: 1 }))];
     await T.onPriorChange();
-    eq(el("seed").value, "4242"); eq(el("seed").readOnly, true);
+    eq(el("seed").value, "");           // 屏幕上不许挂一个其实不会被用到的数字
+    eq(el("seed").readOnly, true);
     eq(el("firstBox").hidden, true);
     eq(el("rescoreBox").hidden, false); eq(el("rescorePick").hidden, false);
-    eq(T.state.chainDone, ["a-ch1"]); eq(T.state.chainSeed, 4242);
+    eq(T.state.chainDone, ["a-ch1"]); eq(T.state.chainMaxCount, 1);
     eq(el("setupErr").textContent, "");
   });
-  await okA("链里两个种子 ⇒ 当场红字，文案逐字是裁决那句", async () => {
-    el("priorFiles").files = [auditFile("p1.json", auditDoc({ seed: 1, records: [] })),
-                              auditFile("p2.json", auditDoc({ seed: 2, records: [] }))];
+  await okA("链里两个种子 ⇒ 不再停机：照常解析、照常并集去重，一句红字都没有", async () => {
+    el("priorFiles").files = [auditFile("p1.json", auditDoc({ seed: 1, records: [{ trial_id: "a-ch1" }] })),
+                              auditFile("p2.json", auditDoc({ seed: 2, records: [{ trial_id: "b-ch1" }] }))];
     await T.onPriorChange();
-    if (!el("setupErr").textContent.includes("这几份导出不是同一个顺序，不许混在一起续评")) {
-      throw new Error("停机文案不对：" + el("setupErr").textContent);
-    }
-    eq(el("seed").value, ""); eq(el("seed").readOnly, true);
-    eq(T.state.chainSeed, null);
+    eq(el("setupErr").textContent, "");
+    eq(T.state.chainDone, ["a-ch1", "b-ch1"]);
+    eq(el("firstBox").hidden, true); eq(el("seed").readOnly, true);
   });
-  await okA("清空「已评进度」⇒ 首次声明框回来，种子字段恢复可填", async () => {
+  await okA("清空「已评进度」⇒ 首次声明框回来，种子字段重新填好并可改", async () => {
     el("priorFiles").files = [];
     await T.onPriorChange();
     eq(el("firstBox").hidden, false); eq(el("seed").readOnly, false);
+    if (!/^\d+$/.test(el("seed").value)) {
+      throw new Error("清空后没重新填一个可用种子（点开始只会得到「种子必须是非负整数」）："
+        + el("seed").value);
+    }
     eq(el("rescoreBox").hidden, true);
+    eq(el("chainStat").hidden, true); eq(el("chainStat").textContent, "");
   });
-  await okA("续评 onStart：种子来自链条而不是界面字段，恢复成只读", async () => {
+  await okA("chainStat：把选中份数、名册、cumulative_done_count 摆在一起显示「已恢复 N 场、剩余 M 场」", async () => {
+    el("manifestFile").files = [{ name: "m.csv", text: async () => MAN3 }];
+    await T.onManifestChange();
+    el("priorFiles").files = [auditFile("p1.json", auditDoc({ seed: 1,
+      records: [{ trial_id: "a-ch1" }], cumulative_done: ["a-ch1"], cumulative_done_count: 1 }))];
+    await T.onPriorChange();
+    const s = el("chainStat").textContent;
+    if (!s.includes("已选 1 份导出")) throw new Error("没报选中份数：" + s);
+    if (!s.includes("清单共 3 场")) throw new Error("没对名册：" + s);
+    if (!s.includes("已恢复 1 场、剩余 2 场")) throw new Error("已恢复/剩余不对：" + s);
+    if (!s.includes("cumulative_done_count 最大的是 1")) throw new Error("没对照 cumulative_done_count：" + s);
+    if (!s.includes("全部选上，不是只选最新一份")) throw new Error("没明说必须全选历史导出：" + s);
+    eq(el("chainStat").hidden, false);
+  });
+  await okA("chainStat：还没选清单 ⇒ 只报已恢复几场，并明说剩余要等清单", async () => {
+    el("manifestFile").files = [];
+    await T.onManifestChange();
+    el("priorFiles").files = [auditFile("p1.json", auditDoc({ seed: 1,
+      records: [{ trial_id: "a-ch1" }] }))];
+    await T.onPriorChange();
+    const s = el("chainStat").textContent;
+    if (!s.includes("已恢复 1 场")) throw new Error("没报已恢复：" + s);
+    if (!s.includes("还没选清单 CSV")) throw new Error("没说清剩余为什么算不出来：" + s);
+  });
+  await okA("续评 onStart：种子当场新生成（不是链里那个），剩余 = 名册 − 已评并集，导出写的就是新种子", async () => {
     setupStart({ seedValue: "",
       priors: [auditFile("p.json", auditDoc({ seed: 4242, records: [{ trial_id: "a-ch1" }] }))] });
     T.onStart(); await tick();
     eq(el("setupErr").textContent, "");
-    eq(T.state.seed, 4242);
-    eq(el("seed").value, "4242"); eq(el("seed").readOnly, true);
+    if (T.state.seed === 4242) throw new Error("续评仍沿用链里的种子——裁决 1 要的是当场新生成");
+    if (!Number.isInteger(T.state.seed) || T.state.seed < 0 || T.state.seed >= 1e9) {
+      throw new Error("新种子越界：" + T.state.seed);
+    }
+    eq(el("seed").value, String(T.state.seed));   // 屏幕上显示的就是这次真用的那个
+    eq(el("seed").readOnly, true);
     eq(T.state.claimedFirst, false); eq(T.state.rescore, false);
     eq(T.state.priorFileNames, ["p.json"]);
     eq(T.state.queue.map(m => m.trial_id).sort(), ["b-ch1", "c-ch1"]);
+    const d = captureAudit(() => { dl.length = 0; T.exportSnapshot(false); });
+    eq(d.seed, T.state.seed);
   });
-  await okA("续评 onStart：链里两个种子 ⇒ 停机，不开评", async () => {
+  await okA("续评 onStart：链里两个种子 ⇒ 照常开评，两份的已评并集都算进去", async () => {
     setupStart({ seedValue: "",
       priors: [auditFile("p1.json", auditDoc({ seed: 7, records: [{ trial_id: "a-ch1" }] })),
                auditFile("p2.json", auditDoc({ seed: 99, records: [{ trial_id: "b-ch1" }] }))] });
     T.onStart(); await tick();
-    if (!el("setupErr").textContent.includes("这几份导出不是同一个顺序，不许混在一起续评")) {
-      throw new Error("没有按裁决停机：" + el("setupErr").textContent);
+    eq(el("setupErr").textContent, "");
+    eq(T.state.priorDone, ["a-ch1", "b-ch1"]);
+    eq(T.state.queue.map(m => m.trial_id), ["c-ch1"]);
+    if (T.state.seed === 7 || T.state.seed === 99) {
+      throw new Error("沿用了链里的种子：" + T.state.seed);
+    }
+  });
+  await okA("链条文件缺 seed ⇒ 不再拒开（种子只管本次会话），records 与 cumulative_done 照收", async () => {
+    const doc = auditDoc({ records: [{ trial_id: "a-ch1" }],
+                           cumulative_done: ["a-ch1", "b-ch1"], cumulative_done_count: 2 });
+    delete doc.seed;
+    setupStart({ seedValue: "", priors: [auditFile("p.json", doc)] });
+    T.onStart(); await tick();
+    eq(el("setupErr").textContent, "");
+    eq(T.state.priorDone, ["a-ch1", "b-ch1"]);
+    eq(T.state.queue.map(m => m.trial_id), ["c-ch1"]);
+  });
+
+  console.log("DP-128 裁决 1 的三条停机（一条都不许降级成警告）：");
+  await okA("停机①：并集里出现名册外的 trial_id ⇒ 拒开；records / prior_done / cumulative_done 三个来源都查", async () => {
+    const cases = [
+      ["records", { records: [{ trial_id: "z-ch9" }] }],
+      ["prior_done", { records: [], prior_done: ["z-ch9"] }],
+      ["cumulative_done", { records: [], cumulative_done: ["z-ch9"], cumulative_done_count: 1 }],
+    ];
+    for (const [key, over] of cases) {
+      const r = await T.readPriorDone([auditFile("x.json", auditDoc(over))], "R1", "TST", TIDS);
+      if (!r.errs.join("").includes("z-ch9")) {
+        throw new Error(key + " 里的越界试次没报出来：" + r.errs);
+      }
+      eq(r.done.size, 0, key + "：越界试次还留在 done 里");
+      /* 同一件事在 onStart 上也得停下来，不能只在函数返回值里红 */
+      setupStart({ seedValue: "", priors: [auditFile("x.json", auditDoc(over))] });
+      T.onStart(); await tick();
+      if (!el("setupErr").textContent.includes("z-ch9")) {
+        throw new Error(key + " 越界但 onStart 没停机：" + el("setupErr").textContent);
+      }
+      eq(T.state.priorFileNames, [], key + "：停机了却还是开了评");
+    }
+  });
+  await okA("停机③：同一评分员同一范式两个会话都声称 claimed_first_session ⇒ 拒开，不开评", async () => {
+    setupStart({ seedValue: "",
+      priors: [auditFile("p1.json", auditDoc({ seed: 1, claimed_first_session: true,
+                                               records: [{ trial_id: "a-ch1" }] })),
+               auditFile("p2.json", auditDoc({ seed: 2, claimed_first_session: true,
+                                               records: [{ trial_id: "b-ch1" }] }))] });
+    T.onStart(); await tick();
+    if (!el("setupErr").textContent.includes("都声称是第一次会话")) {
+      throw new Error("没有按裁决 1 停机③：" + el("setupErr").textContent);
+    }
+    if (!el("setupErr").textContent.includes("不许开始")) {
+      throw new Error("停机文案没说清后果：" + el("setupErr").textContent);
     }
     eq(T.state.priorFileNames, []);       // 没走到赋值 = 没开评
   });
-  await okA("链条文件缺 seed ⇒ 拒开（无法从链条恢复顺序）", async () => {
-    const doc = auditDoc({ records: [{ trial_id: "a-ch1" }] }); delete doc.seed;
-    setupStart({ seedValue: "", priors: [auditFile("p.json", doc)] });
+  await okA("停机③不误伤：同一次会话分批落下的 partial + final（同一个种子）不算两份声明", async () => {
+    setupStart({ seedValue: "",
+      priors: [auditFile("p_partial.json", auditDoc({ seed: 5, claimed_first_session: true,
+                                                      records: [{ trial_id: "a-ch1" }] })),
+               auditFile("p_final.json", auditDoc({ seed: 5, claimed_first_session: true,
+                                                    records: [{ trial_id: "b-ch1" }] }))] });
     T.onStart(); await tick();
-    if (!el("setupErr").textContent.includes("缺 seed")) {
-      throw new Error("没报缺 seed：" + el("setupErr").textContent);
+    eq(el("setupErr").textContent, "");
+    eq(T.state.priorDone, ["a-ch1", "b-ch1"]);
+  });
+  await okA("停机③不误伤：别的评分员声称第一次与本链无关（先被评分员那道关挡掉）", async () => {
+    const r = await T.readPriorDone([
+      auditFile("p1.json", auditDoc({ seed: 1, scorer_id: "R1", claimed_first_session: true })),
+      auditFile("p2.json", auditDoc({ seed: 2, scorer_id: "R2", claimed_first_session: true })),
+    ], "R1", "TST", TIDS);
+    if (!r.errs.join("").includes("R2")) throw new Error("别人的进度没被挡：" + r.errs);
+    if (r.errs.join("").includes("都声称是第一次会话")) {
+      throw new Error("把别的评分员的第一次声明算到本链头上：" + r.errs);
     }
+  });
+  ok("claimConflictErrs：同种子=同一会话只算一次；两个种子才算两个；范式不同各是各的链", () => {
+    eq(T.claimConflictErrs([{ name: "a", scorer: "R1", assay: "TST", seed: "5" },
+                            { name: "b", scorer: "R1", assay: "TST", seed: "5" }]), []);
+    const e = T.claimConflictErrs([{ name: "a", scorer: "R1", assay: "TST", seed: "5" },
+                                   { name: "b", scorer: "R1", assay: "TST", seed: "6" }]);
+    eq(e.length, 1);
+    if (!e[0].includes("R1") || !e[0].includes("TST")) throw new Error("没报出是谁哪个范式：" + e[0]);
+    if (!e[0].includes("a") || !e[0].includes("b")) throw new Error("没报出是哪两份：" + e[0]);
+    eq(T.claimConflictErrs([{ name: "a", scorer: "R1", assay: "TST", seed: "5" },
+                            { name: "b", scorer: "R1", assay: "FST", seed: "6" }]), []);
+    /* 评分员编号里带空格也不许撞车（不用字符串拼 key 的原因） */
+    eq(T.claimConflictErrs([{ name: "a", scorer: "张 咸明", assay: "TST", seed: "5" },
+                            { name: "b", scorer: "张", assay: "咸明 TST", seed: "5" }]), []);
   });
 
   console.log("DP-128 §1.2（首次会话必须显式声明，声明落进导出）：");
@@ -687,6 +809,126 @@ async function main() {
     if (!el("setupErr").textContent.includes("没选到视频")) {
       throw new Error("没拦：" + el("setupErr").textContent);
     }
+  });
+
+  console.log("DP-128 裁决 3（逐条 first_scored_in + 顶层 first_scored_unresolved）：");
+  await okA("重评导出：每条记录指得回首评所在那份文件名，unresolved 为空；prior_files 原名不动", async () => {
+    setupStart({ seedValue: "", rescore: true,
+      priors: [auditFile("first_A.json", auditDoc({ seed: 1, records: [{ trial_id: "a-ch1" }] })),
+               auditFile("first_B.json", auditDoc({ seed: 2, records: [{ trial_id: "b-ch1" }],
+                 cumulative_done: ["a-ch1", "b-ch1"], cumulative_done_count: 2 }))] });
+    T.state.rescoreOf = ["a-ch1", "b-ch1"];
+    T.onStart(); await tick();
+    eq(el("setupErr").textContent, "");
+    eq(T.state.firstScoredIn.get("a-ch1"), "first_A.json");
+    eq(T.state.firstScoredIn.get("b-ch1"), "first_B.json");
+    T.state.done = [mkDone("a-ch1", 1), mkDone("b-ch1", 2)];
+    const d = captureAudit(() => { dl.length = 0; T.exportSnapshot(false); });
+    eq(d.records.map(r => r.first_scored_in), ["first_A.json", "first_B.json"]);
+    eq(d.first_scored_unresolved, []);
+    eq(d.prior_files, ["first_A.json", "first_B.json"]);   // 会话级，键名与语义都保留
+    eq(d.rescore, true); eq(d.rescore_of, ["a-ch1", "b-ch1"]);
+    eq(d.records.length, 2, "记录条数：");
+  });
+  await okA("首评定不了（两份文件的 records 都有这一场）⇒ 如实写 null 并列进 unresolved，照样导出、不拦人", async () => {
+    setupStart({ seedValue: "", rescore: true,
+      priors: [auditFile("p1.json", auditDoc({ seed: 1, records: [{ trial_id: "a-ch1" }] })),
+               auditFile("p2.json", auditDoc({ seed: 2, records: [{ trial_id: "a-ch1" }] }))] });
+    T.state.rescoreOf = ["a-ch1"];
+    T.onStart(); await tick();
+    eq(el("setupErr").textContent, "");       // 定不了首评不是拒开的理由
+    eq(T.state.firstScoredIn.get("a-ch1"), null);
+    T.state.done = [mkDone("a-ch1", 1)];
+    const d = captureAudit(() => { dl.length = 0; T.exportSnapshot(false); });
+    eq(d.records.map(r => r.first_scored_in), [null]);
+    eq(d.first_scored_unresolved, ["a-ch1"]);
+    eq(dl.length, 2, "定不了首评就不导出了——裁决 3 要求不拦人：");
+  });
+  await okA("首评那份没选上（这一场只在 cumulative_done 里露面）⇒ null + unresolved，不拦人", async () => {
+    setupStart({ seedValue: "", rescore: true,
+      priors: [auditFile("latest.json", auditDoc({ seed: 3, records: [{ trial_id: "b-ch1" }],
+        cumulative_done: ["a-ch1", "b-ch1"], cumulative_done_count: 2 }))] });
+    T.state.rescoreOf = ["a-ch1"];
+    T.onStart(); await tick();
+    eq(el("setupErr").textContent, "");
+    T.state.done = [mkDone("a-ch1", 1)];
+    const d = captureAudit(() => { dl.length = 0; T.exportSnapshot(false); });
+    eq(d.records.map(r => r.first_scored_in), [null]);
+    eq(d.first_scored_unresolved, ["a-ch1"]);
+    eq(d.prior_files, ["latest.json"], "会话级 prior_files 不受影响：");
+  });
+  await okA("非重评会话：first_scored_in = 本导出自己的文件名（这一条的首评就是这一份）", async () => {
+    setupStart({ kindFirst: true });
+    T.onStart(); await tick();
+    eq(el("setupErr").textContent, "");
+    T.state.done = [mkDone("a-ch1", T.state.fullOrder.find(m => m.trial_id === "a-ch1").pos)];
+    dl.length = 0; clockAt("2026-09-08T02:03:04.500Z");
+    const d = captureAudit(() => { T.exportSnapshot(false); });
+    realClock();
+    eq(dl.length, 2, "一次导出两个文件：");
+    eq(d.records.map(r => r.first_scored_in), [dl[1]]);
+    eq(d.first_scored_unresolved, []);
+    if (!dl[1].startsWith("timer_audit_TST_R1_")) throw new Error("审计名不合式：" + dl[1]);
+  });
+  ok("resolveFirstScoredIn：没有链条信息（旧存档）⇒ null，不猜一个文件名", () => {
+    threeTrials();
+    T.state.firstScoredIn = null;
+    eq(T.resolveFirstScoredIn("a-ch1", "own.json"), null);
+    T.state.firstScoredIn = new Map();
+    eq(T.resolveFirstScoredIn("a-ch1", "own.json"), "own.json");
+    T.state.firstScoredIn = new Map([["a-ch1", "p1.json"], ["b-ch1", null]]);
+    eq(T.resolveFirstScoredIn("a-ch1", "own.json"), "p1.json");
+    eq(T.resolveFirstScoredIn("b-ch1", "own.json"), null);
+    eq(T.resolveFirstScoredIn("c-ch1", "own.json"), "own.json");
+  });
+  ok("buildFirstScoredIn：只有一份文件的 records 收过这一场才算定得下来，否则 null", () => {
+    const m = T.buildFirstScoredIn({
+      done: new Set(["a-ch1", "b-ch1", "c-ch1"]),
+      recFiles: new Map([["a-ch1", ["f1.json"]], ["b-ch1", ["f1.json", "f2.json"]]]),
+    });
+    eq(m.get("a-ch1"), "f1.json");
+    eq(m.get("b-ch1"), null);        // 两份都收过：说不清哪份是首评
+    eq(m.get("c-ch1"), null);        // 只在 prior_done / cumulative_done 里露面：同样说不清
+    eq(m.size, 3, "链条认得的每一场都要有个交代：");
+  });
+  ok("saveProgress：首评解析表存成二元组表（Map 进不了 JSON），恢复回来还是同一张表", () => {
+    threeTrials();
+    T.state.scorer = "R1";
+    T.state.firstScoredIn = new Map([["a-ch1", "first_A.json"], ["b-ch1", null]]);
+    T.saveProgress();
+    const raw = JSON.parse(localStorage.getItem("dpst:v2:R1"));
+    eq(raw.firstScoredIn, [["a-ch1", "first_A.json"], ["b-ch1", null]]);
+    T.state.firstScoredIn = null;
+    T.saveProgress();
+    eq(JSON.parse(localStorage.getItem("dpst:v2:R1")).firstScoredIn, []);
+  });
+  await okA("存档续评：firstScoredIn 跟着 localStorage 往返，重评导出仍指得回首评文件", async () => {
+    threeTrials();
+    el("scorerId").value = "R1"; el("seed").value = "7";
+    el("manifestFile").files = [{ name: "m.csv", text: async () => MAN3 }];
+    el("videoFiles").files = [{ name: "a.mp4" }, { name: "b.mp4" }, { name: "c.mp4" }];
+    localStorage.setItem("dpst:v2:R1", JSON.stringify({
+      seed: 7, order: ["a-ch1", "b-ch1", "c-ch1"], assay: "TST",
+      done: [mkDone("a-ch1", 1)], priorDone: ["a-ch1"],
+      claimedFirst: false, rescore: true, rescoreOf: ["a-ch1"],
+      priorFileNames: ["first_A.json"], firstScoredIn: [["a-ch1", "first_A.json"]], ts: 1 }));
+    T.onResume(); await tick();
+    eq(T.state.firstScoredIn.get("a-ch1"), "first_A.json");
+    const d = captureAudit(() => { dl.length = 0; T.exportSnapshot(false); });
+    eq(d.records.map(r => r.first_scored_in), ["first_A.json"]);
+    eq(d.first_scored_unresolved, []);
+    eq(d.prior_files, ["first_A.json"]);
+  });
+  ok("自检：first_scored_unresolved 与 first_scored_in 为 null 的条数打架 ⇒ 拒绝导出，一个字节不落", () => {
+    threeTrials();
+    /* 同一场落了两条记录：顶层清单去重后 1 条、记录里 null 有 2 条 ⇒ 两个字段说的
+     * 不是一回事。工具的账自己都对不上时不许导出（与 §1.3 同一套处置）。 */
+    T.state.firstScoredIn = new Map([["a-ch1", null]]);
+    T.state.priorDone = [];
+    T.state.done = [mkDone("a-ch1", 1), mkDone("a-ch1", 1)];
+    dl.length = 0;
+    throws(() => T.exportSnapshot(false), "first_scored_unresolved");
+    eq(dl.length, 0, "自检没过却已经落了文件：");
   });
 
   console.log("DP-077 缺陷②（「开始评分」静默抹掉存档进度）：");
