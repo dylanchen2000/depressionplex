@@ -17,6 +17,10 @@
   警告；被推翻的旧文案（含本单首版自己写的那句「从链条恢复」）逐字禁止回潮；
 - 裁决 3：逐条 `first_scored_in` + 顶层 `first_scored_unresolved` 两个键名，
   以及「条数不等 ⇒ 拒绝导出」这道自检必须在第一个 download 之前。
+- DP-131 裁决①：本次选到 0 场视频是一道「不许开始」（逐字文案 + 关在源码里的
+  位置 + 那句假出路的字面全文件禁留，含注释）；裁决②：§1.2 三道关与 §1.4 派题
+  口径的**源码级**钉子——那道钉子只证明关还在源码里，不证明行为，行为归 node
+  （为什么源码级也要钉：看守链太长，理由见该测试自己的 docstring）。
 - 裁决 2：入库侧一行未改（口径归 DP-130），所以
   test_ingest_truth_still_reads_holds_not_holds_counted 现在**应当是绿的**；
   它哪天变红，说明有人动了入库侧口径，那要有裁决、且要连这条测试一起改。
@@ -416,6 +420,247 @@ def test_ruling_d_one_confirmation_box_lists_both_notes() -> None:
         "的成因（实测 HEAD 上要点到第 5 次）")
 
 
+# ------------------------------------------------- DP-131（裁决①／裁决②）
+
+
+def test_dp131_zero_selected_is_a_stop_not_a_confirmation() -> None:
+    """DP-131 裁决①：本次选到 **0 场**视频 ⇒ 一道「不许开始」，不是「再点一次就评 0 场」。
+
+    原来 0 场照样弹确认框，把「本批要评几场」写成 0 还劝人再点一次；评分员点第二次
+    才被 beginSession 用**另一句**话（「本次所选视频都已评过或不在剩余清单里」）拦住。
+    那不是措辞问题，是缺一道关：先读一段假出路，再被告知走不通。现在 0 场就是不许
+    开始，文案按**复核意见 1** 逐字钉死。原来那句说的是一个不可达的状态：真的一个
+    文件都没选，会被 §1.2 那道关先接住，这道关打得着的只有「选了视频、但选到的每一
+    场都已评过」，而旧文案在说「你没选视频」——评分员照它再选一遍同样的文件，解决
+    不了任何事（旧串的字面在这里也不写：写下来就成了下次「顺手恢复」的种子）。
+    N ≥ 1 的现有文案是真话，一个字不许动。
+
+    三件事一起钉，少一件这道关就是假的：
+    ① 条件 `if (!nHave)` 必须与那句文案、`state.confirmOnce = null`、`return;` 绑在
+       一起——换成 `if (false)`、或只写红字不 return（降级成提醒），都等于放行；
+    ② 这道关必须在 `if (missing.length)` 那一支里、且在 `notes.push("① 本批没排满：")`
+       **之前**——挪到后面就等于先把假出路说完再拦；
+    ③ 那句假出路的字面（「本批只评这 0 场」）在整个文件里一处都不许留，含注释：
+       注释里的原句会被下一次「顺手恢复」抄回去（与 test_old_false_promise_copy_is_gone
+       同一条纪律）；活着的「本批只评这 …场」只能有一处，就是 N ≥ 1 那条路；
+    ④ 复核意见 1 的两条边界：新串在整个文件里**恰好 1 处**、旧串连前半截也
+       **0 命中**（含注释）；§1.2 那道「一个视频文件都没选」的关
+       （`if (!vids.length) err.push("请选择视频文件");`）一个字不许动、也不许跟这道
+       合并——那是另一道关，合并就等于把两种不同的现场说成一句话。
+       另钉「文案不许另起说法」（**复核意见 2**）：红字引号里那两个标签必须与界面上
+       的真值逐字相同——`rescoreBox` 的 legend 以「重评」开头、`rescoreChk` 的 label
+       含「本次是重评（rescore）」，改任一侧就红；评分页那颗重做按钮（`redoBtn`）在这
+       道关的文案里 **0 命中**，它自己与 `openRedoPanel`／`redoSel` 一个字不许动（复核
+       意见 1 那版红字点名的就是它，而它 hidden 在 `<section id="scoring">` 里、这道关
+       拦住时压根没渲染，它开的下拉只列本次会话的 state.done，此刻是空的）。
+    ⑤ **可见性**（复核意见 2 第 2 条，抓的就是「红字指了一个看不见的控件」这类错）：
+       「重评」那一栏必须由 `state.chainDone` 驱动露出、清单必须由 `buildRescorePick`
+       按 `state.chainDone` 逐场生成——nHave == 0 蕴含 chainDone 非空，蕴含这一栏在
+       屏幕上。只钉标签不钉可见性，抓不到这类错（复核意见 1 那颗钉子正是这么漏的）。
+
+    行为归 node（test_timer_assay.js 里 DP-131 那四条：0 场拦住、0 场 + 存档时关优先、
+    nHave ≥ 1 不许被误伤、名册全评完仍直接补出最终文件）；这里钉契约文本。
+    """
+    text = _html_text()
+    body = _on_start_body()
+    zero_copy = ("你选的视频对应的场次都已经评过了：本批没有要评的场次。"
+                 "请把还没评的那几场的视频选进来；"
+                 "确实要重做已评过的场次，就在上面「重评」那一栏勾「本次是重评（rescore）」，"
+                 "再在下面的清单里勾中要重做的场次。")
+    assert re.search(
+        r'if \(!nHave\) \{\s*\$\("setupErr"\)\.textContent = "%s";\s*'
+        r'state\.confirmOnce = null; return;\s*\}' % re.escape(zero_copy), body), (
+        "DP-131 裁决①那道关不在了：`if (!nHave)` 必须与复核意见 1 给的逐字文案、"
+        "清空确认指纹、`return;` 绑在一起（放行/降级成提醒/文案改字都要红）。"
+        "实际 onStart 里 missing 那一支：%r"
+        % body[body.index("if (missing.length) {"):body.index("if (missing.length) {") + 900])
+    assert text.count(zero_copy) == 1, (
+        "那道关的文案应当逐字出现**恰好一次**，实际 %d 次" % text.count(zero_copy))
+    assert "本次没有选到任何视频" not in text, (
+        "旧文案（复核意见 1 判定它说的是不可达状态）又出现了：连前半截都不许留，"
+        "含注释——注释里的原句会被下一次「顺手恢复」抄回去")
+
+    i_missing = body.index("if (missing.length) {")
+    i_gate = body.index("if (!nHave) {")
+    i_note = body.index('notes.push("① 本批没排满：')
+    assert i_missing < i_gate < i_note, (
+        "那道关的位置不对（missing 支起点 %d、关 %d、①那条 %d）：必须在 "
+        "`if (missing.length)` 里面、且在说出「本批没排满」之前——顺序反了就等于"
+        "先给假出路再拦" % (i_missing, i_gate, i_note))
+
+    assert "本批只评这 0 场" not in text, (
+        "那句假出路又出现了（含注释也算）：裁决①明说「本批只评这 0 场」随之消失——"
+        "0 场不许开始，就没有「再点一次就评 0 场」这回事")
+    assert body.count('本批只评这 " + nHave + " 场') == 1, (
+        "N ≥ 1 的现有文案是真话，一个字不许动：「本批只评这 …场」在 onStart 里"
+        "应当恰好一处，实际 %d 处" % body.count('本批只评这 " + nHave + " 场'))
+    assert text.count("本批只评这") == 1, (
+        "全文件「本批只评这」应当只剩 N ≥ 1 那一处（0 场那处已随裁决①消失），"
+        "实际 %d 处" % text.count("本批只评这"))
+
+    # §1.2「一个视频文件都没选」是**另一道关**：文案一个字不许动，也不许跟这道合并
+    assert text.count('if (!vids.length) err.push("请选择视频文件");') == 1, (
+        "§1.2 那道关被动了：`if (!vids.length) err.push(\"请选择视频文件\");` 应当"
+        "逐字恰好一处，实际 %d 处——它管的是「真没选文件」，与这道关管的「选到的都"
+        "评过了」是两种现场，合并就等于把两种现场说成一句话"
+        % text.count('if (!vids.length) err.push("请选择视频文件");'))
+
+    # 复核意见 2 第 1 条：红字引号里那两个标签，必须与界面上的真值逐字相同（改任一侧就红）
+    legend = re.search(r'<fieldset id="rescoreBox"[^>]*>\s*<legend>(.*?)</legend>', text, re.S)
+    assert legend, (
+        "界面上找不到 rescoreBox 那个 legend 了：红字里引的「重评」成了空指")
+    legend_txt = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", "", legend.group(1))).strip()
+    chk = re.search(r'<input type="checkbox" id="rescoreChk">(.*?)</label>', text, re.S)
+    assert chk, (
+        "界面上找不到 rescoreChk 那个 label 了：红字里引的那个勾成了空指")
+    chk_txt = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", "", chk.group(1))).strip()
+    assert legend_txt.startswith("重评"), (
+        "rescoreBox 的 legend 不以「重评」开头了（界面是 %r）：红字点名的是这一栏，栏改了名"
+        "而文案没跟着改，评分员就照着一句假话找不着它" % legend_txt)
+    assert "本次是重评（rescore）" in chk_txt, (
+        "rescoreChk 的 label 里没有「本次是重评（rescore）」了（界面是 %r）：红字引的就是它，"
+        "label 改了字而文案没跟着改就是红" % chk_txt)
+    quoted = re.findall(r"「([^」]+)」", zero_copy)
+    assert quoted == ["重评", "本次是重评（rescore）"], (
+        "红字引号里引的应当恰好是界面上这两个标签（复核意见 2 逐字给的），实际 %r" % (quoted,))
+    assert legend_txt.startswith(quoted[0]) and quoted[1] in chk_txt, (
+        "红字引的标签与界面上的不一致（照它找不着那个勾）：legend=%r / label=%r"
+        % (legend_txt, chk_txt))
+
+    # 复核意见 2 第 3 条：评分页那颗重做按钮，这道关的文案里 0 命中；它自己一个字不许动
+    # 取「这道关那一段」（注释 + if 块）。`state.confirmOnce = null; return;` 全文有 7 处，
+    # 必须从注释锚点往后找第一个——不往后找的话这段会切成空串（首个 return 在锚点之前），
+    # 下面那条断言就成了空转的假绿，所以顺手钉住它不许切空。
+    i_dp131 = text.index("/* DP-131（裁决①")
+    gate_block = text[i_dp131:text.index("state.confirmOnce = null; return;", i_dp131)]
+    assert zero_copy in gate_block and len(gate_block) > 200, (
+        "取「这道关那一段」的锚点失效了（切出来 %d 字节）：那会让下面几条断言空转成假绿，"
+        "先修锚点再看结论" % len(gate_block))
+    assert "重做已完成试次" not in gate_block, (
+        "这道关（含它上面那段注释）又点名了评分页那颗重做按钮：那颗按钮 hidden 在 "
+        "`<section id=\"scoring\">` 里，这道关拦住时压根没渲染，它开的下拉只列**本次会话**的 "
+        "state.done（此刻是空的）——红字指了一个评分员当时看不见的控件，注释里的原句同样"
+        "会被下一次「顺手恢复」抄回去")
+    for pin in ('<button id="redoBtn" type="button">重做已完成试次…</button>',
+                '$("redoBtn").onclick = openRedoPanel;',
+                "function openRedoPanel() {",
+                '<select id="redoSel">'):
+        assert text.count(pin) == 1, (
+            "评分页那颗重做按钮相关的这一处被动了（本单不许动它，它是另一条路的入口）："
+            "%r 应当恰好一处，实际 %d 处" % (pin, text.count(pin)))
+
+    # 复核意见 2 第 2 条：可见性钉子的源码侧——「重评」那一栏由 chainDone 驱动露出，
+    # 且露出的同时按 chainDone 逐场重建清单（nHave == 0 ⇒ chainDone 非空 ⇒ 它在屏幕上）
+    assert re.search(r'if \(state\.chainDone\.length\) \{\s*'
+                     r'\$\("rescoreBox"\)\.hidden = false;\s*buildRescorePick\(\);\s*\}',
+                     text), (
+        "「重评」那一栏的可见性不再由 state.chainDone 驱动了：0 场那道关的红字点名了这一栏，"
+        "这一栏要是不必然在屏幕上，红字就又在指一个看不见的控件（复核意见 2 抓的就是这类错）")
+    assert re.search(r"function buildRescorePick\(\) \{[\s\S]{0,200}?"
+                     r"for \(const tid of state\.chainDone\)", text), (
+        "重评清单不再按 state.chainDone 逐场生成了：红字说的「再在下面的清单里勾中要重做的"
+        "场次」就没有对应的东西——那句话又成了假话")
+
+    # beginSession 那句兜底还在——但它从此只是兜底，不再是 0 场时评分员读到的第一句话
+    begin = _body_of("beginSession", "")
+    assert "本次所选视频都已评过或不在剩余清单里" in begin, (
+        "beginSession 的兜底被删了：0 场那道关是**加**一道，不是把兜底换掉")
+
+
+def test_dp131_source_level_pins_for_session_shape_gates() -> None:
+    """DP-131 裁决②：§1.2 三道关 + §1.4 派题口径，在契约侧补源码级钉子。
+
+    **这道钉子只证明那道关还在源码里，不证明行为；行为归 node**
+    （tools/timer/test_timer_assay.js，套件里由 tests/test_timer_tool.py 一条代跑）。
+
+    为什么源码级也要钉：看守链太长。node 那 89 条全靠 test_timer_tool 这一条代理
+    测试代跑——代理不可用时（node 不在 PATH、CI 换镜像、超时被当成跳过），那两道关
+    就没人看了，而它们正是「谎报第一次」与「不勾重评却把已评场次重新派一遍」的
+    **唯一防线**。DP-128 交付前自查的变异 M25／M26 实测过这件事：把 §1.2 的矛盾关
+    与入口条件放行，契约侧 **0 红**，只有 node 红。这条钉子就是把那一环补上。
+    """
+    body = _on_start_body()
+
+    # ---- §1.2：会话形态三道关，全部经 err → 唯一通道，不许各自写红字、不许降级 ----
+    assert body.count("if (!priors.length) {") == 2, (
+        "§1.2 的入口条件 `if (!priors.length)`（另一处是种子那一支）应当恰好两处，"
+        "实际 %d 处——M26 那种换成 if (false) 的放行会改变这个数"
+        % body.count("if (!priors.length) {"))
+    i_entry = body.index("if (!priors.length) {")
+    i_channel = body.index("if (err.length)")
+    assert i_entry < i_channel, (
+        "§1.2 的入口条件不在 err 通道之前了（入口 %d、通道 %d）：三道关成了死分支"
+        % (i_entry, i_channel))
+    region = body[i_entry:i_channel]
+    for cond, frag in (
+        (r'if \(\$\("kindLost"\)\.checked\) \{',
+         "你声明了「不是第一次、但找不到之前导出的文件」——不许开始。"),
+        (r'else if \(!\$\("kindFirst"\)\.checked\) \{',
+         "续评必须选文件，不选就不许开始"),
+        (r'else if \(\$\("kindFirst"\)\.checked \|\| \$\("kindLost"\)\.checked\) \{',
+         "既选了「已评进度」文件、又勾了首次会话声明——两者矛盾"),
+    ):
+        m = re.search(cond, region)
+        assert m, (
+            "§1.2 的条件 %r 不在源码里了（M25／M26 那种放行就是把它换成 if (false)）："
+            "这道关是「谎报第一次」的唯一防线，源码里没有就等于没人看守" % cond)
+        tail = region[m.end():m.end() + 500]
+        assert "err.push(" in tail, (
+            "§1.2 的 %r 这一支不再往 err 里推——不推进通道就等于不拦" % cond)
+        assert frag in tail, (
+            "§1.2 的 %r 这一支的文案缺了 %r：文案是产品行为的一部分，"
+            "「不为空」不算验收，「说的是真话」才算" % (cond, frag))
+    assert body.count("if (err.length)") == 1, (
+        "§1.2 只能有**一条**通道（err 汇总后一次说出），实际 %d 条"
+        % body.count("if (err.length)"))
+    assert re.search(r'if \(err\.length\) \{ \$\("setupErr"\)\.textContent = '
+                     r'err\.join\("\\n"\); return; \}', body), (
+        "§1.2 的唯一通道被改了：err 非空 ⇒ 红字（err.join）+ return，"
+        "少掉 return 就是把「不许开始」降级成「提醒一句照样开始」")
+
+    # ---- §1.4：重评那一支的入口、三道关，与非重评的派题口径 ----
+    assert '} else if ($("rescoreChk").checked) {' in body, (
+        "§1.4 的入口条件 `else if ($(\"rescoreChk\").checked)` 不在源码里了："
+        "重评那一支整体变成死分支，三道关一起失效")
+    # 三道关各把「条件 → 逐字文案 → return」绑在一起钉。只钉「文案后面有 return」
+    # 是不够的：条件被换成 if (false) 时文案与 return 都还在原地，那种弱 pin 看不见
+    # （本轮设计变异 M34 时发现并当场补强，与裁决 D 那条钉子补条件耦合同一个道理）。
+    for cond, frag in (
+        (r'if \(!rescoreOf\.length\) \{', "勾了「重评」却没指定任何场次"),
+        (r'if \(notDone\.length\) \{', "指定重评的场次不在链条的已评清单里"),
+        (r'if \(noVid\.length\) \{', "指定重评的场次本次没选到视频"),
+    ):
+        m = re.search(cond, body)
+        assert m, (
+            "§1.4 的条件 %r 不在源码里了：把它换成 if (false) 就是放行——"
+            "重评会话会静默变成续评，或把没选到视频的场次当成重评派出去" % cond)
+        tail = body[m.end():m.end() + 400]
+        assert frag in tail, (
+            "§1.4 的 %r 这一支的文案缺了 %r（条件还在、话不说了，等于悄悄改口径）"
+            % (cond, frag))
+        assert "return;" in tail, (
+            "§1.4 的 %r 后面没有 return——停机被降级成提醒（报错停机是产品行为，"
+            "绝不放宽）" % cond)
+    # 两道关的判据本身也得钉：条件为真靠的是这两个 filter，掏空它们等于放行
+    assert "const notDone = rescoreOf.filter(t => !prior.done.has(t));" in body, (
+        "§1.4 第二道关的判据被改了：「指定重评的场次不在链条的已评清单里」必须是"
+        "拿 rescoreOf 去查 prior.done，掏空成 const notDone = [] 就是放行")
+    assert "const noVid = rescoreOf.filter(t => !haveFile.has(t));" in body, (
+        "§1.4 第三道关的判据被改了：「本次没选到视频」必须是拿 rescoreOf 去查"
+        "本次真选到的视频，掏空就是放行")
+    queue = _body_of("rebuildQueue", "")
+    assert "state.queue = state.fullOrder.filter(m => m.file && !doneTids.has(m.trial_id));" in queue, (
+        "§1.4／裁决 1 的派题口径被改了：非重评会话只派「选到视频又没评过」的场次。"
+        "去掉 !doneTids.has(m.trial_id) 就是把评过的场次重新派一遍——那正是 DP-077 "
+        "缺陷②实测两位评分员各被重发 4 场的成因。实际 rebuildQueue：%r" % queue)
+    assert "state.queue = state.fullOrder.filter(m => m.file && pick.has(m.trial_id));" in queue, (
+        "重评会话只派被指定场次这一支被改了（v1.7-④）：%r" % queue)
+    assert "const doneTids = doneTidSet();" in queue, (
+        "「已评」必须取 doneTidSet()（本次会话 ∪ 链条并集），"
+        "只数本次会话就会把之前评过的重新派一遍：%r" % queue)
+    assert queue.index("pick.has(m.trial_id)") < queue.index("!doneTids.has(m.trial_id)"), (
+        "两支的归属变了：`state.rescore` 那一支（pick）必须在前，"
+        "否则重评会话会走非重评的口径、把没勾的场次也派出去")
 # ---------------------------------------------------------------- §4(5)：入库侧吃得下新形状
 
 
