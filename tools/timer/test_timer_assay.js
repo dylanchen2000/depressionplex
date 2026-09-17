@@ -58,8 +58,13 @@ new Function("module", js + "\nmodule.exports = { parseManifest, csvFromDone, st
 const T = mod.exports;
 
 let fails = 0;
+/* 自测自己汇总的条数。为什么要印它：tests/test_timer_tool.py 拿「印出来的
+ * pass 行数」跟这个数对账（自洽），再对下限常量 NODE_SELFTEST_MIN 把关
+ * （防整体退化）。只印「全部通过」四个字的话，自测退化成 3 条也照样绿——
+ * DP-131 的 M43 已经量过：CI 三个 job 对这类错一律是绿的。 */
+let passes = 0;
 function ok(name, fn) {
-  try { fn(); console.log("  pass  " + name); }
+  try { fn(); passes++; console.log("  pass  " + name); }
   catch (e) { fails++; console.log("  FAIL  " + name + " → " + (e.message || e)); }
 }
 function eq(a, b, msg) {
@@ -67,7 +72,7 @@ function eq(a, b, msg) {
   if (sa !== sb) throw new Error((msg || "") + " 期望 " + sb + " 实得 " + sa);
 }
 async function okA(name, fn) {
-  try { await fn(); console.log("  pass  " + name); }
+  try { await fn(); passes++; console.log("  pass  " + name); }
   catch (e) { fails++; console.log("  FAIL  " + name + " → " + (e.message || e)); }
 }
 function throws(fn, frag) {
@@ -1402,7 +1407,8 @@ async function main() {
     eq(dl.length, 0, "却落了文件：");
   });
 
-  console.log(fails ? "\n" + fails + " 条不通过" : "\n全部通过");
+  console.log("\n自测汇总：通过 " + passes + " 条，不通过 " + fails + " 条");
+  console.log(fails ? fails + " 条不通过" : "全部通过");
   process.exit(fails ? 1 : 0);
 }
 main();

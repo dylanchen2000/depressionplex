@@ -573,11 +573,13 @@ def test_dp131_source_level_pins_for_session_shape_gates() -> None:
     **这道钉子只证明那道关还在源码里，不证明行为；行为归 node**
     （tools/timer/test_timer_assay.js，套件里由 tests/test_timer_tool.py 一条代跑）。
 
-    为什么源码级也要钉：看守链太长。node 那 89 条全靠 test_timer_tool 这一条代理
-    测试代跑——代理不可用时（node 不在 PATH、CI 换镜像、超时被当成跳过），那两道关
-    就没人看了，而它们正是「谎报第一次」与「不勾重评却把已评场次重新派一遍」的
-    **唯一防线**。DP-128 交付前自查的变异 M25／M26 实测过这件事：把 §1.2 的矛盾关
-    与入口条件放行，契约侧 **0 红**，只有 node 红。这条钉子就是把那一环补上。
+    为什么源码级也要钉：看守链太长。node 自测那一整批（条数下限由
+    tests/test_timer_tool.py 的 NODE_SELFTEST_MIN 一处钉住，本文件不自带数字）
+    全靠 test_timer_tool 这一条代理测试代跑——代理不可用时（node 不在 PATH、
+    CI 换镜像、超时被当成跳过），那两道关就没人看了，而它们正是「谎报第一次」与
+    「不勾重评却把已评场次重新派一遍」的**唯一防线**。DP-128 交付前自查的变异
+    M25／M26 实测过这件事：把 §1.2 的矛盾关与入口条件放行，契约侧 **0 红**，
+    只有 node 红。这条钉子就是把那一环补上。
     """
     body = _on_start_body()
 
@@ -661,6 +663,311 @@ def test_dp131_source_level_pins_for_session_shape_gates() -> None:
     assert queue.index("pick.has(m.trial_id)") < queue.index("!doneTids.has(m.trial_id)"), (
         "两支的归属变了：`state.rescore` 那一支（pick）必须在前，"
         "否则重评会话会走非重评的口径、把没勾的场次也派出去")
+
+
+# ------------------------------------------------- DP-132 §2：场景 8 整表搬进测试
+
+
+def _html_layers():
+    """把工具文件拆成三层：全文（含注释）、`<script>`、**渲染层**。
+
+    为什么要渲染层这一层：markup 里被 `<!-- -->` 包住的文案评分员看不见。只在全文里
+    查「这句真话还在」，那么一句被注释掉的话照样命中——那是假绿。场景 8 人工那一遍核
+    的是「评分员在屏幕上真的只看到右列」，测试要核同一件事，就得有屏幕这一层。
+
+    三层各自的最小长度、以及「渲染层里一个注释标记都不剩」都断言：切块切出空串/半截
+    是最常见的假绿形状（DP-131 §6-(12) 撞上过三次），先证明刀是快的再谈判据。
+    """
+    text = _html_text()
+    assert text.count("<script>") == 1 and text.count("</script>") == 1, (
+        "<script> 应当恰好一对（单文件工具），实得 %d 个开、%d 个闭——层切错了"
+        % (text.count("<script>"), text.count("</script>")))
+    i_s = text.index("<script>")
+    i_e = text.index("</script>")
+    assert i_e > i_s > 1000, "<script> 的位置反常（起 %d 止 %d）——层切错了" % (i_s, i_e)
+    script = text[i_s + len("<script>"):i_e]
+    markup = text[:i_s] + text[i_e + len("</script>"):]
+    parts, i = [], 0
+    while True:
+        a = markup.find("<!--", i)
+        if a < 0:
+            parts.append(markup[i:])
+            break
+        b = markup.find("-->", a + 4)
+        assert b > a, "markup 里有个 <!-- 没闭合——渲染层这一层就切错了"
+        parts.append(markup[i:a])
+        i = b + 3
+    rendered = "".join(parts)
+    assert len(text) > 50000, "全文只有 %d 字符——文件被截断了？" % len(text)
+    assert len(script) > 20000, "<script> 只切出 %d 字符——层切错了" % len(script)
+    assert len(rendered) > 3000, "渲染层只有 %d 字符——注释剥过头了" % len(rendered)
+    assert markup.count("<!--") >= 3, (
+        "markup 里只找到 %d 处注释开头——更新日志那一大段就是注释，找不到等于切错了"
+        % markup.count("<!--"))
+    assert "<!--" not in rendered and "-->" not in rendered, (
+        "渲染层里还剩注释标记——剥离没生效，这一层就在骗人")
+    return text, script, rendered
+
+
+def _slice(text, start_anchor, end_anchor, tag, min_len=60):
+    """按**锚位置**取一块：起锚之后、到止锚为止（含止锚）。逐字 find，不用正则。
+
+    为什么不用出现次数当判据：DP-131 里「请选择视频文件」从 1 处变成 2 处，原因是我
+    自己新写的一行注释点名了它——用出现次数当判据，注释一开始引用文案就会发霉。所以
+    本单新写的一律锚位置：说清「在哪个锚点之后的哪一块里查」（架构师通则）。
+
+    三条防假绿：起锚必须在全文里唯一（不唯一 ⇒ 窗口边界是糊的）；止锚从**起锚之后**
+    开始找（从文件头找就可能切出空串，那是 DP-131 §6-(12) 的形状）；切完断言最小长度。
+    """
+    assert text.count(start_anchor) == 1, (
+        "%s：起锚 %r 在全文里出现 %d 次——锚点不唯一，窗口边界是糊的，判据作废"
+        % (tag, start_anchor, text.count(start_anchor)))
+    a = text.find(start_anchor)
+    b = text.find(end_anchor, a + len(start_anchor))
+    assert b >= 0, "%s：起锚之后找不到止锚 %r——止锚被改动，判据失效（不是文案缺失）" % (
+        tag, end_anchor)
+    blk = text[a:b + len(end_anchor)]
+    assert len(blk) >= min_len, (
+        "%s：切出来的块只有 %d 字符（下限 %d）——锚点选得太近，块切空/切半截就是假绿"
+        % (tag, len(blk), min_len))
+    return blk
+
+
+# 锚点一律选**结构标记**（元素 id、函数签名、注释头），不选文案本身：锚点跟着文案一起
+# 被改掉的话，判据就自己骗自己了。
+_A_HINT_START = '<p class="hint"><b>可以分批评！</b>'
+_A_HINT_END = '分批只能分"天"，不能分"人"。</p>'
+_A_VER_START = '<h1 id="pageTitle">'
+_A_VER_END = '旧版会悄悄丢进度。</p>'
+_A_FIRSTBOX_START = '<fieldset id="firstBox">'
+_A_RESCOREBOX_START = '<fieldset id="rescoreBox" hidden>'
+_A_FIELDSET_END = '</fieldset>'
+_A_CHANGELOG_START = ('  DepressionPlex · 人工评分计时工具 v1'
+                      '（TST + FST，SPEC_人工比对与验收_v1 §8）')
+_A_CHANGELOG_END = '-->'
+_A_JS6_START = '/* v1.7-⑥（DP-128 §2-A）：'
+_A_JS6_END = '*/'
+_A_FUNC_END = '\n}\n'          # 顶层函数的收尾（函数体内缩进的 } 不算）
+
+
+def _a_fn(name, args=""):
+    """函数体窗口的起锚：`function 名(参数) {`。"""
+    return "function %s(%s) {" % (name, args)
+
+
+# 左列：期望**全文 0 命中**（含注释）。注释里的原句会被下一次「顺手恢复」抄回去，
+# 所以禁的是全文，不是渲染层。
+_S8_GONE = (
+    # (编号, 逐字, 为什么它不许回来)
+    ("左1", "不会把评过的重新发一遍",
+     "v1.6 的打包票。跨会话能不能不重发，取决于评分员把之前导出的每一份都选上，"
+     "工具保证不了这件事，就不许说保证得了"),
+    ("左2", "漏了会重评",
+     "把结构缺陷的责任推给评分员（旧 112 行）"),
+    ("左3", "漏一份就会重评",
+     "同一句的变体（旧 batchDone）"),
+    ("左4", "这几份导出不是同一个顺序，不许混在一起续评",
+     "本单首版自己写的双种子停机文案，裁决 1 推翻：种子只管会话内，多 seed 不停机"),
+    ("左5", "选最新一份就能接上全部历史",
+     "实测漏 0 / 8 / 4 场——只选最新一份接不上历史"),
+    ("左6", "续评时种子从「已评进度」里恢复",
+     "裁决 1：种子每次会话当场新生成，不从链条恢复"),
+    ("左7", "缺 seed，无法从链条恢复顺序",
+     "缺 seed 不再拒开（同上）"),
+    ("左8", "已真实发生 3 次",
+     "DP-081 实测跨评分员共享种子是 4 个，不是台账写的 3 次"),
+    ("左10", "（首评所在文件）",
+     "裁决 B 明令改掉的旧文案：prior_files 是本次选中的历史导出，不是首评归因"),
+    ("左11", "confirmBatch",
+     "裁决 D 合并掉的旧门之一；旧旗标留着就是下次「顺手恢复」成四连点的种子"),
+    ("左12", "confirmWipe",
+     "裁决 D 合并掉的旧门之二"),
+)
+
+# 右列：期望**在指定的锚位置那一块里**在场；markup 的窗口还要求那一块落在渲染层里
+# （证明它没被注释掉，评分员真看得见）。JS 函数体窗口自然不在渲染层，那几行是 False。
+_S8_PRESENT = (
+    # (编号, 逐字, 起锚, 止锚, 最小块长, 必须在渲染层, 这一块是哪儿)
+    ("右1", "选进「已评进度」的都不会重发", _A_HINT_START, _A_HINT_END, 200, True,
+     "设置区「可以分批评」那段提示——工具真能保证的那一句"),
+    ("右2", "续评必须选文件，不选就不许开始", _A_HINT_START, _A_HINT_END, 200, True,
+     "同一段提示：结构规则的原话（对应 onStart 里那道关）"),
+    ("右3", "顺序在本次会话内由种子固定，跨会话不保证", _A_HINT_START, _A_HINT_END, 200, True,
+     "裁决 1：关于顺序只许说这一句真话"),
+    ("右4", "跨会话靠已评清单去重，不靠顺序", _A_HINT_START, _A_HINT_END, 200, True,
+     "裁决 1：同一句的后半"),
+    ("右5", "全部选上，不是只选最新一份", _a_fn("updateChainStat"), _A_FUNC_END, 500, False,
+     "updateChainStat：进度行下面那句提醒"),
+    ("右6", "已恢复 ", _a_fn("updateChainStat"), _A_FUNC_END, 500, False,
+     "进度行本体（表里点名的是整句「已选 K 份导出 · 清单共 T 场 · 已恢复 N 场、"
+     "剩余 M 场」，源码是拼出来的，所以下面按连续片段钉）"),
+    ("右6", "份导出 · 清单共 ", _a_fn("updateChainStat"), _A_FUNC_END, 500, False,
+     "进度行骨架第 2 段"),
+    ("右6", "场 · 已恢复 ", _a_fn("updateChainStat"), _A_FUNC_END, 500, False,
+     "进度行骨架第 3 段"),
+    ("右6", "场、剩余 ", _a_fn("updateChainStat"), _A_FUNC_END, 500, False,
+     "进度行骨架第 4 段——「剩余」偏多就是少选了文件的现场信号（裁决 1）"),
+    ("右7", "都声称是第一次会话", _a_fn("claimConflictErrs", "claims"), _A_FUNC_END, 500, False,
+     "停机③的理由原话"),
+    ("右8", "两个说同一件事的字段打架", _a_fn("chainInfo", "items"), _A_FUNC_END, 500, False,
+     "停机②（导入侧）的理由原话"),
+    ("右8", "两个说同一件事的字段打架", _a_fn("exportSnapshot", "final"), _A_FUNC_END, 500, False,
+     "导出自检里的同一句——表里那格写的就是「停机②／导出自检」两处"),
+    ("右9", "first_scored_in", _a_fn("exportSnapshot", "final"), _A_FUNC_END, 500, False,
+     "裁决 3 的记录级键名（写进导出对象的那一处）"),
+    ("右9", "first_scored_unresolved", _a_fn("exportSnapshot", "final"), _A_FUNC_END, 500, False,
+     "裁决 3 的顶层键名"),
+    ("右10", "（本次选中的历史导出），逐条见", _A_RESCOREBOX_START, _A_FIELDSET_END, 200, True,
+     "裁决 B 的新文案（重评勾选框那句提示）"),
+    ("右11", "① 本批没排满：", _a_fn("onStart"), _A_FUNC_END, 500, False,
+     "裁决 D 的确认框第①条关键字"),
+    ("右12", "② 本机有存档：", _a_fn("onStart"), _A_FUNC_END, 500, False,
+     "裁决 D 的确认框第②条关键字"),
+    ("右13", "件事一次说清", _a_fn("onStart"), _A_FUNC_END, 500, False,
+     "裁决 D：一次点击 = 两件都照办"),
+    ("右14", "claimed_first_session", _A_FIRSTBOX_START, _A_FIELDSET_END, 200, True,
+     "§1.2：首次会话声明会以这个键落进导出文件（界面上要说明这一点）"),
+    ("右15", "工具版本 <b>v1.7</b>", _A_VER_START, _A_VER_END, 60, True,
+     "版本钉的**源码形态**。表里那格写着「浏览器里搜 工具版本 v1.7／源码里搜 "
+     "<b>v1.7</b>」：源码里那个 <b> 标签把浏览器形态打断了，所以在源码里钉前者是 "
+     "0 命中——钉源码形态才对得上"),
+    ("右16", "旧版那句「顺序、呈现号按种子全局固定」从来没成立过",
+     _A_CHANGELOG_START, _A_CHANGELOG_END, 1000, False,
+     "changelog 里的撤回原话。被撤回的承诺只允许以这一种形式留在文件里，"
+     "下面那条 test_global_order_promise_survives_only_as_a_retraction 钉着"
+     "「撤回记录之外一处都不许有」"),
+)
+
+
+def test_dp132_scenario8_banned_copy_is_gone_including_comments() -> None:
+    """DP-132 §2：场景 8 那张表的**左列**（期望 0 命中）整列钉住——全文 0 命中，含注释。
+
+    由来：这张表此前只活在架构师的走脚本里（`tmp/acc.md` 场景 8：一张源码级文案审计
+    表，逐字计数、不做正则不做归一化），靠人手在浏览器里 ⌘F 走一遍，CI 对它是全绿的
+    ——DP-131 的 M43 量过同一件事。本单把整表搬进测试，判据照 s8.py。
+
+    与本模块已有钉子的关系（重叠是有意的，如实写明）：左1–左8 与
+    test_old_false_promise_copy_is_gone 的 banned 元组是同一批；左10 与
+    test_ruling_b_prior_files_copy_is_pinned、左11/左12 与
+    test_ruling_d_one_confirmation_box_lists_both_notes 各自也钉着。搬进表里是为了
+    「整表在一处，走脚本与测试说的是同一件事」，不是取代那几条——那几条钉得更多
+    （裁决 D 那两条连「哪一句挂在哪个条件分支上」都钉了）。判据这边一条都没放松。
+
+    左9「复制种子」不在这条里：它不是「全文 0 命中」——源码里那两处都是「这个按钮
+    已经删了」的撤回记录，删掉它们等于把撤回历史也删了。它单列一条：
+    test_dp132_scenario8_copy_seed_lives_only_as_removal_records。
+    """
+    text, _script, _rendered = _html_layers()
+    assert len(_S8_GONE) >= 10, (
+        "左列只剩 %d 项——表自己塌了，这条守卫就成了空转假绿" % len(_S8_GONE))
+    for tag, phrase, why in _S8_GONE:
+        assert phrase not in text, (
+            "场景 8 左列 %s：被禁的旧文案又回到工具源码里了：%r\n"
+            "  为什么它不许回来：%s\n"
+            "  判据是**全文 0 命中，含注释**：注释里的原句会被下一次「顺手恢复」抄回去。"
+            "能靠结构挡住的事，不许靠提示语挡（DP-128 §1.5／裁决 1）" % (tag, phrase, why))
+
+
+def test_dp132_scenario8_truths_are_pinned_by_anchor_position() -> None:
+    """DP-132 §2：场景 8 的**右列**（真话）整列钉住，一律按**锚位置**，markup 的还要在渲染层里。
+
+    为什么是锚位置而不是出现次数：通则——「请选择视频文件」从 1 处变 2 处，是因为我
+    自己新写的一行注释点名了它；用出现次数当判据，注释一开始引用文案就会发霉。所以
+    本单新写的一律说清「在哪个锚点之后的哪一块里查」。（表里几处标着「恰好 1 处」的
+    旧钉子——按钮文案、onclick、函数定义、`<select>` 标记——钉的是代码里那一样东西
+    本身，经架构师核过，留着不动。）
+
+    比 test_new_truthful_copy_is_pinned 强在哪：那条钉的是「全文在场」。一句真话被挪
+    进 HTML 注释、或被挪到另一段无关文字里，全文在场仍然绿；这里多两条：① 必须在它
+    该在的那一块里（起锚→止锚，见 _slice）；② markup 的那几块必须落在**渲染层**里
+    （评分员真看得见，不是被注释掉的话）。
+
+    判据照 s8.py：逐字，不做正则、不做空白归一化。所以「工具版本 v1.7」钉的是源码形态
+    `工具版本 <b>v1.7</b>`——浏览器里搜得到的是渲染后的样子，源码里那个 `<b>` 把它打断
+    了，钉浏览器形态在源码里是 0 命中（假红）。
+    """
+    text, _script, rendered = _html_layers()
+    assert len(_S8_PRESENT) >= 15, (
+        "右列只剩 %d 项——表自己塌了，这条守卫就成了空转假绿" % len(_S8_PRESENT))
+    n_render = 0
+    for tag, phrase, a_start, a_end, min_len, must_render, where in _S8_PRESENT:
+        blk = _slice(text, a_start, a_end, "场景8-%s" % tag, min_len)
+        assert phrase in blk, (
+            "场景 8 右列 %s：这句真话不在它该在的那一块里了：%r\n"
+            "  该在的块：%s（起锚 %r … 止锚 %r，实得 %d 字符）\n"
+            "  右列是 v1.7 的真话，删一句就等于界面上少说一句工具真做到的事；"
+            "搬走也不行——搬到别处/搬进注释，评分员在原来那个位置就看不见了"
+            % (tag, phrase, where, a_start, a_end, len(blk)))
+        if must_render:
+            n_render += 1
+            assert blk in rendered, (
+                "场景 8 右列 %s：这一块（%s）不在渲染层里——它被 HTML 注释包住了，"
+                "评分员看不见，等于右列那句真话在界面上不存在：%r" % (tag, where, phrase))
+    assert n_render >= 6, (
+        "只核了 %d 块的渲染层——markup 那几块应当都在屏幕上，少核就是判据缩水" % n_render)
+
+
+def test_dp132_scenario8_copy_seed_lives_only_as_removal_records() -> None:
+    """DP-132 §2：左9「复制种子」不是「全文 0 命中」——它只许以**删按钮的撤回记录**存在。
+
+    架构师点出的坑：这一格照「0 命中」核会假红。源码里 `复制种子` 有 2 处，两处都是
+    「这个按钮已经删了」的记录（更新日志 ⑥ 那一条、JS 里那段 v1.7-⑥ 注释）。把记录也
+    删掉，下一个人就不知道这个按钮是被明令删掉的、顺手加回来。所以判据是三条：
+    ① 每一处 `复制种子` 都必须落在这两条撤回记录里（条数相等，不写死数字）；
+    ② 按钮本身 0 命中（逐个 `<button>…</button>` 扫，`copySeed` 也 0 命中）；
+    ③ 渲染层 0 命中（两条记录都在注释里，屏幕上一个字都不许出现）。
+
+    这与 test_global_order_promise_survives_only_as_a_retraction 是同一条规矩：被推翻
+    的东西只允许以「被撤回的原话」形式留在文件里，不许变成一句活的承诺。
+    与 test_copy_seed_button_is_gone 的关系：那条钉的是 id 与按钮文本（`>复制种子<`）
+    这两处正则形状；这条钉的是「文件里每一处都在撤回记录里」，覆盖面更宽（比如新写的
+    一句 `// 复制种子按钮见 v1.6` 那样的注释，那条抓不到，这条会红）。
+    """
+    text, _script, rendered = _html_layers()
+    retract_log = "⑥ 删「复制种子」按钮"        # 更新日志（HTML 注释）里那条
+    retract_js = "「复制种子」按钮删掉了"          # JS 里那段 v1.7-⑥ 注释
+
+    log_blk = _slice(text, _A_CHANGELOG_START, _A_CHANGELOG_END, "复制种子-更新日志", 1000)
+    js6_blk = _slice(text, _A_JS6_START, _A_JS6_END, "复制种子-JS注释", 100)
+    assert retract_log in log_blk, (
+        "更新日志里那条「删按钮」的撤回记录不见了：%r 不在 changelog 块里" % retract_log)
+    assert retract_js in js6_blk, (
+        "JS 里那段 v1.7-⑥ 的撤回记录不见了：%r 不在那块注释里" % retract_js)
+    assert log_blk not in rendered and js6_blk not in rendered, (
+        "撤回记录本来在注释里，现在跑到渲染层了——那就是把「删掉的按钮」又写到屏幕上")
+
+    n_all = text.count("复制种子")
+    n_retracted = text.count(retract_log) + text.count(retract_js)
+    assert n_all > 0, (
+        "全文一处 `复制种子` 都没有：撤回记录被删掉了。删记录不等于按钮更干净——"
+        "下一个人就不知道这个按钮是被明令删掉的（DP-128 §2-A）")
+    assert n_all == n_retracted, (
+        "`复制种子` 在文件里出现 %d 处，其中只有 %d 处落在「删…按钮」的撤回记录里。"
+        "多出来的每一处都是把这个已删按钮重新说成存在的文案（DP-132 §2 左9）"
+        % (n_all, n_retracted))
+
+    assert "copySeed" not in text, (
+        "copySeed 又出现了——「复制种子」按钮是 DP-128 §2-A 明令删除的")
+    n_btn = 0
+    i = 0
+    while True:
+        a = text.find("<button", i)
+        if a < 0:
+            break
+        b = text.find("</button>", a)
+        assert b > a, "有个 <button 没闭合——按钮扫描扫不下去了（判据自己塌了）"
+        seg = text[a:b + len("</button>")]
+        assert "复制种子" not in seg, (
+            "「复制种子」按钮又回来了：%r——手抄种子会让两个人跑到同一个顺序上"
+            "（DP-081 实测跨评分员共享种子 4 个），DP-128 §2-A 明令删除" % seg[:160])
+        n_btn += 1
+        i = b + len("</button>")
+    assert n_btn >= 8, (
+        "只扫到 %d 个按钮——扫描范围塌了，这一条就成了空转假绿" % n_btn)
+
+    assert rendered.count("复制种子") == 0, (
+        "渲染层里出现了 %d 处 `复制种子`：评分员在屏幕上看得见这个词，"
+        "而那个按钮是删掉的——文案在说假话" % rendered.count("复制种子"))
 # ---------------------------------------------------------------- §4(5)：入库侧吃得下新形状
 
 
