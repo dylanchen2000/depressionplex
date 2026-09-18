@@ -89,5 +89,18 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.page_stack, 1)
         self.sidebar.setCurrentRow(0)
 
+        # 新建实验写出 experiment.json 后，把真实路径交给队列（不许再写死 test_experiment.json）
+        self.pages["新建实验"].experiment_created.connect(self._on_experiment_created)
+
     def display_page(self, index: int) -> None:
         self.page_stack.setCurrentIndex(index)
+
+    def _on_experiment_created(self, path: str) -> None:
+        """向导完成 → 队列加载该路径，并切到「分析队列」页。"""
+        queue = self.pages["分析队列"]
+        if not queue.load_experiment_from_path(path):
+            return
+        for i, (name, _) in enumerate(PAGE_ORDER):
+            if name == "分析队列":
+                self.sidebar.setCurrentRow(i)
+                break

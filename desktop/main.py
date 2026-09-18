@@ -110,6 +110,10 @@ def self_test() -> int:
                 f"徽章声称 claims_metrology={view.claims_metrology}，"
                 f"但判定结论是 {window.calibration_status.may_report_metrology}")
 
+    # ── 实验路径交接 + 结果页多视频选择（真实交互，不是「能构造」）──
+    handoff_problems = _probe_experiment_handoff(window, app)
+    problems.extend(handoff_problems)
+
     total_ms = (time.perf_counter() - t0) * 1000
     if problems:
         for p in problems:
@@ -119,6 +123,147 @@ def self_test() -> int:
 
     print(f"SELF-TEST OK pages={len(got)} total_ms={total_ms:.2f}")
     return 0
+
+
+def _probe_experiment_handoff(window: MainWindow, app: QApplication) -> list[str]:
+    """自检：新建实验信号 → 队列加载真实路径；结果页可切换第二段视频。
+
+    若队列仍写死 `test_experiment.json`，或主窗口没接线，本探针必须红。
+    """
+    import json
+    import tempfile
+    from pathlib import Path
+
+    from PySide6.QtWidgets import QLabel
+
+    from desktop.app.models.experiment import (
+        ExperimentPlan,
+        VideoEntry,
+        write_experiment_json,
+    )
+    from desktop.app.utils.paths import user_data_dir
+
+    problems: list[str] = []
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        v1 = root / "clip_alpha.mp4"
+        v2 = root / "clip_beta.mp4"
+        v1.write_bytes(b"")
+        v2.write_bytes(b"")
+        out = root / "exp_out"
+        out.mkdir()
+        # 故意放一个诱饵：若代码仍硬编码 user_data_dir/test_experiment.json，
+        # 会吃到 note=DECOY…，本探针当场红。
+        decoy = {
+            "schema_version": "1",
+            "created_at": "2026-01-01T00:00:00+00:00",
+            "operator": None,
+            "note": "DECOY_MUST_NOT_BE_LOADED",
+            "assay": "TST",
+            "n_chambers": 1,
+            "calib_frames": 12,
+            "body_area_prior": None,
+            "output_dir": str(out),
+            "videos": [{"path": str(v1.resolve()), "trial_prefix": None}],
+        }
+        decoy_path = user_data_dir(create=True) / "test_experiment.json"
+        decoy_path.write_text(json.dumps(decoy), encoding="utf-8")
+        try:
+            plan = ExperimentPlan(
+                assay="TST",
+                n_chambers=2,
+                calib_frames=30,
+                body_area_prior=None,
+                output_dir=out,
+                videos=[
+                    VideoEntry(v1, None),
+                    VideoEntry(v2, "beta"),
+                ],
+                operator="self-test",
+                note="handoff-probe",
+            )
+            exp_path = write_experiment_json(plan)
+
+            new_page = window.pages["新建实验"]
+            queue = window.pages["分析队列"]
+            results = window.pages["结果"]
+
+            # 发信号走主窗口接线（与真实向导完成路径相同）
+            new_page.experiment_created.emit(str(exp_path))
+            app.processEvents()
+
+            if queue._experiment is None:
+                problems.append(
+                    "experiment_created 发出后队列未加载实验（主窗口可能没接线）"
+                )
+                return problems
+
+            note = queue._experiment.get("note")
+            if note == "DECOY_MUST_NOT_BE_LOADED":
+                problems.append(
+                    "队列仍加载了 user_data_dir/test_experiment.json 诱饵，"
+                    "没有吃 experiment_created 传来的真实路径"
+                )
+            if note != "handoff-probe":
+                problems.append(
+                    f"队列加载的实验 note 不对：{note!r}（期望 handoff-probe）"
+                )
+
+            loaded_path = queue._experiment_path
+            if loaded_path is None or Path(loaded_path).resolve() != exp_path.resolve():
+                problems.append(
+                    f"队列 _experiment_path 不是向导写出的路径："
+                    f"got={loaded_path!r} want={exp_path}"
+                )
+
+            videos = queue._experiment.get("videos") or []
+            if len(videos) != 2:
+                problems.append(f"队列视频数应为 2，实际 {len(videos)}")
+            elif Path(videos[1]["path"]).name != "clip_beta.mp4":
+                problems.append(f"第二段视频名不对：{videos[1]!r}")
+
+            if len(queue._items) != 2:
+                problems.append(f"队列表项数应为 2，实际 {len(queue._items)}")
+
+            # 结果页：装入同一份契约后必须能切到第二段
+            results.set_experiment(queue._experiment, video_index=0)
+            app.processEvents()
+            if results.video_combo.count() != 2:
+                problems.append(
+                    f"结果页视频下拉应为 2 项，实际 {results.video_combo.count()}"
+                )
+            results.video_combo.setCurrentIndex(1)
+            app.processEvents()
+            if results._current_video_index != 1:
+                problems.append(
+                    f"结果页切换第二段后 _current_video_index="
+                    f"{results._current_video_index}（期望 1）"
+                )
+
+            review = window.pages["复核"]
+            export_side = window.pages["导出"]
+            review_blob = "\n".join(w.text() for w in review.findChildren(QLabel))
+            export_blob = "\n".join(w.text() for w in export_side.findChildren(QLabel))
+            if "尚未实现" not in review_blob and "占位" not in review_blob:
+                problems.append("复核页文案未标明尚未实现/占位")
+            if "尚未实现" not in export_blob and "占位" not in export_blob:
+                problems.append("侧栏导出页文案未标明尚未实现/占位")
+            if "本页由 B5 交付" in review_blob or "本页由 B6 交付" in export_blob:
+                problems.append("占位页仍写「本页由 Bx 交付」，对用户不诚实")
+
+            if not problems:
+                print(
+                    f"实验交接探针：path={exp_path.name} videos={len(videos)} "
+                    f"queue_items={len(queue._items)} "
+                    f"results_combo={results.video_combo.count()} OK"
+                )
+        finally:
+            try:
+                decoy_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    return problems
 
 
 def main() -> int:

@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QHeaderView,
     QMessageBox,
+    QComboBox,
 )
 
 from desktop.app.models.results import load_results, ResultsTable, ResultsRow, DENOMINATORS
@@ -51,11 +52,18 @@ class ResultsPage(QWidget):
         badge_row.addWidget(self.badge_slot)
         layout.addLayout(badge_row)
 
-        # 按钮行：打开目录 + 导出
+        # 按钮行：打开目录 + 视频选择 + 导出
         btn_row = QHBoxLayout()
         open_btn = QPushButton("打开输出目录…")
         open_btn.clicked.connect(self._on_open_directory)
         btn_row.addWidget(open_btn)
+
+        btn_row.addWidget(QLabel("视频："))
+        self.video_combo = QComboBox()
+        self.video_combo.setEnabled(False)
+        self.video_combo.setMinimumWidth(220)
+        self.video_combo.currentIndexChanged.connect(self._on_video_changed)
+        btn_row.addWidget(self.video_combo)
 
         # B6 导出按钮（只加按钮与调用，不动表格逻辑）
         self.export_btn = QPushButton("导出…")
@@ -101,12 +109,45 @@ class ResultsPage(QWidget):
             self.meta_label.setText(f"读取 experiment.json 失败：{e}")
             return
 
-        # 暂时只显示第一个视频的结果
-        # TODO: 支持逐 video_index 列出，用户选择后显示
+        self.set_experiment(exp, video_index=0)
+
+    def set_experiment(self, exp: dict, video_index: int = 0) -> None:
+        """装入一份 experiment.json，填充视频下拉框并显示选定段。
+
+        供「打开输出目录」与自检/交接测试共用；不许再写死只看 index 0。
+        """
+        videos = exp.get("videos") or []
         self._current_exp = exp
-        self._current_video_index = 0
+
+        self.video_combo.blockSignals(True)
+        self.video_combo.clear()
+        for i, video in enumerate(videos):
+            name = Path(video["path"]).name
+            self.video_combo.addItem(f"{i + 1}. {name}", i)
+        self.video_combo.setEnabled(len(videos) > 0)
+        if videos:
+            idx = max(0, min(int(video_index), len(videos) - 1))
+            self.video_combo.setCurrentIndex(idx)
+            self._current_video_index = idx
+        else:
+            self._current_video_index = 0
+        self.video_combo.blockSignals(False)
+
+        if not videos:
+            self.meta_label.setText("错误：experiment.json 里没有视频")
+            self.export_btn.setEnabled(False)
+            self.table.setRowCount(0)
+            self.table.setColumnCount(0)
+            return
+
         self._load_results()
 
+    def _on_video_changed(self, index: int) -> None:
+        """用户在下拉框里换了一段视频。"""
+        if index < 0 or self._current_exp is None:
+            return
+        self._current_video_index = index
+        self._load_results()
     def _load_results(self):
         """加载并显示结果。"""
         if self._current_exp is None:

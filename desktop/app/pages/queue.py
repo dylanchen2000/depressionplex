@@ -10,7 +10,8 @@ from typing import Dict
 from PySide6.QtCore import QProcess, Qt, Signal
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QTableWidget,
-    QTableWidgetItem, QProgressBar, QLabel, QHeaderView, QMessageBox
+    QTableWidgetItem, QProgressBar, QLabel, QHeaderView, QMessageBox,
+    QFileDialog,
 )
 
 from desktop.app.models.queue_models import (
@@ -36,6 +37,7 @@ class QueuePage(QWidget):
         super().__init__(parent)
 
         self._experiment: dict | None = None  # experiment.json 的内容
+        self._experiment_path: Path | None = None  # 当前加载的 experiment.json 路径
         self._items: list[QueueItem] = []  # 队列项
         self._current_process: QProcess | None = None  # 当前运行的子进程
         self._current_index: int = -1  # 当前运行的项目在 _items 中的索引
@@ -86,12 +88,27 @@ class QueuePage(QWidget):
         self.btn_cancel.setEnabled(is_running)
 
     def _on_load_experiment(self):
-        """加载 experiment.json（临时写死路径，B2 会提供真正的选择器）。"""
-        # TODO: B2 会提供实验选择器，这里先写死一个测试路径
-        exp_path = user_data_dir() / "test_experiment.json"
-        if not exp_path.exists():
-            QMessageBox.warning(self, "错误", f"实验文件不存在：{exp_path}")
+        """用户点「加载实验」：弹出文件选择器，再交给 load_experiment_from_path。"""
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "选择 experiment.json",
+            str(user_data_dir(create=False)),
+            "Experiment JSON (experiment.json);;JSON (*.json);;All (*)",
+        )
+        if not path:
             return
+        self.load_experiment_from_path(path)
+
+    def load_experiment_from_path(self, path: str | Path) -> bool:
+        """从给定路径加载 experiment.json（新建实验向导与「加载实验」共用）。
+
+        Returns:
+            True 表示加载成功；失败时已弹窗说明，返回 False。
+        """
+        exp_path = Path(path)
+        if not exp_path.is_file():
+            QMessageBox.warning(self, "错误", f"实验文件不存在：{exp_path}")
+            return False
 
         try:
             with open(exp_path, encoding="utf-8") as f:
@@ -101,6 +118,7 @@ class QueuePage(QWidget):
             # 用户已经按过「开始」，看到的是某一条 item 失败，而不是「这份实验文件读不懂」。
             engine.require_contract(loaded)
             self._experiment = loaded
+            self._experiment_path = exp_path.resolve()
 
             # 构造队列项
             self._items = []
@@ -114,9 +132,11 @@ class QueuePage(QWidget):
 
             self._refresh_table()
             self._update_ui_state()
+            return True
 
         except Exception as e:
             QMessageBox.critical(self, "错误", f"加载实验失败：{e}")
+            return False
 
     def _refresh_table(self):
         """刷新表格显示。"""
