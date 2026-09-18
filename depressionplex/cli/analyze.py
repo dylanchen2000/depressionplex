@@ -378,7 +378,10 @@ def main(argv: list[str] | None = None) -> int:
             json.dump(run_data, fh, indent=2, ensure_ascii=False)
         print(f"\n上下文已写：{args.run_json}")
 
-    if not reports:
+    # 成功判据是「至少一个获准出数」(scored=True)，不是「reports 字典非空」。
+    # reports 里可以全是闸门拦截行（scored=False）——那仍算未产出数字，必须返回 2。
+    # 合法的「0 秒不动」是 scored=True 且 immobility=0，仍返回 0。
+    if not any(r.scored for r in reports.values()):
         print("\n[结果] 没有任何隔间产出数字——退出码 2", file=sys.stderr)
         return 2
     return 0
