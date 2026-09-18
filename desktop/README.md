@@ -20,57 +20,39 @@ python -m desktop.main
 QT_QPA_PLATFORM=offscreen python -m desktop.main --self-test
 ```
 
-自检会构造所有页面，打印环境信息和启动耗时，退出码 0 表示成功。
+自检会构造所有页面、核对实验创建→队列加载交接，打印环境信息和启动耗时，退出码 0 表示成功。
 
 ## 目录结构
 
 ```
 desktop/
-├── __init__.py              空文件（desktop 必须是真包）
+├── __init__.py
 ├── main.py                  入口，含 --self-test
-├── requirements.txt         依赖清单（仅 PySide6==6.7.3）
+├── requirements.txt         依赖清单（仅 PySide6==6.7.3；导出层另需 openpyxl）
 ├── README.md                本文件
 └── app/
-    ├── __init__.py
-    ├── main_window.py       主窗口 + 左侧导航
+    ├── main_window.py       主窗口 + 左侧导航 + 实验→队列接线
     ├── pages/
-    │   ├── __init__.py
-    │   └── placeholders.py  七个占位页
-    ├── styles/              已存在的皮肤（不在本单改动）
-    │   ├── dark.qss
-    │   └── colors.py
-    ├── utils/
-    │   ├── __init__.py
-    │   └── paths.py         resource_path / user_data_dir / user_log_dir / user_cache_dir
-    ├── widgets/
-    │   └── __init__.py      本单留空
-    └── workers/
-        └── __init__.py      本单留空（B3 用）
+    │   ├── new_experiment.py  新建实验向导（已实现）
+    │   ├── queue.py           分析队列（已实现）
+    │   ├── results.py         结果页 +「导出…」（已实现）
+    │   ├── self_test.py       采集自检（已实现）
+    │   └── placeholders.py    欢迎 + 仍为占位的「复核」「导出」侧栏页
+    ├── models/ / services/ / widgets/ / styles/ / utils/
+    ...
 ```
 
-## 本单交付内容（B1，DP-099）
+## 侧栏页面状态（产品说明，以当前代码为准）
 
-本单交付了可在 GitHub Actions 上验收的外壳骨架：
-
-- 主窗口和侧边栏导航
-- 七个占位页（欢迎、新建实验、分析队列、结果、复核、导出、自检）
-- 跨平台路径工具（`paths.py`）
-- 无显示自检入口（`--self-test`）
-- 深色主题皮肤加载（`dark.qss`，由 B0 搬入）
-
-### 占位页说明
-
-除"欢迎"页外，其余六个页面均为占位实现，将由后续派工单交付：
-
-| 页面 | 状态 | 后续归属 |
-|------|------|----------|
-| 欢迎 | 已实现 | — |
-| 新建实验 | **占位** | B2 交付 |
-| 分析队列 | **占位** | B3 交付 |
-| 结果 | **占位** | B4 交付 |
-| 复核 | **占位** | B5 交付 |
-| 导出 | **占位** | B6 交付 |
-| 自检 | **占位** | B7 交付 |
+| 页面 | 状态 | 说明 |
+|------|------|------|
+| 欢迎 | 已实现 | 入口页 |
+| 新建实验 | 已实现 | 写出 `experiment.json`，并发 `experiment_created` |
+| 分析队列 | 已实现 | 接收向导路径或「加载实验」选文件；**不再**写死 `test_experiment.json` |
+| 结果 | 已实现 | 可切换多段视频；「导出…」在此页 |
+| 复核 | **占位，未实现** | 不能做人工复核 / 掩膜叠加 |
+| 导出（侧栏） | **占位，未实现** | 独立导出页未交付；请用「结果」页的「导出…」 |
+| 自检 | 已实现 | 采集条件自检（`acq-check`） |
 
 ## 跨平台约束
 
@@ -97,17 +79,14 @@ desktop/
 
 ### 依赖约束
 
-外壳**只许依赖 PySide6**，不许引入：
+外壳**只许依赖 PySide6**（导出层另有 openpyxl 白名单），不许引入：
 - onnxruntime / opencv / torch / scipy（属于分析引擎，不属于外壳）
-- 任何除 PySide6 外的第三方库（除非后续派工单明确许可）
+- 任何未在架构白名单中的第三方库
 
 这些约束由守卫测试 `tests/test_desktop_boundary.py` 机械检查。
 
 ## 验收
 
-本单的验收判据（缺一条即退回）：
-
-1. **GitHub Actions 上 `desktop-selftest.yml` 转绿**，ubuntu(offscreen) 与 windows-latest 两个 job 都绿，且日志里能看到 `SELF-TEST OK pages=7 total_ms=…`
-2. 自检报告里七个页面全部出现，总启动耗时 < 2000 ms
-3. `python3 run_tests.py` 全绿且总数 = 原有 + 新增的
-4. 守卫测试的四条规则（进程边界 / 依赖白名单 / 禁 sys.path / 入口对齐 CI）每条都验证过能独立失败
+1. **GitHub Actions 上 `desktop-selftest.yml` 转绿**，ubuntu(offscreen) 与 windows-latest 两个 job 都绿，且日志里能看到 `SELF-TEST OK pages=7` 与实验交接探针通过
+2. `python3 run_tests.py` 全绿
+3. 守卫测试的进程边界 / 依赖白名单 / 禁 sys.path / 入口对齐 CI 仍然有效
