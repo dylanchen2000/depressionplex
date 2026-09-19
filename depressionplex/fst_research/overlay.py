@@ -158,6 +158,12 @@ class ClipWriter:
 
     def __init__(self, out_path, *, fps: float, size: tuple[int, int]) -> None:
         self.out = refuse_in_repo(out_path)
+        # R2-115 P组：目标已存在 ⇒ 拒绝，不 spawn ffmpeg。下面的 -y 只为
+        # 避免 ffmpeg 交互提示挂住进程——有了这道守卫，它永远碰不到旧证据。
+        if self.out.exists():
+            raise FileExistsError(
+                f"拒绝覆盖已有研究证据: {self.out}（叠加短片是证据不是草稿；"
+                "新一轮运行请写新的 run 目录）")
         self.out.parent.mkdir(parents=True, exist_ok=True)
         self._w, self._h = size
         self._n = 0

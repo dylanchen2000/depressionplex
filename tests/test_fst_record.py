@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import tempfile
+from datetime import datetime
 from pathlib import Path
 
 from depressionplex.fst_research import overlay as ov
@@ -178,10 +179,15 @@ def test_cup_record_motion_classification_not_performed() -> None:
 
 def test_build_record_carries_flags() -> None:
     sampling = {"step_frames": 5, "sampled_frames": 100}
+    prov = {"run_id": "run_x", "code": {"vcs": "git", "commit": "c" * 40},
+            "command_line": "python -m depressionplex.cli.fst_research --step 5"}
+    params = {"step_frames": 5, "cup_min_width_px": 40,
+              "lost_short_max_gap_frames": 11}
     record = rec.build_record(
         source={"sha256": "x"}, time_base={}, clock_ledger={}, window={},
         coverage={}, sampling=sampling, geometry_confirmation={"confirmed": False},
-        cups=[], manifest=None, limits=["研究诊断"])
+        cups=[], manifest=None, limits=["研究诊断"],
+        provenance=prov, research_params=params)
     assert record["must_not_enter_acceptance_paths"] is True
     assert record["purpose"] == "research_diagnostics_only"
     assert record["schema_version"] == "fst-research-v1"
@@ -189,6 +195,9 @@ def test_build_record_carries_flags() -> None:
     assert record["generated_at"]
     # R2-115 T1：抽样口径是记录的独立一节，不藏在 coverage 里
     assert record["sampling"] == sampling
+    # R2-115 P组：代码出处与完整研究配置也是记录的独立节
+    assert record["provenance"] == prov
+    assert record["research_params"] == params
 
 
 def test_write_record_atomic_and_repo_refused() -> None:
@@ -204,6 +213,113 @@ def test_write_record_atomic_and_repo_refused() -> None:
         pass
     else:
         raise AssertionError("write_record 接受了仓库内落点")
+
+
+# ---------------------------------------------------------------------------
+# R2-115 P组：研究证据不被下一轮覆盖
+# ---------------------------------------------------------------------------
+
+def test_write_record_refuses_overwrite() -> None:
+    """旧记录是上一轮的证据，不是草稿：第二次写同一目标 ⇒ 拒绝，旧字节不动。"""
+    with tempfile.TemporaryDirectory() as td:
+        out = Path(td) / "诊断_x.json"
+        rec.write_record({"v": 1}, out)
+        old_bytes = out.read_bytes()
+        try:
+            rec.write_record({"v": 2}, out)
+        except FileExistsError as e:
+            assert "拒绝覆盖" in str(e)
+        else:
+            raise AssertionError("write_record 覆盖了已有研究证据")
+        assert out.read_bytes() == old_bytes
+
+
+def test_new_run_dir_unique_and_refuses_collision() -> None:
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td).resolve() / "out"     # 守卫会 resolve（macOS /var → /private/var）
+        d1, rid1 = rec.new_run_dir(base, "正常1", run_id="run_x")
+        assert d1 == base / "正常1_run_x" and d1.is_dir()
+        assert rid1 == "run_x"
+        # 撞名 ⇒ 拒绝混写（不 exist_ok）
+        try:
+            rec.new_run_dir(base, "正常1", run_id="run_x")
+        except FileExistsError:
+            pass
+        else:
+            raise AssertionError("new_run_dir 复用了已存在的 run 目录")
+        # 自动 run_id：同一秒内重复运行也不撞（时间戳 + 随机 hex）
+        d2, rid2 = rec.new_run_dir(base, "正常1")
+        d3, rid3 = rec.new_run_dir(base, "正常1")
+        assert rid2 != rid3 and d2 != d3 and d2.is_dir() and d3.is_dir()
+        assert d1.is_dir()                       # 旧 run 目录不动
+    # 仓库内落点照旧拒绝
+    try:
+        rec.new_run_dir(ov.REPO_ROOT / "data", "x")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("new_run_dir 接受了仓库内落点")
+
+
+def test_make_run_id_format() -> None:
+    rid = rec.make_run_id(datetime(2026, 9, 19, 14, 5, 6))
+    assert rid.startswith("run_20260919-140506_")
+    tail = rid.rsplit("_", 1)[-1]
+    assert len(tail) == 8
+    int(tail, 16)                                # 随机段是 hex
+
+
+def test_code_provenance_git_and_non_git() -> None:
+    prov = rec.code_provenance(ov.REPO_ROOT)     # 本仓库工作树
+    assert prov["vcs"] == "git"
+    assert len(prov["commit"]) == 40
+    int(prov["commit"], 16)
+    assert isinstance(prov["dirty"], bool)       # dirty 标记必须存在
+    assert isinstance(prov["dirty_file_count"], int)
+    with tempfile.TemporaryDirectory() as td:    # 非 git 目录 ⇒ 明说，不猜不编
+        prov2 = rec.code_provenance(td)
+        assert prov2["vcs"] in ("not_a_git_repo", "git_unavailable")
+
+
+def test_completion_manifest_written_last_with_hashes() -> None:
+    with tempfile.TemporaryDirectory() as td:
+        run_dir = Path(td).resolve()          # 守卫会 resolve
+        a = run_dir / "诊断_x.json"
+        a.write_text('{"v": 1}', encoding="utf-8")
+        b = run_dir / "叠加_x_杯1.mp4"
+        b.write_bytes(b"\x00\x01\x02")
+        mp = rec.write_completion_manifest(
+            run_dir, run_id="run_x", input_sha256="ab" * 32,
+            code={"vcs": "git", "commit": "c" * 40},
+            artifacts={"诊断记录": a, "叠加短片_杯1": b})
+        assert mp.name == rec.MANIFEST_NAME and mp.parent == run_dir
+        m = json.loads(mp.read_text(encoding="utf-8"))
+        assert m["schema"] == rec.MANIFEST_SCHEMA
+        assert m["run_id"] == "run_x" and m["status"] == "complete"
+        assert m["input_sha256"] == "ab" * 32
+        assert m["code"]["commit"] == "c" * 40
+        assert m["completed_at"]
+        assert set(m["files"]) == {"诊断记录", "叠加短片_杯1"}
+        f = m["files"]["诊断记录"]
+        assert f["path"] == "诊断_x.json"
+        assert f["bytes"] == a.stat().st_size
+        assert f["sha256"] == rec.sha256_of(a) and len(f["sha256"]) == 64
+        assert "未完成" in m["note"]
+
+
+def test_completion_manifest_refuses_missing_artifact() -> None:
+    """清单不许替不存在的文件背书；失败时连清单文件都不该出现。"""
+    with tempfile.TemporaryDirectory() as td:
+        run_dir = Path(td)
+        try:
+            rec.write_completion_manifest(
+                run_dir, run_id="run_x", input_sha256="ab" * 32,
+                code={}, artifacts={"诊断记录": run_dir / "不存在.json"})
+        except FileNotFoundError as e:
+            assert "不存在" in str(e)
+        else:
+            raise AssertionError("完成清单列了不存在的产物")
+        assert not (run_dir / rec.MANIFEST_NAME).exists()
 
 
 def test_sha256_of_known_vector() -> None:

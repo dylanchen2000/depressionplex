@@ -18,6 +18,12 @@
 身份关联走 DP-133 共用清单（两条线共用一张表，不另建真值表）：
 按 sha256 查登记行；**多个别名就全列**、`material_id` 写 null（同 DP-135 的规矩），
 查不到就写 `manifest_lookup: null` 并说明，不猜。
+
+4. **研究证据不被下一轮覆盖**（R2-115 P组）——每次运行开独立 run 目录
+   （`new_run_dir`），记录/几何提案/短片全落在里面；`write_record` 对已存在
+   目标**拒绝覆盖**；全部产物成功才写 `_完成清单.json`（含逐件 sha256），
+   没有清单的 run 目录视为未完成。记录带代码 SHA/dirty/实际命令行
+   （`code_provenance`），失败清理只删本次 run 目录，旧证据只读。
 """
 
 from __future__ import annotations
@@ -25,13 +31,15 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
+import subprocess
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
 from . import SCHEMA_VERSION, PURPOSE
 from .cup_perception import (QUALITY_DECLARED_ABSENT, QUALITY_LOST_SHORT,
                              QUALITY_OBSERVED, QUALITY_UNCLEAR, QUALITIES, FrameDiag)
-from .overlay import refuse_in_repo
+from .overlay import REPO_ROOT, refuse_in_repo
 
 BEHAVIOR_SECONDS_EMPTY = "empty_no_output"
 BEHAVIOR_SECONDS_NO_WINDOW = "research_diagnostics_no_window_alignment"
@@ -47,6 +55,104 @@ def sha256_of(path, chunk: int = 1 << 20) -> str:
         for block in iter(lambda: fh.read(chunk), b""):
             h.update(block)
     return h.hexdigest()
+
+
+# ---------------------------------------------------------------------------
+# R2-115 P组：run 目录 / 代码出处 / 完成清单——研究证据不被下一轮覆盖
+# ---------------------------------------------------------------------------
+
+MANIFEST_NAME = "_完成清单.json"
+MANIFEST_SCHEMA = "fst-research-run-manifest-v1"
+
+
+def make_run_id(now: datetime | None = None) -> str:
+    """run 标识：时间戳 + 8 位随机 hex（同一秒内重复运行也不会撞）。"""
+    now = now or datetime.now()
+    return f"run_{now:%Y%m%d-%H%M%S}_{uuid.uuid4().hex[:8]}"
+
+
+def new_run_dir(out_dir, stem: str, run_id: str | None = None) -> tuple[Path, str]:
+    """开本次运行的独立产物目录（暂存区）：旧证据只读，绝不覆盖。
+
+    目录名 `<stem>_<run_id>`；已存在即 raise（不 exist_ok）——撞名说明
+    生成逻辑出了问题，宁可拒绝也不混写。仓库内落点照旧拒绝。
+    """
+    base = refuse_in_repo(out_dir)
+    rid = run_id or make_run_id()
+    d = base / f"{stem}_{rid}"
+    if d.exists():
+        raise FileExistsError(f"run 目录已存在，拒绝混写: {d}")
+    base.mkdir(parents=True, exist_ok=True)
+    d.mkdir()                       # 不 exist_ok：撞名即失败
+    return d, rid
+
+
+def code_provenance(repo_root=REPO_ROOT) -> dict:
+    """代码出处：git commit + dirty 标记；非 git 状态**明说**，不猜不编。"""
+    root = Path(repo_root)
+
+    def _git(*a: str):
+        return subprocess.run(["git", *a], cwd=root, capture_output=True,
+                              text=True, timeout=15)
+    try:
+        head = _git("rev-parse", "HEAD")
+        if head.returncode != 0:
+            return {"vcs": "not_a_git_repo",
+                    "note": f"git rev-parse 失败：{head.stderr.strip()[:200]}"}
+        branch = _git("rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+        status = _git("status", "--porcelain")
+        dirty_files = [l.strip() for l in status.stdout.splitlines() if l.strip()]
+        return {"vcs": "git",
+                "commit": head.stdout.strip(),
+                "branch": branch or None,
+                "dirty": bool(dirty_files),
+                "dirty_file_count": len(dirty_files),
+                "dirty_files_sample": dirty_files[:20]}
+    except (OSError, subprocess.SubprocessError) as e:
+        return {"vcs": "git_unavailable", "note": f"git 不可用：{e}"}
+
+
+def _atomic_write_json(payload: dict, path) -> Path:
+    """JSON 原子落盘（tmp → replace）+ 仓库守卫。半成品不留盘。"""
+    out = refuse_in_repo(path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    tmp = out.with_name(out.name + ".tmp")
+    try:
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, ensure_ascii=False, indent=2)
+            fh.write("\n")
+        tmp.replace(out)
+    finally:
+        tmp.unlink(missing_ok=True)
+    return out
+
+
+def write_completion_manifest(run_dir, *, run_id: str, input_sha256: str,
+                              code: dict, artifacts: dict) -> Path:
+    """全部产物成功后才写完成清单：逐件 sha256 + 输入哈希 + 代码出处。
+
+    没有这份清单的 run 目录 = 未完成（失败/中断），里面的文件不得当
+    交付证据用。列出的产物必须真实存在——清单不许替不存在的文件背书。
+    """
+    files = {}
+    for name, p in artifacts.items():
+        p = Path(p)
+        if not p.exists():
+            raise FileNotFoundError(f"完成清单拒绝列不存在的产物: {name} → {p}")
+        files[name] = {"path": p.name, "bytes": p.stat().st_size,
+                       "sha256": sha256_of(p)}
+    payload = {
+        "schema": MANIFEST_SCHEMA,
+        "run_id": run_id,
+        "status": "complete",
+        "completed_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "input_sha256": input_sha256,
+        "code": code,
+        "files": files,
+        "note": "本清单只在本次运行全部产物成功写出后生成；没有清单的 run 目录"
+                "视为未完成，其中的文件不得当作交付证据",
+    }
+    return _atomic_write_json(payload, Path(run_dir) / MANIFEST_NAME)
 
 
 def manifest_lookup(manifest_path, sha: str) -> dict | None:
@@ -192,7 +298,8 @@ def build_record(*, source: dict, time_base: dict, clock_ledger: dict,
                  window: dict, coverage: dict, sampling: dict,
                  geometry_confirmation: dict,
                  cups: list[dict], manifest: dict | None,
-                 limits: list[str]) -> dict:
+                 limits: list[str],
+                 provenance: dict, research_params: dict) -> dict:
     return {
         "schema_version": SCHEMA_VERSION,
         "purpose": PURPOSE,
@@ -206,6 +313,9 @@ def build_record(*, source: dict, time_base: dict, clock_ledger: dict,
         # R2-115 T1：抽样口径与实际消费的帧号（计数是抽样记录数，不是连续帧数）
         "sampling": sampling,
         "geometry_confirmation": geometry_confirmation,
+        # R2-115 P组：run 标识、代码 SHA/dirty、实际命令行、研究参数与起点值出处
+        "provenance": provenance,
+        "research_params": research_params,
         "cups": cups,
         "must_not_enter_acceptance_paths": True,
         "limits": limits,
@@ -213,15 +323,13 @@ def build_record(*, source: dict, time_base: dict, clock_ledger: dict,
 
 
 def write_record(record: dict, path) -> Path:
-    """原子落盘 + 仓库外守卫。半成品记录不许留在磁盘上被人当结论读。"""
+    """原子落盘 + 仓库外守卫 + **拒绝覆盖已有证据**（R2-115 P组）。
+
+    半成品记录不许留在磁盘上被人当结论读；旧记录是上一轮的证据，
+    不是草稿——新一轮运行请开新的 run 目录，而不是覆盖它。
+    """
     out = refuse_in_repo(path)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    tmp = out.with_name(out.name + ".tmp")
-    try:
-        with open(tmp, "w", encoding="utf-8") as fh:
-            json.dump(record, fh, ensure_ascii=False, indent=2)
-            fh.write("\n")
-        tmp.replace(out)
-    finally:
-        tmp.unlink(missing_ok=True)
-    return out
+    if out.exists():
+        raise FileExistsError(
+            f"拒绝覆盖已有研究证据: {out}（新一轮运行请写新的 run 目录）")
+    return _atomic_write_json(record, out)
