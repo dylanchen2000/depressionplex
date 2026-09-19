@@ -183,11 +183,23 @@ class GeometryEnvelope:
                     break
 
         if self.assay == "FST" and self.by_role(ROLE_WATER_SURFACE):
-            wy = self.water_surface_y()
+            # FST 真实素材是一帧多杯（DP-136）：tank 与 water_surface 按同号
+            # 配对检查。单实例旧素材两边都是 instance=1，行为与旧版一致。
+            lines = self.by_role(ROLE_WATER_SURFACE)
             for tank in self.by_role(ROLE_TANK):
+                matched = [p for p in lines if p.instance == tank.instance]
+                if not matched:
+                    problems.append(
+                        f"{tank.key} 缺同号 water_surface（多杯时水线不共用）")
+                    continue
                 ys = [y for _, y in tank.coords]
-                if not (min(ys) < wy < max(ys)):
-                    problems.append(f"水面线 y={wy:.1f} 不在 {tank.key} 垂直范围内")
+                for line in matched:
+                    wy = sum(y for _, y in line.coords) / len(line.coords)
+                    # 闭区间：水线取自水体外边界时恰好压在 tank 顶边上
+                    # （DP-136 提案就是这种派生关系），压边不算"在范围外"。
+                    if not (min(ys) <= wy <= max(ys)):
+                        problems.append(
+                            f"水面线 y={wy:.1f} 不在 {tank.key} 垂直范围内")
 
         unconfirmed = [p.key for p in self.primitives if not p.confirmed]
         if unconfirmed:

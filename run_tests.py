@@ -34,6 +34,11 @@ TEST_MODULES = ("test_bouts", "test_rad", "test_geometry", "test_segment",
                 "test_report_model",
                 "test_export",
                 "test_timer_tool_contract",
+                # DP-136 FST 独立研究入口（Spec A §4-§6）
+                "test_fst_isolation", "test_fst_timeline",
+                "test_fst_geometry", "test_fst_perception",
+                "test_fst_features", "test_fst_overlay",
+                "test_fst_record", "test_fst_cli",
                 # 元守卫：新增 tests/test_*.py 必须同时进这张表，否则此测试变红
                 "test_run_tests_registry")
 
