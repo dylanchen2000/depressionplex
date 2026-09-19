@@ -596,3 +596,103 @@ def test_confirmation_payload_prefills_binding() -> None:
     # 不再指示手改本文件；改走确认表 + 构建脚本，并允许「无法确认」
     assert "改本文件" not in ins and "不要手工编辑" in ins
     assert "确认表" in ins and "构建脚本" in ins and "无法确认" in ins
+
+
+# ---------------------------------------------------------------------------
+# R4-115：确认件机器可读身份 confirmation_kind（工程对照 ≠ 真人确认）
+# ---------------------------------------------------------------------------
+
+def test_confirmation_kind_default_human() -> None:
+    """默认产出的确认件身份是 human（真人确认流程模板）。"""
+    env = _confirmed_multi_env(n=2, confirmed=False)
+    payload = cg.confirmation_payload(env, video_sha256=_SHA, video_bytes=99,
+                                      width=220, height=120, cup_ids=[1, 2])
+    assert payload["binding"]["confirmation_kind"] == cg.CONFIRMATION_KIND_HUMAN
+
+
+def test_confirmation_kind_engineering_control_written() -> None:
+    """构建器产同坐标对照件时传 engineering_control，机器可读地落进 binding。"""
+    env = _confirmed_multi_env(n=2, confirmed=False)
+    payload = cg.confirmation_payload(
+        env, video_sha256=_SHA, video_bytes=99, width=220, height=120,
+        cup_ids=[1, 2], confirmation_kind=cg.CONFIRMATION_KIND_ENGINEERING_CONTROL)
+    assert (payload["binding"]["confirmation_kind"]
+            == cg.CONFIRMATION_KIND_ENGINEERING_CONTROL)
+
+
+def test_confirmation_payload_rejects_invalid_kind() -> None:
+    """非法 kind 直接拒绝——不许造出身份含糊的确认件。"""
+    env = _confirmed_multi_env(n=2, confirmed=False)
+    try:
+        cg.confirmation_payload(env, video_sha256=_SHA, video_bytes=99,
+                                width=220, height=120, cup_ids=[1, 2],
+                                confirmation_kind="probably_human")
+    except ValueError as e:
+        assert "confirmation_kind" in str(e)
+    else:
+        raise AssertionError("非法 confirmation_kind 居然通过了")
+
+
+def test_is_human_confirmation_only_counts_human() -> None:
+    """真人确认数量只数 kind==human；工程对照/缺失/非法都不算（不能只靠中文说明）。"""
+    assert cg.is_human_confirmation({"confirmation_kind": "human"}) is True
+    assert cg.is_human_confirmation(
+        {"confirmation_kind": "engineering_control"}) is False
+    assert cg.is_human_confirmation({}) is False                 # 缺失
+    assert cg.is_human_confirmation(None) is False               # 无 binding
+    # confirmed_by 里写「人工确认」也不顶数——只认机器可读字段
+    assert cg.is_human_confirmation(
+        {"confirmed_by": "人工确认", "confirmation_kind": "engineering_control"}) is False
+
+
+def test_load_confirmed_file_engineering_control_roundtrip() -> None:
+    """工程对照件能加载，但 binding 标 engineering_control 且不计入真人确认。"""
+    env = _confirmed_multi_env(n=2, confirmed=True)
+    with tempfile.TemporaryDirectory() as td:
+        payload = cg.confirmation_payload(
+            env, video_sha256=_SHA, video_bytes=1234, width=220, height=120,
+            cup_ids=[1, 2],
+            confirmation_kind=cg.CONFIRMATION_KIND_ENGINEERING_CONTROL)
+        payload["binding"]["confirmed_by"] = "③同坐标对照-构建器产-非人工几何确认"
+        payload["binding"]["confirmed_at"] = "2026-09-19T00:00:00Z"
+        p = Path(td) / "control.json"
+        p.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        env2, binding, _sha, props = cg.load_confirmed_file(
+            p, video_sha256=_SHA, width=220, height=120, video_bytes=1234)
+    assert env2.confirmed is True and len(props) == 2            # 照常可回灌
+    assert binding["confirmation_kind"] == "engineering_control"
+    assert cg.is_human_confirmation(binding) is False            # 不计入真人确认
+
+
+def test_load_confirmed_file_rejects_invalid_kind() -> None:
+    """binding.confirmation_kind 出现非法值 ⇒ 拒绝加载。"""
+    env = _confirmed_multi_env(n=2, confirmed=True)
+    with tempfile.TemporaryDirectory() as td:
+        payload = cg.confirmation_payload(env, video_sha256=_SHA, video_bytes=1234,
+                                          width=220, height=120, cup_ids=[1, 2])
+        payload["binding"]["confirmation_kind"] = "半确认"
+        payload["binding"]["confirmed_by"] = "tester"
+        payload["binding"]["confirmed_at"] = "2026-09-19T00:00:00Z"
+        p = Path(td) / "bad_kind.json"
+        p.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        try:
+            cg.load_confirmed_file(p, video_sha256=_SHA, width=220, height=120)
+        except ValueError as e:
+            assert "confirmation_kind" in str(e)
+        else:
+            raise AssertionError("非法 confirmation_kind 的确认件居然通过了")
+
+
+def test_load_confirmed_file_missing_kind_backward_compat() -> None:
+    """旧对照件没有 confirmation_kind 字段：仍可加载（保留原始成果），但不算真人确认。"""
+    env = _confirmed_multi_env(n=2, confirmed=True)
+    with tempfile.TemporaryDirectory() as td:
+        p = _write_confirmed(Path(td), env)      # 默认写 human
+        doc = json.loads(p.read_text(encoding="utf-8"))
+        del doc["binding"]["confirmation_kind"]  # 模拟旧文件缺字段
+        p.write_text(json.dumps(doc, ensure_ascii=False), encoding="utf-8")
+        env2, binding, _sha, _props = cg.load_confirmed_file(
+            p, video_sha256=_SHA, width=220, height=120, video_bytes=1234)
+    assert env2.confirmed is True
+    assert "confirmation_kind" not in binding
+    assert cg.is_human_confirmation(binding) is False

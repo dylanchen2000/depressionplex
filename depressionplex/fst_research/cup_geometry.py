@@ -77,6 +77,19 @@ ROI_ABOVE_WATER_MARGIN_PX = 30
 #: 人工确认件 wrapper 的 schema 标记（G4）。
 CONFIRMED_SCHEMA = "fst-confirmed-geometry-v1"
 
+#: R4-115：确认件身份的**机器可读**标记（binding.confirmation_kind）。
+#: 工程对照（构建器产的同坐标对照件）必须标 engineering_control——不许只靠
+#: confirmed_by 中文说明区分，更不许计入真人确认数量；缺省/其它值一律按
+#: 「非真人确认」对待（is_human_confirmation 只认 human）。
+CONFIRMATION_KIND_HUMAN = "human"
+CONFIRMATION_KIND_ENGINEERING_CONTROL = "engineering_control"
+CONFIRMATION_KINDS = (CONFIRMATION_KIND_HUMAN, CONFIRMATION_KIND_ENGINEERING_CONTROL)
+
+
+def is_human_confirmation(binding: dict | None) -> bool:
+    """真人确认数量只数这个为 True 的：kind 缺失/工程对照/非法值都不算。"""
+    return (binding or {}).get("confirmation_kind") == CONFIRMATION_KIND_HUMAN
+
 
 @dataclass(frozen=True)
 class CupProposal:
@@ -378,12 +391,20 @@ def bind_declared_empty(cup_ids: list[int], declared_cup_ids: list[int], *,
 def confirmation_payload(env: geo.GeometryEnvelope, *, video_sha256: str,
                          video_bytes: int, width: int, height: int,
                          cup_ids: list[int],
-                         proposal_context: dict | None = None) -> dict:
+                         proposal_context: dict | None = None,
+                         confirmation_kind: str = CONFIRMATION_KIND_HUMAN) -> dict:
     """生成确认件/提案文件的 wrapper 结构（Agent 生成，人只改几何与确认字段）。
 
     提案态：`envelope.confirmed=False`、`confirmed_by/at` 留空——
     `load_confirmed_file` 会拒绝这种文件当确认件用（半确认比没有更危险）。
+
+    `confirmation_kind`（R4-115）：机器可读身份，写进 binding。默认 human
+    （真人确认流程模板）；构建器产同坐标对照件时传 engineering_control——
+    工程对照不计入真人确认数量（见 is_human_confirmation）。
     """
+    if confirmation_kind not in CONFIRMATION_KINDS:
+        raise ValueError(
+            f"confirmation_kind={confirmation_kind!r} 非法（只允许 {CONFIRMATION_KINDS}）")
     return {
         "schema": CONFIRMED_SCHEMA,
         "status": ("proposal_unconfirmed" if not env.confirmed
@@ -394,6 +415,7 @@ def confirmation_payload(env: geo.GeometryEnvelope, *, video_sha256: str,
             "width": width,
             "height": height,
             "cup_ids": sorted(cup_ids),
+            "confirmation_kind": confirmation_kind,
             "confirmed_by": "",
             "confirmed_at": "",
             "confirmed_basis": "",
@@ -424,6 +446,10 @@ def load_confirmed_file(path, *, video_sha256: str, width: int, height: int,
     1..n；确认人/确认时间为空；envelope 未整体确认或 validate() 有问题
     （含严格水线区间、同号重复、孤儿水线——共享契约原样生效）；tank
     左到右顺序与 instance 升序不一致（物理杯号不许与画面顺序拧着）。
+
+    R4-115：binding.confirmation_kind 若出现必须是 human/engineering_control
+    之一（非法即拒）；缺失可加载但按「非真人确认」对待。返回的 binding 原样
+    带 confirmation_kind，供记录落盘与 is_human_confirmation 判定。
     """
     from pathlib import Path as _P
     p = _P(path)
@@ -436,6 +462,13 @@ def load_confirmed_file(path, *, video_sha256: str, width: int, height: int,
             "裸 envelope JSON 不是 CLI 的合法输入：确认件必须带 binding"
             "（视频 sha256/尺寸/杯号/确认人/确认时间）。")
     binding = doc.get("binding") or {}
+    # R4-115：机器可读身份。允许缺失（旧对照件原样保留仍可加载），但出现的
+    # 值必须合法；工程对照/缺失/非法一律不被 is_human_confirmation 当真人确认。
+    ck = binding.get("confirmation_kind")
+    if ck is not None and ck not in CONFIRMATION_KINDS:
+        raise ValueError(
+            f"{p.name}: binding.confirmation_kind={ck!r} 非法"
+            f"（只允许 {CONFIRMATION_KINDS} 或缺失），拒绝")
     if (binding.get("video_sha256") or "").lower() != video_sha256.lower():
         raise ValueError(
             f"{p.name}: binding.video_sha256 与本视频不符——确认件绑定的不是这段素材，拒绝")

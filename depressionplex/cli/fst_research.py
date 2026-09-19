@@ -743,6 +743,10 @@ def _geometry_confirmation(*, geo_source, confirmed, env_problems, geo_problems,
     out = {
         "confirmed": confirmed,
         "source": geo_source,
+        # R4-115：机器可读身份单列——工程对照件标 engineering_control，
+        # 缺失/工程对照都不计入真人确认数量（cg.is_human_confirmation 只认 human）。
+        "confirmation_kind": (geo_binding or {}).get("confirmation_kind"),
+        "counts_as_human_confirmation": cg.is_human_confirmation(geo_binding),
         "validate_problems": list(env_problems),
         "proposal_problems": list(geo_problems),
         "geometry_file": str(geometry_path) if geometry_path else None,
