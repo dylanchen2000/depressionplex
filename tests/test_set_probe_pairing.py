@@ -522,6 +522,21 @@ def test_work_order_records_by_real_group_titles_not_left_right() -> None:
         assert dp135.PAIR_PANEL_MAP[(5, 6)]["unit_verified"] is False
 
 
+def test_merge_bouts_unit_is_evidence_conflicted_not_verified() -> None:
+    """R2-113：字段名里有 Bouts ≠ 单位是段数。
+
+    既有逆向证据按**帧**解释 merge（全量验证报告 §3.3），与名字暗示的段数
+    冲突 ⇒ 必须保持 unit_verified=False 的证据分级待确认，面板原文保留，
+    运行级验证完成前两种读法都不许当已证实。
+    """
+    spec = dp135.PAIR_PANEL_MAP[(8, 11)]
+    assert spec["panel_row_label"] == "Merge Bouts Limit"   # 面板原文不动
+    assert spec["unit_verified"] is False, "名字不是单位证据：不许标已验证"
+    assert "证据冲突" in spec["unit"]
+    assert "帧" in spec["unit"] and "段数" in spec["unit"]  # 两种读法都在场
+    assert "不许当已证实" in spec["unit"]
+
+
 def test_provenance_carries_the_actual_pair_facts() -> None:
     """实际值、原值、面板真实标题、单位确认状态都要进来源记录。"""
     with tempfile.TemporaryDirectory() as d:

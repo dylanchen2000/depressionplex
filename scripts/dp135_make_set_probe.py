@@ -136,8 +136,16 @@ PAIR_PANEL_MAP: dict[tuple[int, int], dict] = {
         "panel_row_label": "Merge Bouts Limit",
         "panel_group_high_convention": "Struggle/Escape/Climb Settings",
         "panel_group_low_convention": "Float/Immobile Settings",
-        "unit": "段数（bouts）",
-        "unit_verified": True,
+        # 二轮复核 R2-113：不许因字段名里有 Bouts 就当段数。面板行标题没带
+        # 单位；既有逆向证据反而按**帧**解释（全量验证报告 2026-09-10 §3.3：
+        # 「逆向已确认 min/noise/merge 在后处理器中以帧数使用」⇒ 20 @25 fps
+        # ≈ 0.80 s；备忘 §7.4 同口径）。名字不是单位证据 ⇒ 证据冲突、
+        # 运行未验证，降为待确认；不加大实验、不改冻结参数。
+        "unit": ("面板未标注单位。证据冲突待确认：字段名 Bouts 暗示段数，"
+                 "但逆向报告（全量验证 §3.3）确认 min/noise/merge 在后处理器"
+                 "中以帧数使用（20 @25 fps ≈ 0.80 s）；运行级验证未完成前"
+                 "两种读法都不许当已证实"),
+        "unit_verified": False,
         "observed_template_values": (20, 20),
         "recorded_default": (22, 35),
     },
