@@ -630,10 +630,32 @@ def test_expected_template_sha_is_verified_strictly() -> None:
         assert r.returncode != 0 and "不符" in (r.stdout + r.stderr)
         assert not (d / "bad.SET").exists()
 
+        # --require-registered 的拒绝/放行必须由**受控清单**决定，不依赖仓库里
+        # docs/共用输入身份清单_v1.csv 的在场状态。旧写法没传 --manifest：
+        # 单独分支上清单不在 ⇒ 必拒，看似成立；与 DP-133（#112）整合后清单
+        # 进仓库、且本 fixture 的 sha 真登记在里面（repo_fixture 行）⇒
+        # 探针按设计放行，断言假红（2026-09-19 整合实测）。
+        empty_dir = d / "m_empty"
+        empty_dir.mkdir()
+        empty_m = _fake_manifest(empty_dir, [])
         r = _run(PROBE_SCRIPT, "--template", str(TEMPLATE),
-                 "--out", str(d / "req.SET"), "--require-registered")
+                 "--out", str(d / "req.SET"), "--require-registered",
+                 "--manifest", str(empty_m))
         assert r.returncode != 0 and "require-registered" in (r.stdout + r.stderr)
         assert not (d / "req.SET").exists()
+
+        # 正向：清单点名了这份字节 ⇒ --require-registered 放行（行为对称钉住，
+        # 防止将来把守卫改成"永远拒"也能绿）。
+        reg_dir = d / "m_reg"
+        reg_dir.mkdir()
+        reg_m = _fake_manifest(reg_dir, [
+            {"material_id": "repo_fixture:na:10mg 2周.SET",
+             "path": str(TEMPLATE), "sha256": sha}])
+        r = _run(PROBE_SCRIPT, "--template", str(TEMPLATE),
+                 "--out", str(d / "req_ok.SET"), "--require-registered",
+                 "--manifest", str(reg_m))
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert (d / "req_ok.SET").exists()
 
 
 def test_output_may_not_land_beside_or_inside_the_template_dir() -> None:
