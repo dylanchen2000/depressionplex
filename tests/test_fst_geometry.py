@@ -413,6 +413,18 @@ def test_bind_declared_empty_unknown_cup_raises() -> None:
         raise AssertionError("申报不存在的杯号居然没报错")
 
 
+def test_bind_declared_empty_unresolved_note_not_applied() -> None:
+    """R3-115 ①：通道申报无映射证据 ⇒ 映射未决、不应用，注记进 problems。"""
+    b = cg.bind_declared_empty([1, 2, 3, 4], [], expected_n=4,
+                               unresolved_note="通道申报 [4] 映射未决：本次不应用")
+    assert b.status == cg.BIND_MAPPING_UNRESOLVED
+    assert b.applied == ()
+    assert len(b.problems) == 1 and "不应用" in b.problems[0]
+    # 没有注记的空申报仍然是"没申报"，不是"未决"
+    n = cg.bind_declared_empty([1, 2], [], expected_n=2)
+    assert n.status == cg.BIND_NONE and n.problems == ()
+
+
 def test_bind_declared_empty_none_is_noop() -> None:
     b = cg.bind_declared_empty([1, 2, 3, 4], [], expected_n=4)
     assert b.status == cg.BIND_NONE and b.applied == ()

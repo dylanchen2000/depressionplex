@@ -220,6 +220,118 @@ def test_cli_declared_empty_exit0_semantics() -> None:
         assert r["research_params"]["declared_empty_requested"] == [2]
 
 
+def _binding(r: dict) -> dict:
+    return r["geometry_confirmation"]["declared_empty_binding"]
+
+
+def test_cli_declared_empty_channel_unresolved_not_applied() -> None:
+    """R3-115 ①：通道申报没有映射+证据 ⇒ 映射未决，本次不应用（不猜 ch=杯）。"""
+    if not _ffmpeg_ok():
+        print("  SKIP  test_cli_declared_empty_channel_unresolved_not_applied（无 ffmpeg）")
+        return
+    scene = fst_synth.Scene(cups=2)
+    frames = scene.swim_series(20, cup=0)
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        vid = _encode(frames, tmp / "synth_ch_unres.mp4")
+        out = tmp / "diag"
+        rc = _run([str(vid), "--out-dir", str(out), "--cups", "2",
+                   "--step", "2", "--calib", "6", "--clip", "3",
+                   "--declared-empty-channel", "2"])
+        assert rc == 0                             # 申报未应用 ≠ 运行失败
+        r = _record(out, "synth_ch_unres")
+        b = _binding(r)
+        assert b["status"] == "mapping_unresolved"
+        assert b["applied_cup_ids"] == []          # 没有落到任何物理杯
+        assert any("不应用" in p for p in b["problems"])
+        # applied 的词义钉死：只是"程序执行了申报"，不是"映射已验证"
+        assert "applied 只说明程序" in b["semantics"]
+        assert "没有落到任何物理杯" in b["semantics"]
+        decl = b["declaration"]
+        assert decl["kind"] == "channel"
+        assert decl["declared_channels"] == [2]    # 申报本身照实记录
+        assert decl["mapping_verified"] is False
+        # 杯 2 没被标空杯：照真实感知走
+        cup1 = r["cups"][1]
+        assert cup1["declared_absent"] is False
+        assert cup1["behavior_seconds_semantics"] != "empty_no_output"
+        rp = r["research_params"]
+        assert rp["declared_empty_channel_requested"] == [2]
+        assert rp["declared_empty_requested"] == []
+
+
+def test_cli_declared_empty_channel_with_mapping_and_evidence_applied() -> None:
+    """R3-115 ①：通道申报 + 映射 + 证据串齐全 ⇒ 按物理杯应用，语义与物理路一致。"""
+    if not _ffmpeg_ok():
+        print("  SKIP  test_cli_declared_empty_channel_with_mapping_and_evidence_applied（无 ffmpeg）")
+        return
+    scene = fst_synth.Scene(cups=2)
+    frames = scene.swim_series(20, cup=0)          # 杯 2 始终没动物
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        vid = _encode(frames, tmp / "synth_ch_ok.mp4")
+        out = tmp / "diag"
+        rc = _run([str(vid), "--out-dir", str(out), "--cups", "2",
+                   "--step", "2", "--calib", "6", "--clip", "3",
+                   "--declared-empty-channel", "2",
+                   "--channel-cup-mapping", "2=2",
+                   "--mapping-evidence", "测试用假想依据：合成场景通道即杯位"])
+        assert rc == 0
+        r = _record(out, "synth_ch_ok")
+        b = _binding(r)
+        assert b["status"] == "applied"
+        assert b["applied_cup_ids"] == [2]
+        assert b["declaration"]["mapping_verified"] is True
+        assert b["declaration"]["channel_cup_mapping"] == {"2": 2}
+        cup1 = r["cups"][1]
+        assert cup1["declared_absent"] is True
+        assert cup1["behavior_seconds_semantics"] == "empty_no_output"
+        assert r["research_params"]["mapping_evidence"].startswith("测试用假想依据")
+
+
+def test_cli_channel_mapping_without_evidence_stays_unresolved() -> None:
+    """R3-115 ①：给了映射但没给依据串 ⇒ 映射仍是假设，未决、不应用。"""
+    if not _ffmpeg_ok():
+        print("  SKIP  test_cli_channel_mapping_without_evidence_stays_unresolved（无 ffmpeg）")
+        return
+    scene = fst_synth.Scene(cups=2)
+    frames = scene.swim_series(20, cup=0)
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        vid = _encode(frames, tmp / "synth_ch_noev.mp4")
+        out = tmp / "diag"
+        rc = _run([str(vid), "--out-dir", str(out), "--cups", "2",
+                   "--step", "2", "--calib", "6", "--clip", "3",
+                   "--declared-empty-channel", "2",
+                   "--channel-cup-mapping", "2=2"])
+        assert rc == 0
+        r = _record(out, "synth_ch_noev")
+        b = _binding(r)
+        assert b["status"] == "mapping_unresolved"
+        assert b["applied_cup_ids"] == []
+        assert b["declaration"]["mapping_verified"] is False
+        assert any("mapping-evidence" in p or "依据" in p for p in b["problems"])
+        assert r["cups"][1]["declared_absent"] is False
+
+
+def test_cli_declared_empty_both_routes_refused() -> None:
+    """R3-115 ①：物理杯号与通道号同时给 ⇒ 用法拒绝（rc 2），不建 run 目录。"""
+    if not _ffmpeg_ok():
+        print("  SKIP  test_cli_declared_empty_both_routes_refused（无 ffmpeg）")
+        return
+    scene = fst_synth.Scene(cups=2)
+    frames = scene.swim_series(12, cup=0)
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        vid = _encode(frames, tmp / "synth_ch_both.mp4")
+        out = tmp / "diag"
+        rc = _run([str(vid), "--out-dir", str(out), "--cups", "2",
+                   "--step", "2", "--calib", "6", "--clip", "3",
+                   "--declared-empty", "2", "--declared-empty-channel", "2"])
+        assert rc == 2
+        assert not out.exists() or not _run_dirs(out, "synth_ch_both")
+
+
 def test_cli_nothing_visible_exit3_record_still_written() -> None:
     if not _ffmpeg_ok():
         print("  SKIP  test_cli_nothing_visible_exit3_record_still_written（无 ffmpeg）")

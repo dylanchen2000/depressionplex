@@ -76,7 +76,8 @@ def test_cup_record_refuses_nonclosing_partition() -> None:
     diags = _mixed() + [_diag(9, "not_a_quality")]       # 状态机漏分支
     try:
         rec.cup_record(cup_index=0, diags=diags, fps=25.0, declared_absent=False,
-                       geometry={}, features_summary={}, spatial_scale_px=10.0)
+                       geometry={}, features_summary={}, spatial_scale_px=10.0,
+                       analysis_end_frames=100)
     except ValueError as e:
         assert "分区不闭合" in str(e)
     else:
@@ -88,7 +89,8 @@ def test_cup_record_empty_vs_no_window_semantics() -> None:
     declared = [_diag(i, QUALITY_DECLARED_ABSENT,
                       ("人工申报空杯：结果为空，不输出 0 秒",)) for i in range(4)]
     r = rec.cup_record(cup_index=1, diags=declared, fps=2.0, declared_absent=True,
-                       geometry=geo, features_summary={}, spatial_scale_px=77.0)
+                       geometry=geo, features_summary={}, spatial_scale_px=77.0,
+                       analysis_end_frames=100)
     assert r["behavior_seconds"] is None                 # 不是 0！
     assert r["behavior_seconds_semantics"] == rec.BEHAVIOR_SECONDS_EMPTY
     assert r["sampled_frames"] == 4
@@ -99,7 +101,8 @@ def test_cup_record_empty_vs_no_window_semantics() -> None:
     assert "0 秒" in r["time_weighting"]["reason"]
 
     r2 = rec.cup_record(cup_index=0, diags=_mixed(), fps=2.0, declared_absent=False,
-                        geometry=geo, features_summary={}, spatial_scale_px=77.0)
+                        geometry=geo, features_summary={}, spatial_scale_px=77.0,
+                        analysis_end_frames=201)          # _mixed() 末抽样帧 = 200
     assert r2["behavior_seconds"] is None
     assert r2["behavior_seconds_semantics"] == rec.BEHAVIOR_SECONDS_NO_WINDOW
     assert r2["behavior_seconds_semantics"] != r["behavior_seconds_semantics"]
@@ -112,20 +115,46 @@ def test_cup_record_empty_vs_no_window_semantics() -> None:
 # ---------------------------------------------------------------------------
 
 def test_time_weighted_interval_weights_and_tail() -> None:
-    """权重 = 实际源帧号差 / fps；尾记录按一个步长假设计（写明在 provenance）。"""
+    """权重 = 实际源帧号差 / fps；尾区间 = min(步长, 末端剩余)，写明在 provenance。"""
     diags = [_diag(0, QUALITY_OBSERVED), _diag(5, QUALITY_UNCLEAR),
              _diag(10, QUALITY_LOST_SHORT)]
     out = rec.time_weighted_seconds(diags, fps=25.0, tail_spacing_frames=5,
-                                    declared_absent=False)
+                                    declared_absent=False, analysis_end_frames=15)
     s = out["seconds"]
     assert abs(s[QUALITY_OBSERVED] - 0.2) < 1e-12   # 帧 0→5 = 5 帧 / 25
     assert abs(s[QUALITY_UNCLEAR] - 0.2) < 1e-12    # 帧 5→10
-    assert abs(s[QUALITY_LOST_SHORT] - 0.2) < 1e-12  # 尾 = 步长 5 帧（假设）
+    assert abs(s[QUALITY_LOST_SHORT] - 0.2) < 1e-12  # 尾 = min(5, 15-10) = 5 帧
     prov = out["provenance"]
     assert prov["computed"] is True
     assert "帧号差" in prov["method"]
-    assert "假设" in prov["tail_handling"] and "5" in prov["tail_handling"]
+    assert "不超过" in prov["tail_handling"] and "5 帧" in prov["tail_handling"]
     assert "不是连续逐帧统计" in prov["note"]
+
+
+def test_time_weighted_tail_clamped_when_frames_not_divisible_by_step() -> None:
+    """R3-115 ②：总帧数不整除 step ⇒ 尾区间按末端剩余帧计，不许越过分析末端。"""
+    diags = [_diag(f, QUALITY_OBSERVED) for f in (0, 5, 10, 15, 20)]  # 23 帧 @ step 5
+    out = rec.time_weighted_seconds(diags, fps=25.0, tail_spacing_frames=5,
+                                    declared_absent=False, analysis_end_frames=23)
+    s = out["seconds"]
+    # 4 个整步长区间 (4×5) + 尾区间 3 帧 (23-20) = 23 帧 = 整条视频，一帧不溢
+    assert abs(s[QUALITY_OBSERVED] - 23 / 25.0) < 1e-12
+    prov = out["provenance"]
+    assert "不超过" in prov["tail_handling"]
+    assert "23" in prov["tail_handling"] and "3 帧" in prov["tail_handling"]
+    # 分析末端 = 末抽样帧或更早 ⇒ 拒（尾区间不能是空的或倒的）
+    for end in (20, 19):
+        try:
+            rec.time_weighted_seconds(diags, fps=25.0, tail_spacing_frames=5,
+                                      declared_absent=False, analysis_end_frames=end)
+        except ValueError as e:
+            assert "分析末端" in str(e)
+        else:
+            raise AssertionError(f"分析末端 {end} 没被拒绝")
+    # 末端只比末抽样帧晚 1 帧 ⇒ 尾区间 1 帧，不补整步长
+    one = rec.time_weighted_seconds(diags, fps=25.0, tail_spacing_frames=5,
+                                    declared_absent=False, analysis_end_frames=21)
+    assert abs(one["seconds"][QUALITY_OBSERVED] - 21 / 25.0) < 1e-12
 
 
 def test_time_weighted_uneven_intervals_not_averaged() -> None:
@@ -133,17 +162,19 @@ def test_time_weighted_uneven_intervals_not_averaged() -> None:
     diags = [_diag(0, QUALITY_OBSERVED), _diag(2, QUALITY_OBSERVED),
              _diag(52, QUALITY_OBSERVED)]      # 中间隔了 50 帧的缺口段
     s = rec.time_weighted_seconds(diags, fps=25.0, tail_spacing_frames=2,
-                                  declared_absent=False)["seconds"]
+                                  declared_absent=False,
+                                  analysis_end_frames=54)["seconds"]
     assert abs(s[QUALITY_OBSERVED] - (2 + 50 + 2) / 25.0) < 1e-12
 
 
 def test_time_weighted_empty_and_declared_are_none_not_zero() -> None:
     empty = rec.time_weighted_seconds([], fps=25.0, tail_spacing_frames=5,
-                                      declared_absent=False)
+                                      declared_absent=False, analysis_end_frames=10)
     assert all(v is None for v in empty["seconds"].values())
     assert "为空" in empty["provenance"]["reason"]
     dec = rec.time_weighted_seconds([_diag(0, QUALITY_OBSERVED)], fps=25.0,
-                                    tail_spacing_frames=5, declared_absent=True)
+                                    tail_spacing_frames=5, declared_absent=True,
+                                    analysis_end_frames=10)
     assert all(v is None for v in dec["seconds"].values())
 
 
@@ -153,7 +184,8 @@ def test_time_weighted_rejects_bad_input() -> None:
                dict(fps=-1.0, tail_spacing_frames=5),
                dict(fps=25.0, tail_spacing_frames=0)):
         try:
-            rec.time_weighted_seconds(d, declared_absent=False, **kw)
+            rec.time_weighted_seconds(d, declared_absent=False,
+                                      analysis_end_frames=10, **kw)
         except ValueError:
             pass
         else:
@@ -162,7 +194,7 @@ def test_time_weighted_rejects_bad_input() -> None:
     bad = [_diag(5, QUALITY_OBSERVED), _diag(5, QUALITY_UNCLEAR)]
     try:
         rec.time_weighted_seconds(bad, fps=25.0, tail_spacing_frames=1,
-                                  declared_absent=False)
+                                  declared_absent=False, analysis_end_frames=10)
     except ValueError as e:
         assert "递增" in str(e)
     else:
@@ -171,7 +203,8 @@ def test_time_weighted_rejects_bad_input() -> None:
 
 def test_cup_record_motion_classification_not_performed() -> None:
     r = rec.cup_record(cup_index=0, diags=_mixed(), fps=25.0, declared_absent=False,
-                       geometry={}, features_summary={}, spatial_scale_px=10.0)
+                       geometry={}, features_summary={}, spatial_scale_px=10.0,
+                       analysis_end_frames=201)           # _mixed() 末抽样帧 = 200
     assert r["motion_classification"]["performed"] is False
     assert "科学口径" in r["motion_classification"]["reason"]
     assert r["partition_problems"] == []

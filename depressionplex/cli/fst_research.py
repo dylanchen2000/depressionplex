@@ -81,8 +81,8 @@ EXIT_ARTIFACT = 4
 MAX_REASON_ROWS = 500
 
 
-def _parse_cup_ids(text: str) -> list[int]:
-    """解析 `--declared-empty`：返回**物理杯号**（1 起），不减 1、不当下标。
+def _parse_cup_ids(text: str, flag: str = "--declared-empty") -> list[int]:
+    """解析杯号列表：返回**物理杯号**（1 起），不减 1、不当下标。
 
     R2-115 G3：杯号到 cup 的绑定发生在 `cup_geometry.bind_declared_empty`
     （数目有歧义即拒绝应用），这里只做语法解析。
@@ -96,9 +96,41 @@ def _parse_cup_ids(text: str) -> list[int]:
             continue
         v = int(part)
         if v < 1:
-            raise ValueError(f"--declared-empty 的杯号从 1 起：{v}")
+            raise ValueError(f"{flag} 的杯号从 1 起：{v}")
         out.append(v)
     return sorted(set(out))
+
+
+def _parse_channel_mapping(text: str) -> dict[int, int]:
+    """解析 `--channel-cup-mapping`：`通道=物理杯,...`（R3-115 ①）。
+
+    通道号是评分员清单里的记载形态，物理杯号是画面左到右 1 起。两者之间的
+    对应是**需要证据的事实**，不是约定：映射 + 证据串齐了才许把通道申报换算
+    成物理杯申报，缺一就保持映射未决（见 main 里的处理）。
+    """
+    out: dict[int, int] = {}
+    for part in text.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        lhs, sep, rhs = part.partition("=")
+        if not sep:
+            raise ValueError(
+                f"--channel-cup-mapping 的格式是 通道=物理杯：{part!r}")
+        ch, cup = int(lhs), int(rhs)
+        if ch < 1 or cup < 1:
+            raise ValueError(f"--channel-cup-mapping 的通道/杯号从 1 起：{part!r}")
+        if ch in out and out[ch] != cup:
+            raise ValueError(f"通道 {ch} 被映到两个物理杯：{out[ch]} 与 {cup}")
+        out[ch] = cup
+    return out
+
+
+#: 记录里 declared_empty_binding 的语义注（R3-115 ①）：applied 的词义钉死。
+DECLARATION_SEMANTICS = (
+    "applied 只说明程序按给定的物理杯号/映射执行了申报；映射是否成立看 "
+    "declaration.mapping_verified 与证据串。status=mapping_unresolved 或 "
+    "mapping_verified=False 时申报没有落到任何物理杯上，相关杯保持未决。")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -115,7 +147,18 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--calib", type=int, default=40, help="背景/几何标定的抽帧数")
     ap.add_argument("--declared-empty", default="",
                     help="人工申报的空杯号（**物理杯号**，1 起，逗号分隔，按画面左到右）。"
-                         "空杯只认申报；杯候选数与 --cups 不符时拒绝应用（绑定有歧义）")
+                         "空杯只认申报；杯候选数与 --cups 不符时拒绝应用（绑定有歧义）。"
+                         "与 --declared-empty-channel 互斥：申报只走一条路")
+    ap.add_argument("--declared-empty-channel", default="",
+                    help="评分员清单记载的**通道号**申报（1 起，逗号分隔）。通道≠物理杯："
+                         "通道↔物理杯映射必须有证据才许换算（--channel-cup-mapping + "
+                         "--mapping-evidence），否则映射未决、本次不应用申报")
+    ap.add_argument("--channel-cup-mapping", default="",
+                    help="通道↔物理杯映射，格式 通道=物理杯,...（例 4=4）。"
+                         "给了映射不给证据串 ⇒ 仍按映射未决处理")
+    ap.add_argument("--mapping-evidence", default="",
+                    help="通道↔物理杯映射的依据字符串（谁、依据什么材料核对的）。"
+                         "映射是事实不是约定：无依据不应用")
     ap.add_argument("--geometry", type=Path, default=None,
                     help="人工确认件（fst-confirmed-geometry-v1 wrapper JSON）。"
                          "给了就跳过自动提案，用确认件的 ROI/水线，并把 binding 与"
@@ -160,11 +203,57 @@ def main(argv: list[str] | None = None) -> int:
               "必须带依据字符串", file=sys.stderr)
         return EXIT_REFUSED
     try:
-        declared = _parse_cup_ids(args.declared_empty)
+        declared_physical = _parse_cup_ids(args.declared_empty)
+        declared_channels = _parse_cup_ids(args.declared_empty_channel,
+                                           "--declared-empty-channel")
+        ch_mapping = _parse_channel_mapping(args.channel_cup_mapping)
         out_dir = ov.refuse_in_repo(args.out_dir)
     except ValueError as e:
         print(f"拒绝：{e}", file=sys.stderr)
         return EXIT_REFUSED
+    if declared_physical and declared_channels:
+        print("拒绝：--declared-empty（物理杯号）与 --declared-empty-channel（通道号）"
+              "同时给——申报只走一条路，一次运行不混两种形态", file=sys.stderr)
+        return EXIT_REFUSED
+    # ---- 通道申报 → 物理杯：映射是事实不是约定（R3-115 ①）----
+    mapping_evidence = args.mapping_evidence.strip() or None
+    de_unresolved_note = None
+    if declared_channels:
+        missing = [ch for ch in declared_channels if ch not in ch_mapping]
+        if missing or mapping_evidence is None:
+            why = []
+            if missing:
+                why.append(f"映射缺通道 {missing}")
+            if mapping_evidence is None:
+                why.append("缺 --mapping-evidence 依据串")
+            de_unresolved_note = (
+                f"通道申报 {declared_channels} 没有可验证的通道↔物理杯映射"
+                f"（{'；'.join(why)}）：本次**不应用**申报，映射保持未决；"
+                "applied（任何记录里）只说明程序执行了申报，不表示映射已验证。")
+            declared: list[int] = []
+            mapping_verified = False
+        else:
+            declared = sorted({ch_mapping[ch] for ch in declared_channels})
+            mapping_verified = True
+        declaration = {
+            "kind": "channel", "declared_channels": declared_channels,
+            "channel_cup_mapping": dict(ch_mapping) or None,
+            "mapping_evidence": mapping_evidence,
+            "mapping_verified": mapping_verified}
+    elif declared_physical:
+        declared = declared_physical
+        declaration = {
+            "kind": "physical_cup", "declared_channels": [],
+            "channel_cup_mapping": dict(ch_mapping) or None,
+            "mapping_evidence": mapping_evidence,
+            "mapping_verified": None}
+    else:
+        declared = []
+        declaration = {
+            "kind": "none", "declared_channels": [],
+            "channel_cup_mapping": dict(ch_mapping) or None,
+            "mapping_evidence": None,
+            "mapping_verified": None}
     # ---- 数值守卫（R2-115 T3）：坏数在写任何文件**之前**拒绝 ----
     if args.step < 1:
         print(f"拒绝：--step 必须 ≥ 1（得到 {args.step}）；步长 0/负会让抽样序列退化",
@@ -262,7 +351,8 @@ def main(argv: list[str] | None = None) -> int:
     # ---- 申报空杯绑物理杯号（G3）：有歧义就拒绝应用，不顺下标漂移 ----
     cup_ids = [p.cup_id for p in props]
     try:
-        de_binding = cg.bind_declared_empty(cup_ids, declared, expected_n=expected_n)
+        de_binding = cg.bind_declared_empty(cup_ids, declared, expected_n=expected_n,
+                                            unresolved_note=de_unresolved_note)
     except ValueError as e:
         print(f"拒绝：{e}", file=sys.stderr)
         return EXIT_REFUSED
@@ -373,6 +463,11 @@ def main(argv: list[str] | None = None) -> int:
             clips[c] = str(w.close())
 
         # ---- 组装记录 ----
+        # R3-115 ②：时间加权的尾区间不许越过分析末端。完整解码 ⇒ 末端 = 视频末；
+        # 截断 ⇒ 末端 = 最后消费帧 + 1（tail 只剩 1 帧也照实计，不补一个整步长）。
+        analysis_end = (info.n_frames
+                        if not consumed or len(consumed) >= len(analyzed)
+                        else consumed[-1] + 1)
         cups_out = []
         any_visible = False
         for p in props:
@@ -399,7 +494,8 @@ def main(argv: list[str] | None = None) -> int:
                           # 它们是给人看的诚实机制，只打在终端上等于没交付。
                           "notes": list(p.notes)},
                 features_summary=feat.summarize(pairs[p.index]),
-                spatial_scale_px=float(p.width_px)))
+                spatial_scale_px=float(p.width_px),
+                analysis_end_frames=analysis_end))
             cups_out[-1]["frame_rows"] = _frame_rows(diags, clip_frames)
             cups_out[-1]["overlay_clip"] = clips.get(p.index)
 
@@ -446,14 +542,18 @@ def main(argv: list[str] | None = None) -> int:
                 geo_source=geo_source, confirmed=(geo_source == "human_confirmed_file"),
                 env_problems=env_problems, geo_problems=geo_problems,
                 geometry_path=args.geometry, geo_file_sha=geo_file_sha,
-                geo_binding=geo_binding, de_binding=de_binding),
+                geo_binding=geo_binding, de_binding=de_binding,
+                declaration=declaration),
             # R2-115 P组：run 标识、代码 SHA/dirty、实际命令行、研究参数与起点值出处
             provenance={"run_id": run_id, "run_dir": str(run_dir),
                         "generated_by": "depressionplex.cli.fst_research",
                         "code": code_prov, "command_line": cmdline},
             research_params=_research_params(args, geo_source=geo_source,
                                              geo_file_sha=geo_file_sha,
-                                             declared=declared, input_sha=sha),
+                                             declared=declared, input_sha=sha,
+                                             declared_channels=declared_channels,
+                                             ch_mapping=dict(ch_mapping) or None,
+                                             mapping_evidence=mapping_evidence),
             cups=cups_out,
             manifest=lookup,
             limits=_limits(args, info, geo_source, de_binding))
@@ -517,6 +617,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"申报空杯（物理杯号）：{list(de_binding.applied)}")
     elif de_binding.status == cg.BIND_REFUSED_AMBIGUOUS:
         print(f"申报空杯**未应用**（绑定有歧义）：请求 {declared}，applied []")
+    elif de_binding.status == cg.BIND_MAPPING_UNRESOLVED:
+        print(f"申报空杯（通道）**未应用**（映射未决）：通道 "
+              f"{declaration['declared_channels']}，applied []")
     for c in cups_out:
         q = c["sampled_state_counts"]     # 抽样记录计数（R2-115 T1），不是连续时长
         g = c["geometry"]
@@ -549,7 +652,9 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _research_params(args, *, geo_source: str, geo_file_sha: str | None,
-                     declared: list[int], input_sha: str) -> dict:
+                     declared: list[int], input_sha: str,
+                     declared_channels: list[int], ch_mapping: dict[int, int] | None,
+                     mapping_evidence: str | None) -> dict:
     """本次运行的**完整研究配置**与起点值出处（R2-115 P组）。
 
     CLI 参数 + 代码起点值（杯几何 min_width / ROI 上留白 / propose_cups
@@ -567,6 +672,10 @@ def _research_params(args, *, geo_source: str, geo_file_sha: str | None,
         # 给了人工确认件时 --cups 不参与（杯号由确认件 binding 核过）
         "cups_expected": None if args.geometry is not None else args.cups,
         "declared_empty_requested": list(declared),
+        # R3-115 ①：通道形态申报与映射证据单列；映射无证据 ⇒ 未决不应用
+        "declared_empty_channel_requested": list(declared_channels),
+        "channel_cup_mapping": ch_mapping,
+        "mapping_evidence": mapping_evidence,
         "dark": args.dark,
         "bright": args.bright,
         "min_area_px": args.min_area,
@@ -594,12 +703,17 @@ def _research_params(args, *, geo_source: str, geo_file_sha: str | None,
                             "分割阈值起点值，换采集条件须重看直方图"),
             "step_frames": (f"CLI --step（默认 5）：抽样步长；"
                             "状态计数是抽样记录口径，不是连续逐帧"),
+            "declared_empty_channel": (
+                "评分员清单的申报形态是通道号；通道↔物理杯是**需要证据的事实**："
+                "--channel-cup-mapping + --mapping-evidence 齐了才换算应用，"
+                "缺一 ⇒ status=mapping_unresolved、本次不应用、映射保持未决"),
         },
     }
 
 
 def _geometry_confirmation(*, geo_source, confirmed, env_problems, geo_problems,
-                           geometry_path, geo_file_sha, geo_binding, de_binding) -> dict:
+                           geometry_path, geo_file_sha, geo_binding, de_binding,
+                           declaration) -> dict:
     """记录里的几何确认段。确认件带 binding + 文件 sha256；提案带问题清单。
 
     R2-115 G4：确认件必须可追溯——谁确认的、什么时候、绑的哪段视频、文件自身
@@ -616,7 +730,10 @@ def _geometry_confirmation(*, geo_source, confirmed, env_problems, geo_problems,
         "declared_empty_binding": {
             "applied_cup_ids": list(de_binding.applied),
             "status": de_binding.status,
-            "problems": list(de_binding.problems)},
+            "problems": list(de_binding.problems),
+            # R3-115 ①：申报形态/通道/映射/证据单列；applied 的词义钉死在 semantics
+            "declaration": declaration,
+            "semantics": DECLARATION_SEMANTICS},
         "note": ("几何为人工确认件（已绑定视频 sha256/尺寸/确认人）"
                  if confirmed else
                  "几何为提案：人工确认前正式解释与发布验收受限"),

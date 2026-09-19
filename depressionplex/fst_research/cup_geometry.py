@@ -312,6 +312,9 @@ def to_envelope(props: list[CupProposal], video_size: tuple[int, int]) -> geo.Ge
 BIND_APPLIED = "applied"
 BIND_REFUSED_AMBIGUOUS = "refused_ambiguous"
 BIND_NONE = "none"
+#: 通道申报给了、但通道↔物理杯映射没有可验证依据：映射未决，本次不应用。
+#: applied（任何记录里）只说明程序执行了申报，**不**表示映射已经验证。
+BIND_MAPPING_UNRESOLVED = "mapping_unresolved"
 
 
 @dataclass(frozen=True)
@@ -324,7 +327,8 @@ class DeclaredEmptyBinding:
 
 
 def bind_declared_empty(cup_ids: list[int], declared_cup_ids: list[int], *,
-                        expected_n: int | None = None) -> DeclaredEmptyBinding:
+                        expected_n: int | None = None,
+                        unresolved_note: str | None = None) -> DeclaredEmptyBinding:
     """把人工申报的空杯号绑到物理杯号上；有歧义就**拒绝应用**（G3）。
 
     - `cup_ids`：本次运行实际存在的物理杯号（提案 = 左到右 1..n；
@@ -334,9 +338,15 @@ def bind_declared_empty(cup_ids: list[int], declared_cup_ids: list[int], *,
       **拒绝应用全部申报**、照实记 problems、相关杯保持未决——不许顺着
       过滤后的列表下标漂移到别的杯上。
     - 人工确认件（expected_n=None）杯号已由 binding 核对过，直接应用。
+    - `unresolved_note`（R3-115 ①）：上游申报是**通道**形态、通道↔物理杯映射
+      没有可验证依据时，`declared_cup_ids` 传空 + 本注记非空 ⇒ status
+      `mapping_unresolved`、不应用到任何杯、注记进 problems。映射找到依据再应用；
+      没有依据就保持未决。applied 只说明程序执行了申报，不表示映射已验证。
     """
     declared = sorted(set(declared_cup_ids))
     if not declared:
+        if unresolved_note:
+            return DeclaredEmptyBinding((), BIND_MAPPING_UNRESOLVED, (unresolved_note,))
         return DeclaredEmptyBinding((), BIND_NONE, ())
     ids = sorted(cup_ids)
     if len(set(ids)) != len(ids):

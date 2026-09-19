@@ -218,14 +218,17 @@ def top_reasons(diags: list[FrameDiag], limit: int = 6) -> list[dict]:
 
 def time_weighted_seconds(diags: list[FrameDiag], *, fps: float,
                           tail_spacing_frames: int,
-                          declared_absent: bool) -> dict:
+                          declared_absent: bool,
+                          analysis_end_frames: int) -> dict:
     """状态时长的**时间加权估计**（R2-115 T1）：显式命名、区间权重、尾处理写明。
 
     抽样计数不是连续时长——旧版 `counts/fps` 把每条抽样记录当 1/fps 秒，
     step=5 时低估 5 倍还叫"秒"。这里改成明确的估计量：
     - 权重 = 相邻抽样记录的**实际源帧号差** / fps（区间权重，不假设等距）；
-    - 尾记录没有"下一条"，按一个抽样步长 `tail_spacing_frames/fps` 计——
-      这是**假设**，写进 provenance，不静默；
+    - 尾记录没有"下一条"：区间 = [末抽样帧, 分析末端)，取
+      `min(tail_spacing_frames, analysis_end_frames - 末帧)`——**最后一个区间
+      不得超过实际视频/分析范围末端**（R3-115 ②；总帧数不整除 step 时尾区间
+      不足一个步长，按剩余帧计），写进 provenance，不静默；
     - 申报空杯 / 空序列 ⇒ 全 None：结果为空，不是 0 秒。
     """
     if declared_absent:
@@ -239,6 +242,10 @@ def time_weighted_seconds(diags: list[FrameDiag], *, fps: float,
         raise ValueError(f"fps 必须为正: {fps}")
     if tail_spacing_frames < 1:
         raise ValueError(f"尾处理步长必须 ≥ 1 帧: {tail_spacing_frames}")
+    if analysis_end_frames <= diags[-1].frame:
+        raise ValueError(
+            f"分析末端 {analysis_end_frames} 必须晚于末抽样帧 {diags[-1].frame}"
+            "（尾区间不能是空的或倒的）")
     total = {q: 0.0 for q in QUALITIES}
     for i, d in enumerate(diags):
         if i + 1 < len(diags):
@@ -247,22 +254,27 @@ def time_weighted_seconds(diags: list[FrameDiag], *, fps: float,
                 raise ValueError(
                     f"抽样记录帧号必须严格递增: {d.frame} → {diags[i + 1].frame}")
         else:
-            span = tail_spacing_frames          # 尾处理：一个抽样步长（假设，已写明）
+            # R3-115 ②：尾区间 = [末抽样帧, 分析末端)，不许越过末端
+            span = min(tail_spacing_frames, analysis_end_frames - d.frame)
         total[d.quality] = total.get(d.quality, 0.0) + span / fps
+    tail = min(tail_spacing_frames, analysis_end_frames - diags[-1].frame)
     return {"seconds": {q: total[q] for q in QUALITIES},
             "provenance": {
                 "computed": True,
                 "method": "时间加权估计：权重 = 相邻抽样记录的实际源帧号差 / fps",
-                "tail_handling": (f"尾记录按一个抽样步长 {tail_spacing_frames} 帧"
-                                  f"（{tail_spacing_frames / fps:.3f} s）计——假设，"
-                                  "视频末尾未被抽样的部分不补"),
+                "tail_handling": (f"尾记录区间 = [末抽样帧 {diags[-1].frame}, 分析末端 "
+                                  f"{analysis_end_frames})，共 {tail} 帧"
+                                  f"（{tail / fps:.3f} s）= min(一个抽样步长 "
+                                  f"{tail_spacing_frames} 帧, 末端剩余帧)——"
+                                  "不超过实际视频/分析范围末端"),
                 "note": "这是抽样帧上的估计量，不是连续逐帧统计"}}
 
 
 def cup_record(*, cup_index: int, diags: list[FrameDiag], fps: float,
                declared_absent: bool, geometry: dict,
                features_summary: dict, spatial_scale_px: float | None,
-               sample_step_frames: int = 1) -> dict:
+               sample_step_frames: int = 1,
+               analysis_end_frames: int) -> dict:
     counts = counts_of(diags)
     problems = check_partition(counts, len(diags))
     if problems:
@@ -273,7 +285,8 @@ def cup_record(*, cup_index: int, diags: list[FrameDiag], fps: float,
         semantics = BEHAVIOR_SECONDS_NO_WINDOW
     tw = time_weighted_seconds(diags, fps=fps,
                                tail_spacing_frames=sample_step_frames,
-                               declared_absent=declared_absent)
+                               declared_absent=declared_absent,
+                               analysis_end_frames=analysis_end_frames)
     return {
         "cup": cup_index,
         "declared_absent": declared_absent,

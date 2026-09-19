@@ -132,7 +132,8 @@ def _run_research_path() -> dict:
                                              "water_body": list(p.water_body) if p.water_body else None,
                                              "confirmed": False},
                                    features_summary=feat.summarize(pairs),
-                                   spatial_scale_px=float(p.width_px)))
+                                   spatial_scale_px=float(p.width_px),
+                                   analysis_end_frames=len(frames)))
     tb = tl.TimeBase(fps=25.0, n_frames=len(frames), clock=tl.CLOCK_SOURCE_MEDIA,
                      protocol_alignment=tl.PROTOCOL_ALIGNMENT_UNKNOWN,
                      t0_source_s=None, analysis_offset_s=None)
