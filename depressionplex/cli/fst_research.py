@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 from pathlib import Path
 
@@ -105,6 +106,10 @@ def main(argv: list[str] | None = None) -> int:
                          "文件 sha256 随记录落盘；binding 与本视频不符即拒绝")
     ap.add_argument("--roi-above-margin", type=int, default=cg.ROI_ABOVE_WATER_MARGIN_PX,
                     help="分析 ROI 在水线上方留白的像素数（起点值，须在叠加图上人工核对）")
+    ap.add_argument("--lost-short-max-gap-frames", type=int,
+                    default=perc.DEFAULT_LOST_SHORT_MAX_GAP_FRAMES,
+                    help="短暂丢失门的**源帧跨度**上限（前后 observed 抽样点的实际帧号差；"
+                         "起点值 11 ≈ 0.44 s @ 25 fps，未经真实素材标定，改动随记录落盘）")
     ap.add_argument("--clip", type=int, default=100, help="每杯叠加短片的分析帧数")
     ap.add_argument("--clip-at", type=float, default=0.4,
                     help="短片起点取分析序列的位置比例（默认 40%% 处，避开开场手忙脚乱）")
@@ -144,10 +149,29 @@ def main(argv: list[str] | None = None) -> int:
     except ValueError as e:
         print(f"拒绝：{e}", file=sys.stderr)
         return EXIT_REFUSED
+    # ---- 数值守卫（R2-115 T3）：坏数在写任何文件**之前**拒绝 ----
     if args.step < 1:
         print(f"拒绝：--step 必须 ≥ 1（得到 {args.step}）；步长 0/负会让抽样序列退化",
               file=sys.stderr)
         return EXIT_REFUSED
+    if args.lost_short_max_gap_frames < 1:
+        print(f"拒绝：--lost-short-max-gap-frames 必须 ≥ 1（得到 "
+              f"{args.lost_short_max_gap_frames}）", file=sys.stderr)
+        return EXIT_REFUSED
+    if args.min_area < 1:
+        print(f"拒绝：--min-area 必须 ≥ 1（得到 {args.min_area}）", file=sys.stderr)
+        return EXIT_REFUSED
+    if args.roi_above_margin < 0:
+        print(f"拒绝：--roi-above-margin 不能为负（得到 {args.roi_above_margin}）",
+              file=sys.stderr)
+        return EXIT_REFUSED
+    for name, val in (("--t0-source-s", args.t0_source_s),
+                      ("--dark", args.dark), ("--bright", args.bright),
+                      ("--clip-at", args.clip_at)):
+        if val is not None and not math.isfinite(val):
+            print(f"拒绝：{name} 不是有限数（NaN/Inf）：坏数不进记录、不参与计算",
+                  file=sys.stderr)
+            return EXIT_REFUSED
 
     try:
         info = video.probe(args.video)
@@ -160,14 +184,30 @@ def main(argv: list[str] | None = None) -> int:
         "found": False, "aliases": [], "material_id": None,
         "note": "未提供 --manifest：不做身份关联，不猜"}
 
-    tb = tl.TimeBase(
-        fps=info.fps, n_frames=info.n_frames, clock=tl.CLOCK_SOURCE_MEDIA,
-        protocol_alignment=(tl.PROTOCOL_ALIGNMENT_KNOWN if args.t0_source_s is not None
-                            else tl.PROTOCOL_ALIGNMENT_UNKNOWN),
-        t0_source_s=args.t0_source_s,
-        analysis_offset_s=None,
-        offset_evidence="本次直接读原视频，未经转码件",
-        frame_count_source=info.frame_count_source)
+    # ---- 素材角色只认清单登记（R2-115 T3）：不再把任何输入口头称作"原视频" ----
+    media_role, offset_evidence, role_problems = tl.resolve_media_role(
+        lookup if args.manifest else None)
+    if role_problems:
+        for prob in role_problems:
+            print(f"拒绝：{prob}", file=sys.stderr)
+        return EXIT_REFUSED
+    clock = (tl.CLOCK_ANALYSIS_MEDIA if media_role == tl.MEDIA_ROLE_TRANSCODE
+             else tl.CLOCK_SOURCE_MEDIA)
+    try:
+        tb = tl.TimeBase(
+            fps=info.fps, n_frames=info.n_frames, clock=clock,
+            protocol_alignment=(tl.PROTOCOL_ALIGNMENT_KNOWN
+                                if args.t0_source_s is not None
+                                else tl.PROTOCOL_ALIGNMENT_UNKNOWN),
+            t0_source_s=args.t0_source_s,
+            analysis_offset_s=None,       # 未查到就是 None：known_t0+转码件会被拒
+            offset_evidence=offset_evidence,
+            frame_count_source=info.frame_count_source,
+            t0_evidence=args.t0_evidence,
+            media_role=media_role)
+    except ValueError as e:
+        print(f"拒绝：{e}", file=sys.stderr)
+        return EXIT_REFUSED
     ledger = tl.build_ledger(tb)
     plan = tl.plan_window(tb)
 
@@ -229,7 +269,8 @@ def main(argv: list[str] | None = None) -> int:
     diagnosers: dict[int, perc.CupDiagnoser] = {}
 
     def make_on_observed(cup: int):
-        def on_observed(idx: int, mask: np.ndarray, diag: perc.FrameDiag) -> None:
+        def on_observed(idx: int, mask: np.ndarray, diag: perc.FrameDiag,
+                        gap_records: int) -> None:
             if idx in clip_frames:
                 clip_masks[cup][idx] = mask
             assert diag.centroid is not None      # observed 帧必有质心
@@ -244,17 +285,21 @@ def main(argv: list[str] | None = None) -> int:
                     theta_prev=p_theta, theta_cur=theta,
                     spatial_scale_px=float(props[cup].width_px),
                     above_water_frac_cur=diag.above_water_frac,
-                    wall_dist_px_cur=diag.wall_dist_px))
+                    wall_dist_px_cur=diag.wall_dist_px,
+                    # R2-115 T2：跨观测缺口的对标出来，summarize 单列不进连续统计
+                    gap_records_between=gap_records))
             last_seen[cup] = (idx, mask, diag.centroid, theta)
         return on_observed
 
     for p in props:
         diagnosers[p.index] = perc.CupDiagnoser(
-            p, dark=args.dark, min_area=args.min_area,
+            p, dark=args.dark, min_area=args.min_area, fps=info.fps,
+            lost_short_max_gap_frames=args.lost_short_max_gap_frames,
             declared_absent=(p.index in declared_set),
             on_observed=None if p.index in declared_set else make_on_observed(p.index))
 
     # pass 1：背景 max（只过分析帧）
+    consumed: list[int] = []      # 实际消费（解码并诊断）的帧号——覆盖从它数出
     try:
         for i, g in enumerate(video.iter_gray(info)):
             if i % args.step:
@@ -268,6 +313,7 @@ def main(argv: list[str] | None = None) -> int:
                 continue
             for p in props:
                 diagnosers[p.index].diagnose(i, g)
+            consumed.append(i)    # R2-115 T1：真消费了才计数，不按计划表报
             if i in clip_frames:
                 rgb = _render(g, props, {c: clip_masks[c].get(i) for c in clip_masks},
                               {c: diagnosers[c].last() for c in diagnosers},
@@ -299,6 +345,7 @@ def main(argv: list[str] | None = None) -> int:
             any_visible = True
         cups_out.append(rec.cup_record(
             cup_index=p.index, diags=diags, fps=info.fps,
+            sample_step_frames=args.step,
             declared_absent=(p.index in declared_set),
             geometry={"cup_id": p.cup_id,
                       # G1：分析 ROI / 水体候选区 / 水线是三件不同的东西，全落盘
@@ -318,7 +365,8 @@ def main(argv: list[str] | None = None) -> int:
         cups_out[-1]["frame_rows"] = _frame_rows(diags, clip_frames)
         cups_out[-1]["overlay_clip"] = clips.get(p.index)
 
-    coverage = tl.coverage_of(plan, n_frames=info.n_frames, observed=analyzed)
+    coverage = tl.coverage_of(plan, n_frames=info.n_frames, consumed=consumed,
+                              sample_step=args.step, fps=info.fps)
     record = rec.build_record(
         source={"path": str(info.path), "name": info.path.name,
                 "sha256": sha, "bytes": info.path.stat().st_size,
@@ -326,16 +374,36 @@ def main(argv: list[str] | None = None) -> int:
                 "width": info.width, "height": info.height,
                 "duration_s": info.duration_s,
                 "frame_count_source": info.frame_count_source},
-        time_base={"clock": tb.clock, "protocol_alignment": tb.protocol_alignment,
+        time_base={"clock": tb.clock, "media_role": tb.media_role,
+                   "protocol_alignment": tb.protocol_alignment,
                    "t0_source_s": tb.t0_source_s,
+                   # R2-115 T3：t0 的依据字符串必须随记录落盘，不只打在终端
+                   "t0_evidence": tb.t0_evidence or None,
                    "analysis_offset_s": tb.analysis_offset_s,
                    "offset_evidence": tb.offset_evidence},
         clock_ledger=ledger.to_dict(),
         window={"requested_s": list(plan.requested_s), "alignment": plan.alignment,
                 "media_frames": list(plan.media_frames) if plan.media_frames else None,
                 "applies_standard_window": plan.applies_standard_window,
+                # R2-115 T3：套窗标记 ≠ 统计已按窗截取。本次各杯统计跑在
+                # 整条抽样媒体时间轴上；窗口只标"名义窗能否落点"。
+                "stats_are_windowed": False,
+                "stats_scope": "各杯统计覆盖整条抽样媒体时间轴（未按窗口截取）；"
+                               "applies_standard_window=True 仅表示名义窗在素材上"
+                               "可算出落点，不表示统计已按窗",
                 "reason": plan.reason, "truncated": plan.truncated},
         coverage=coverage.to_dict(),
+        # R2-115 T1：抽样口径与实际消费的帧号（计数是抽样记录数，不是连续帧数）
+        sampling={"step_frames": args.step,
+                  "sample_spacing_s": args.step / info.fps,
+                  "sampled_frames": len(consumed),
+                  "sample_fraction": (len(consumed) / info.n_frames
+                                      if info.n_frames else None),
+                  "frame_indices": consumed,
+                  "semantics": "所有状态计数（sampled_state_counts）与时间加权"
+                               "估计都是抽样记录口径，不是连续逐帧统计；短于 "
+                               f"step/fps = {args.step / info.fps:.2f} s 的帧间细节不可见",
+                  "tail_note": "视频末尾未被抽样的部分不补帧、不外推"},
         geometry_confirmation=_geometry_confirmation(
             geo_source=geo_source, confirmed=(geo_source == "human_confirmed_file"),
             env_problems=env_problems, geo_problems=geo_problems,
@@ -368,7 +436,10 @@ def main(argv: list[str] | None = None) -> int:
           f"（{info.duration_s:.2f} s，帧数来源 {info.frame_count_source}）")
     print(f"对齐：protocol_alignment={tb.protocol_alignment}"
           f"（{plan.reason}）")
-    print(f"覆盖：{coverage.observed_frames}/{coverage.requested_frames or '整条'} 帧"
+    frac = coverage.sample_fraction
+    print(f"覆盖：解码 {coverage.consumed_frames}/{coverage.expected_samples} 个抽样帧"
+          f"（完整={coverage.decode_complete}）  时间轴占比 "
+          f"{f'{frac:.2f}' if frac is not None else '—'}（step={args.step}）"
           f"  截断 {coverage.truncated_frames}")
     if geo_source == "human_confirmed_file":
         print(f"几何来源：人工确认件 {args.geometry}  sha256 {geo_file_sha[:16]}…"
@@ -380,7 +451,7 @@ def main(argv: list[str] | None = None) -> int:
     elif de_binding.status == cg.BIND_REFUSED_AMBIGUOUS:
         print(f"申报空杯**未应用**（绑定有歧义）：请求 {declared}，applied []")
     for c in cups_out:
-        q = c["quality_counts"]
+        q = c["sampled_state_counts"]     # 抽样记录计数（R2-115 T1），不是连续时长
         g = c["geometry"]
         wnote = "" if g["water_surface_reliable"] else "（水线不可靠，above_water 记 null）"
         print(f"  杯 {g['cup_id']}: observed {q['observed']}  unclear {q['unclear']}"
@@ -435,7 +506,12 @@ def _limits(args, info, geo_source, de_binding) -> list[str]:
          else "杯体/水线为提案（confirmed=False），未人工确认"),
         "observed 帧内的活动/不动分类未做（新的科学口径，未经批准）",
         "光流/局部运动（动物区内 vs 区外水扰）无实现，标记 not_implemented",
-        f"分析抽帧 step={args.step}：帧间细节（< {args.step / info.fps:.2f} s）不可见",
+        f"分析抽帧 step={args.step}：计数是抽样记录数；帧间细节"
+        f"（< {args.step / info.fps:.2f} s）不可见",
+        f"短暂丢失门 lost_short_max_gap_frames={args.lost_short_max_gap_frames} 源帧"
+        "（起点值 ≈0.44 s @ 25 fps，未经真实素材标定）：超过门的缺口记 unclear",
+        "各杯统计未按窗截取（stats_are_windowed=False）：即使 t0 已知，本次统计"
+        "仍覆盖整条抽样时间轴",
     ]
     if de_binding.status == cg.BIND_REFUSED_AMBIGUOUS:
         limits.append("申报空杯未应用：杯候选数与期望不符，物理杯号绑定有歧义，相关杯保持未决")

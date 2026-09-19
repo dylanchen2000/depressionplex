@@ -94,7 +94,7 @@ def _run_research_path() -> dict:
     diagnosers = []
 
     def make_cb(cup_index: int, width_px: int):
-        def on_observed(idx, mask, diag):
+        def on_observed(idx, mask, diag, gap_records):
             mm = sil.metrics(mask, with_holes=False)
             theta = mm.theta if mm is not None else 0.0
             prev = last.get(cup_index)
@@ -106,7 +106,8 @@ def _run_research_path() -> dict:
                     theta_prev=prev[3], theta_cur=theta,
                     spatial_scale_px=float(width_px),
                     above_water_frac_cur=diag.above_water_frac,
-                    wall_dist_px_cur=diag.wall_dist_px))
+                    wall_dist_px_cur=diag.wall_dist_px,
+                    gap_records_between=gap_records))
             last[cup_index] = (idx, mask, diag.centroid, theta)
         return on_observed
 
@@ -142,7 +143,7 @@ def test_research_path_runs_under_armed_guard() -> None:
     """核心验收：动态闸武装下整条路径跑通 ⇒ 执行路径上没有 TST 判据。"""
     with isolation.tst_forbidden_raising():
         out = _run_research_path()
-    assert out["cups"][0]["quality_counts"]["observed"] > 0
+    assert out["cups"][0]["sampled_state_counts"]["observed"] > 0
     assert out["plan"].applies_standard_window is False
     # 几何提案必然未确认：validate 报"未确认"是设计，不是失败
     assert any("未确认" in p for p in out["env"].validate())

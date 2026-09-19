@@ -103,7 +103,9 @@ def test_leading_gap_not_lost_short() -> None:
 
 def test_long_gap_exceeding_max_is_unclear() -> None:
     scene = fst_synth.Scene(cups=1)
-    absent = tuple(range(6, 18))               # 12 帧 > lost_short_max_frames=10
+    # R2-115 T2：门是源帧跨度——absent 6..17，前后 observed 在 5 和 18，
+    # 跨度 18−5=13 > DEFAULT_LOST_SHORT_MAX_GAP_FRAMES=11 ⇒ unclear
+    absent = tuple(range(6, 18))
     frames = scene.swim_series(20, cup=0, absent=absent)
     p = _props(scene, frames)[0]
     diags = perc.diagnose_cup(frames, list(range(20)), p)
@@ -212,13 +214,17 @@ def test_on_observed_callback_fires_only_for_observed() -> None:
     frames = scene.swim_series(10, cup=0, absent=(3,))
     p = _props(scene, frames)[0]
     seen: list = []
-    d = perc.CupDiagnoser(p, on_observed=lambda i, m, diag: seen.append(i))
+    # R2-115 T2：回调第 4 参 = 距上一条 observed 的非 observed 记录条数
+    d = perc.CupDiagnoser(p, on_observed=lambda i, m, diag, gap: seen.append((i, gap)))
     for f in frames:
         d.see_background(f)
     for i, f in enumerate(frames):
         d.diagnose(i, f)
     d.finish()
-    assert 3 not in seen and len(seen) == 9
+    assert [i for i, _ in seen] == [0, 1, 2, 4, 5, 6, 7, 8, 9]
+    gaps = dict(seen)
+    assert gaps[4] == 1                    # 帧 3 缺失 ⇒ 帧 4 的配对跨 1 条缺口记录
+    assert all(gaps[i] == 0 for i in gaps if i != 4)
 
 
 def test_streaming_and_batch_agree() -> None:
@@ -314,6 +320,94 @@ def test_none_waterline_gives_null_above_water_with_reason() -> None:
     for d in obs:
         assert d.above_water_frac is None
         assert d.above_water_null_reason and "None" in d.above_water_null_reason
+
+
+# ---------------------------------------------------------------------------
+# R2-115 T2：lost_short 门长在**源帧跨度**上，分类不随抽样步长漂移
+# ---------------------------------------------------------------------------
+
+def _run_sampled(scene, absent, n=60, step=1, fps=25.0, gate=None):
+    frames = scene.swim_series(n, cup=0, absent=absent)
+    idx = list(range(0, n, step))
+    sub = frames[::step]
+    props, problems = cg.propose_cups(sub, n_cups=1)
+    assert not problems, problems
+    kw = dict(fps=fps)
+    if gate is not None:
+        kw["lost_short_max_gap_frames"] = gate
+    return perc.diagnose_cup(sub, idx, props[0], **kw), idx
+
+
+def test_short_loss_consistent_across_sampling_steps() -> None:
+    """同一段 4 源帧的短暂丢失：step=1 与 step=5 都归 lost_short。
+
+    旧版按记录条数判：这条在旧版也一致，但它钉住新门不会把短丢失错杀。
+    """
+    scene = fst_synth.Scene(cups=1)
+    absent = tuple(range(20, 24))
+    d1, _ = _run_sampled(scene, absent, step=1)
+    miss1 = [d.quality for d in d1 if d.frame in absent]
+    assert miss1 == [perc.QUALITY_LOST_SHORT] * 4
+    d5, idx5 = _run_sampled(scene, absent, step=5)
+    hit = [i for i in idx5 if i in absent]          # 只有样点 20 落在缺失里
+    assert hit == [20]
+    q5 = [d.quality for d in d5 if d.frame == 20]
+    assert q5 == [perc.QUALITY_LOST_SHORT]           # 跨度 25−15=10 ≤ 11
+
+
+def test_long_loss_consistent_across_sampling_steps() -> None:
+    """同一段 12 源帧的长丢失：step=1/5 都归 unclear，不随步长漂成 lost_short。"""
+    scene = fst_synth.Scene(cups=1)
+    absent = tuple(range(20, 32))
+    d1, _ = _run_sampled(scene, absent, step=1)
+    assert all(d.quality == perc.QUALITY_UNCLEAR for d in d1 if d.frame in absent)
+    d5, _ = _run_sampled(scene, absent, step=5)
+    hit = {d.frame: d.quality for d in d5 if d.frame in absent}
+    assert hit == {20: perc.QUALITY_UNCLEAR, 25: perc.QUALITY_UNCLEAR,
+                   30: perc.QUALITY_UNCLEAR}         # 跨度 35−15=20 > 11
+
+
+def test_same_record_count_different_span_classifies_differently() -> None:
+    """评审复现：同是 10 条缺失**记录**，物理时长不同 ⇒ 分类必须不同。
+
+    旧版门按记录条数（j-i）：两条都是 10 条记录，全归 lost_short——
+    step=5 那条约 2 秒的丢失被当成"分割抖了一下"。新门按源帧跨度：
+    step=1 跨度 11 ≤ 11 ⇒ lost_short；step=5 跨度 55 ⇒ unclear。
+    """
+    scene = fst_synth.Scene(cups=1)
+    d1, _ = _run_sampled(scene, tuple(range(20, 30)), n=40, step=1)
+    q1 = [d.quality for d in d1 if 20 <= d.frame < 30]
+    assert q1 == [perc.QUALITY_LOST_SHORT] * 10      # 跨度 30−19=11 ≤ 11
+    d5, _ = _run_sampled(scene, tuple(range(20, 70)), n=80, step=5)
+    q5 = [d.quality for d in d5 if 20 <= d.frame < 70]
+    assert len(q5) == 10                             # 恰好 10 条缺失记录
+    assert q5 == [perc.QUALITY_UNCLEAR] * 10         # 跨度 70−15=55 > 11
+
+
+def test_reason_carries_span_and_gate_provenance() -> None:
+    """原因字符串必须写明实测跨度（含秒）与门的参数名/取值——出处可追溯。"""
+    scene = fst_synth.Scene(cups=1)
+    d1, _ = _run_sampled(scene, tuple(range(20, 30)), n=40, step=1, fps=25.0)
+    lost = [d for d in d1 if d.quality == perc.QUALITY_LOST_SHORT][0]
+    joined = " ".join(lost.reasons)
+    assert "源帧跨度 11" in joined and "≈0.44 s" in joined
+    assert "lost_short_max_gap_frames=11" in joined
+    dl, _ = _run_sampled(scene, tuple(range(20, 32)), step=1, fps=25.0)
+    unc = [d for d in dl if d.quality == perc.QUALITY_UNCLEAR
+           and d.frame in range(20, 32)][0]
+    joined2 = " ".join(unc.reasons)
+    assert "源帧跨度 13" in joined2 and "lost_short_max_gap_frames=11" in joined2
+    assert "long_absence_unexplained" in joined2
+
+
+def test_gate_value_is_configurable_and_recorded_in_reason() -> None:
+    """门是研究配置：改了以后原因字符串里的取值跟着变（不许写死 11）。"""
+    scene = fst_synth.Scene(cups=1)
+    absent = tuple(range(20, 32))                    # 跨度 13
+    d, _ = _run_sampled(scene, absent, step=1, gate=20)
+    assert all(x.quality == perc.QUALITY_LOST_SHORT for x in d if x.frame in absent)
+    assert any("lost_short_max_gap_frames=20" in r for x in d
+               if x.frame in absent for r in x.reasons)
 
 
 def test_wall_dist_excludes_top_edge() -> None:

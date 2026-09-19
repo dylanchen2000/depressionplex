@@ -48,6 +48,14 @@ QUALITIES: tuple[str, ...] = (QUALITY_OBSERVED, QUALITY_UNCLEAR,
 #: 内部过渡态：本帧没找到候选，等前后文再定是 lost_short 还是 unclear。
 _PENDING = "_no_candidate_pending"
 
+#: 短暂丢失门（R2-115 T2）：前后两个相邻 observed 抽样点之间的**源帧跨度**
+#: 上限，不是"抽样记录条数"。旧版按记录条数（j-i）判，同是 10 条缺失记录，
+#: step=1 是 0.4 s 的物理丢失、step=5 是 2 s，却撞同一个门——分类随抽样
+#: 步长漂移。现在门长在源帧号差上：同一物理丢失在 step=1/5/10 分类一致。
+#: 起点值 11 源帧（≈0.44 s @ 25 fps，与旧 step=1 的"10 条记录"门等价），
+#: **未经真实素材标定**；改它属于研究配置变更，必须随诊断记录落盘。
+DEFAULT_LOST_SHORT_MAX_GAP_FRAMES = 11
+
 
 @dataclass(frozen=True)
 class FrameDiag:
@@ -79,7 +87,8 @@ class CupDiagnoser:
                  min_area: int = 40,
                  max_area_frac: float = 0.55,
                  rival_frac: float = 0.4,
-                 lost_short_max_frames: int = 10,
+                 lost_short_max_gap_frames: int = DEFAULT_LOST_SHORT_MAX_GAP_FRAMES,
+                 fps: float | None = None,
                  declared_absent: bool = False,
                  on_observed=None) -> None:
         self.prop = prop
@@ -88,12 +97,17 @@ class CupDiagnoser:
         self.min_area = min_area
         self.max_area_frac = max_area_frac
         self.rival_frac = rival_frac
-        self.lost_short_max_frames = lost_short_max_frames
+        # R2-115 T2：门是**源帧跨度**（实际帧号差），参数与取值写进原因字符串
+        self.lost_short_max_gap_frames = lost_short_max_gap_frames
+        self.fps = fps                    # 只为把跨度折成秒写进原因；None 就不写秒
         self.declared_absent = declared_absent
         self.on_observed = on_observed
         self._mx: np.ndarray | None = None
         self._static: np.ndarray | None = None
         self._diags: list[FrameDiag] = []
+        #: 上一条 observed 记录以来的非 observed 记录条数（跨缺口配对时随
+        #: 回调带出，pair_features 记成 gap_records_between，R2-115 T2）
+        self._records_since_observed = 0
 
     def see_background(self, gray: np.ndarray) -> None:
         g = np.asarray(gray, dtype=np.float64)
@@ -106,7 +120,13 @@ class CupDiagnoser:
             self._static = self._mx < self.static_dark
 
     def diagnose(self, idx: int, gray: np.ndarray) -> FrameDiag:
-        """诊断一帧并记入序列。declared 杯不跑分割（见模块文档）。"""
+        """诊断一帧并记入序列。declared 杯不跑分割（见模块文档）。
+
+        `on_observed` 回调在 observed 帧发，签名 (idx, mask, diag, gap_records)：
+        gap_records = 上一条 observed 记录以来的非 observed 记录条数
+        （0 = 与上一条 observed 相邻；>0 = 这对帧跨了观测缺口，配对特征
+        必须单列，不进连续统计，R2-115 T2）。
+        """
         if self.declared_absent:
             d = FrameDiag(idx, QUALITY_DECLARED_ABSENT,
                           ("人工申报空杯：结果为空，不输出 0 秒",))
@@ -119,6 +139,11 @@ class CupDiagnoser:
         d = self._diagnose_one(idx, g, self._mx, self._static,
                                (r0, c0, r1, c1))
         self._diags.append(d)
+        # observed 的定性不会被后面的缺失归并改写 ⇒ 计数在流式过程中就是终值
+        if d.quality == QUALITY_OBSERVED:
+            self._records_since_observed = 0
+        else:
+            self._records_since_observed += 1
         return d
 
     def _diagnose_one(self, idx, g, mx, static, box) -> FrameDiag:
@@ -194,7 +219,8 @@ class CupDiagnoser:
         if self.on_observed is not None:
             # observed 的定性不会被后面的缺失归并改写，回调在这里发是稳的；
             # 掩膜只交给回调、本类不留——整段视频的掩膜序列内存上不可接受。
-            self.on_observed(idx, big.mask, diag)
+            # 第 4 参 = 距上一条 observed 的非 observed 记录条数（跨缺口配对标位）。
+            self.on_observed(idx, big.mask, diag, self._records_since_observed)
         return diag
 
     def last(self) -> FrameDiag | None:
@@ -204,7 +230,8 @@ class CupDiagnoser:
     def finish(self) -> list[FrameDiag]:
         if self.declared_absent:
             return list(self._diags)
-        return _resolve_pending(self._diags, self.lost_short_max_frames)
+        return _resolve_pending(self._diags, self.lost_short_max_gap_frames,
+                                fps=self.fps)
 
 
 def diagnose_cup(frames, indices, prop: CupProposal, **kw) -> list[FrameDiag]:
@@ -243,12 +270,16 @@ def _static_animal_blob(static_mask: np.ndarray, prop: CupProposal,
                for c in comps)
 
 
-def _resolve_pending(diags: list[FrameDiag], max_run: int) -> list[FrameDiag]:
-    """把过渡态定成 lost_short / unclear。
+def _resolve_pending(diags: list[FrameDiag], max_gap_frames: int,
+                     *, fps: float | None = None) -> list[FrameDiag]:
+    """把过渡态定成 lost_short / unclear。门长在**源帧跨度**上（R2-115 T2）。
 
-    前后都是 observed 的短缺失（≤ max_run 帧）⇒ lost_short：分割抖了一下，
-    动物显然还在。其余（长缺失、贴着序列两端的缺失）⇒ unclear，
-    原因写明"未申报空杯，不作空杯处理"。
+    跨度 = 缺失段前后两个相邻 observed 抽样点的实际帧号差；跨度
+    ≤ max_gap_frames 源帧 ⇒ lost_short（分割抖了一下，动物显然还在），
+    其余（跨度超限、贴着序列两端算不出跨度）⇒ unclear，原因写明
+    "未申报空杯，不作空杯处理"。旧版按记录条数（j-i）判：同是 10 条
+    缺失，step=1 是 0.4 s、step=5 是 2 s 却撞同一个门——分类随抽样步长
+    漂移。参数名与取值写进原因字符串（参数出处可追溯）。
     """
     out = list(diags)
     n = len(out)
@@ -263,12 +294,22 @@ def _resolve_pending(diags: list[FrameDiag], max_run: int) -> list[FrameDiag]:
         run = j - i
         before_ok = i > 0 and out[i - 1].quality == QUALITY_OBSERVED
         after_ok = j < n and out[j].quality == QUALITY_OBSERVED
-        if before_ok and after_ok and run <= max_run:
-            state, why = QUALITY_LOST_SHORT, (f"连续 {run} 帧无候选，前后均可见"
-                                              "（短暂分割失败，不等于空杯）",)
+        if before_ok and after_ok:
+            span = out[j].frame - out[i - 1].frame      # 源帧跨度（实际帧号差）
+            span_txt = f"源帧跨度 {span}" + (f" ≈{span / fps:.2f} s" if fps else "")
+            short = span <= max_gap_frames
+        else:
+            span_txt = "源帧跨度不可算（缺失贴序列端点）"
+            short = False
+        gate_txt = f"门 lost_short_max_gap_frames={max_gap_frames} 源帧"
+        if short:
+            state = QUALITY_LOST_SHORT
+            why = (f"连续 {run} 条抽样记录无候选，前后观测点之间{span_txt}，{gate_txt}"
+                   "（短暂分割失败，不等于空杯）",)
         else:
             state = QUALITY_UNCLEAR
-            why = (f"连续 {run} 帧无候选且无法归为短暂丢失"
+            why = (f"连续 {run} 条抽样记录无候选且无法归为短暂丢失"
+                   f"（{span_txt}，{gate_txt}）"
                    "（long_absence_unexplained：未申报空杯，不作空杯处理）",)
         for k in range(i, j):
             old = out[k]

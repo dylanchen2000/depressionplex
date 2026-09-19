@@ -1,9 +1,11 @@
 """诊断记录层测试：分区闭合、空杯语义、身份关联、落盘纪律。
 
-钉死的口径（Spec A §5.1 S16 / §6.2）：
+钉死的口径（Spec A §5.1 S16 / §6.2 + R2-115 T1）：
 - 四态分区不闭合 ⇒ **raise**，不许带着一笔糊涂账出报告；
 - 申报空杯 ⇒ behavior_seconds=None + "empty_no_output"（不是 0 秒）；
   未申报 ⇒ 同样 None 但语义是"不套标准窗"——两种 None 必须写不同 semantics；
+- T1：计数叫 sampled_*（抽样记录数，不是连续帧数）；时长只出显式命名的
+  时间加权估计（区间权重 = 实际源帧号差 / fps，尾处理写明，不叫"秒数统计"）；
 - 身份查清单：多别名全列且 material_id=null，查不到写"不猜"；
 - 记录不进仓库，落盘原子（不留 .tmp 半成品）。
 """
@@ -88,14 +90,82 @@ def test_cup_record_empty_vs_no_window_semantics() -> None:
                        geometry=geo, features_summary={}, spatial_scale_px=77.0)
     assert r["behavior_seconds"] is None                 # 不是 0！
     assert r["behavior_seconds_semantics"] == rec.BEHAVIOR_SECONDS_EMPTY
-    assert r["quality_counts"][QUALITY_DECLARED_ABSENT] == 4
-    assert r["observable_durations_s"][QUALITY_DECLARED_ABSENT] == 2.0
+    assert r["sampled_frames"] == 4
+    assert r["sampled_state_counts"][QUALITY_DECLARED_ABSENT] == 4
+    # R2-115 T1：申报空杯 ⇒ 时间加权估计全 None，绝不输出 0 秒
+    assert all(v is None for v in r["time_weighted_sampled_s"].values())
+    assert r["time_weighting"]["computed"] is False
+    assert "0 秒" in r["time_weighting"]["reason"]
 
     r2 = rec.cup_record(cup_index=0, diags=_mixed(), fps=2.0, declared_absent=False,
                         geometry=geo, features_summary={}, spatial_scale_px=77.0)
     assert r2["behavior_seconds"] is None
     assert r2["behavior_seconds_semantics"] == rec.BEHAVIOR_SECONDS_NO_WINDOW
     assert r2["behavior_seconds_semantics"] != r["behavior_seconds_semantics"]
+    assert r2["sampled_frames"] == 8                     # 抽样记录数，不叫"帧数"
+    assert r2["time_weighting"]["computed"] is True
+
+
+# ---------------------------------------------------------------------------
+# R2-115 T1：时间加权估计量——区间权重、尾处理、拒绝坏输入
+# ---------------------------------------------------------------------------
+
+def test_time_weighted_interval_weights_and_tail() -> None:
+    """权重 = 实际源帧号差 / fps；尾记录按一个步长假设计（写明在 provenance）。"""
+    diags = [_diag(0, QUALITY_OBSERVED), _diag(5, QUALITY_UNCLEAR),
+             _diag(10, QUALITY_LOST_SHORT)]
+    out = rec.time_weighted_seconds(diags, fps=25.0, tail_spacing_frames=5,
+                                    declared_absent=False)
+    s = out["seconds"]
+    assert abs(s[QUALITY_OBSERVED] - 0.2) < 1e-12   # 帧 0→5 = 5 帧 / 25
+    assert abs(s[QUALITY_UNCLEAR] - 0.2) < 1e-12    # 帧 5→10
+    assert abs(s[QUALITY_LOST_SHORT] - 0.2) < 1e-12  # 尾 = 步长 5 帧（假设）
+    prov = out["provenance"]
+    assert prov["computed"] is True
+    assert "帧号差" in prov["method"]
+    assert "假设" in prov["tail_handling"] and "5" in prov["tail_handling"]
+    assert "不是连续逐帧统计" in prov["note"]
+
+
+def test_time_weighted_uneven_intervals_not_averaged() -> None:
+    """不等距抽样（缺口后的记录间隔大）⇒ 权重跟着变大，不是按条数摊平。"""
+    diags = [_diag(0, QUALITY_OBSERVED), _diag(2, QUALITY_OBSERVED),
+             _diag(52, QUALITY_OBSERVED)]      # 中间隔了 50 帧的缺口段
+    s = rec.time_weighted_seconds(diags, fps=25.0, tail_spacing_frames=2,
+                                  declared_absent=False)["seconds"]
+    assert abs(s[QUALITY_OBSERVED] - (2 + 50 + 2) / 25.0) < 1e-12
+
+
+def test_time_weighted_empty_and_declared_are_none_not_zero() -> None:
+    empty = rec.time_weighted_seconds([], fps=25.0, tail_spacing_frames=5,
+                                      declared_absent=False)
+    assert all(v is None for v in empty["seconds"].values())
+    assert "为空" in empty["provenance"]["reason"]
+    dec = rec.time_weighted_seconds([_diag(0, QUALITY_OBSERVED)], fps=25.0,
+                                    tail_spacing_frames=5, declared_absent=True)
+    assert all(v is None for v in dec["seconds"].values())
+
+
+def test_time_weighted_rejects_bad_input() -> None:
+    d = [_diag(0, QUALITY_OBSERVED)]
+    for kw in (dict(fps=0.0, tail_spacing_frames=5),
+               dict(fps=-1.0, tail_spacing_frames=5),
+               dict(fps=25.0, tail_spacing_frames=0)):
+        try:
+            rec.time_weighted_seconds(d, declared_absent=False, **kw)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"没拒绝坏参数: {kw}")
+    # 帧号不严格递增 ⇒ raise（区间权重会变成负数）
+    bad = [_diag(5, QUALITY_OBSERVED), _diag(5, QUALITY_UNCLEAR)]
+    try:
+        rec.time_weighted_seconds(bad, fps=25.0, tail_spacing_frames=1,
+                                  declared_absent=False)
+    except ValueError as e:
+        assert "递增" in str(e)
+    else:
+        raise AssertionError("帧号重复没被拒绝")
 
 
 def test_cup_record_motion_classification_not_performed() -> None:
@@ -107,15 +177,18 @@ def test_cup_record_motion_classification_not_performed() -> None:
 
 
 def test_build_record_carries_flags() -> None:
+    sampling = {"step_frames": 5, "sampled_frames": 100}
     record = rec.build_record(
         source={"sha256": "x"}, time_base={}, clock_ledger={}, window={},
-        coverage={}, geometry_confirmation={"confirmed": False},
+        coverage={}, sampling=sampling, geometry_confirmation={"confirmed": False},
         cups=[], manifest=None, limits=["研究诊断"])
     assert record["must_not_enter_acceptance_paths"] is True
     assert record["purpose"] == "research_diagnostics_only"
     assert record["schema_version"] == "fst-research-v1"
     assert record["limits"] == ["研究诊断"]
     assert record["generated_at"]
+    # R2-115 T1：抽样口径是记录的独立一节，不藏在 coverage 里
+    assert record["sampling"] == sampling
 
 
 def test_write_record_atomic_and_repo_refused() -> None:

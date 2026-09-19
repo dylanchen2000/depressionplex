@@ -50,6 +50,10 @@ class PairFeatures:
     d_area_frac: float                # (area_cur − area_prev) / area_prev
     above_water_frac_cur: float | None
     wall_dist_px_cur: float | None
+    #: R2-115 T2：frame_prev 与 frame_cur 之间非 observed 的抽样记录条数。
+    #: 0 = 相邻 observed；>0 = 这对帧**跨观测缺口**（lost_short/unclear），
+    #: 速度/位移不是连续行为量，必须单列，不进连续统计。
+    gap_records_between: int = 0
 
 
 def _wrap_angle(d: float) -> float:
@@ -116,7 +120,8 @@ def pair_features(*, frame_prev: int, frame_cur: int, fps: float,
                   theta_prev: float, theta_cur: float,
                   spatial_scale_px: float,
                   above_water_frac_cur: float | None,
-                  wall_dist_px_cur: float | None) -> PairFeatures:
+                  wall_dist_px_cur: float | None,
+                  gap_records_between: int = 0) -> PairFeatures:
     m_prev = sil.metrics(mask_prev, with_holes=False)
     m_cur = sil.metrics(mask_cur, with_holes=False)
     if m_prev is None or m_cur is None:
@@ -127,6 +132,8 @@ def pair_features(*, frame_prev: int, frame_cur: int, fps: float,
     disp = float(np.hypot(cent_cur[0] - cent_prev[0], cent_cur[1] - cent_prev[1]))
     if spatial_scale_px <= 0:
         raise ValueError("空间尺度必须为正（杯内区宽度量不出来就别归一）")
+    if gap_records_between < 0:
+        raise ValueError(f"gap_records_between 不能为负: {gap_records_between}")
     d_area = ((m_cur.area - m_prev.area) / m_prev.area) if m_prev.area else 0.0
     return PairFeatures(
         frame_prev=frame_prev, frame_cur=frame_cur, dt_s=dt,
@@ -141,31 +148,61 @@ def pair_features(*, frame_prev: int, frame_cur: int, fps: float,
         d_area_frac=float(d_area),
         above_water_frac_cur=above_water_frac_cur,
         wall_dist_px_cur=wall_dist_px_cur,
+        gap_records_between=gap_records_between,
     )
 
 
+#: 连续统计覆盖的键（R2-115 T2：只吃 gap_records_between==0 的对）
+STAT_KEYS = ("disp_norm", "speed_norm_per_s", "dtheta_rad",
+             "residual_after_rigid", "d_area_frac")
+
+#: 跨缺口对在记录里逐条列出的上限（超出只留计数，记录是给人读的）
+MAX_CROSS_GAP_ROWS = 50
+
+
 def summarize(pairs: list[PairFeatures]) -> dict:
-    """逐对特征的汇总。**只汇总 observed 帧之间的对**，分母写清楚。
+    """逐对特征的汇总。连续统计**只吃相邻 observed 对**（R2-115 T2）。
+
+    跨观测缺口的对（lost_short/unclear 记录把两帧隔开）不是连续行为量：
+    2 秒缺口两端的"速度"混进了动物在缺口里干什么的未知数。这类对单列
+    （缺口条数/帧号/时长逐对记录），不进下面的连续统计——旧版把它们混进
+    同一个中位数，缺口越多"速度"越假。
 
     返回的是研究诊断数：中位数 + p90 + 对数。均值对这种重尾分布没意义，
     但中位数也得带 n——n 太小（<10）时这些数字什么都说明不了。
     """
-    if not pairs:
-        return {"n_pairs": 0,
-                "local_motion_inside_vs_outside": LOCAL_MOTION_NOT_IMPLEMENTED,
-                "local_motion_reason": LOCAL_MOTION_REASON}
+    cont = [p for p in pairs if p.gap_records_between == 0]
+    cross = [p for p in pairs if p.gap_records_between > 0]
+    out: dict = {
+        "n_pairs": len(pairs),
+        "n_pairs_continuous": len(cont),
+        "n_pairs_cross_gap": len(cross),
+        "local_motion_inside_vs_outside": LOCAL_MOTION_NOT_IMPLEMENTED,
+        "local_motion_reason": LOCAL_MOTION_REASON,
+    }
+    if cross:
+        out["cross_gap_pairs"] = {
+            "note": "对之间有观测缺口（lost_short/unclear 记录）：不进连续统计，"
+                    "缺口逐对列出（条数上限 %d）" % MAX_CROSS_GAP_ROWS,
+            "gaps": [{"frame_prev": p.frame_prev, "frame_cur": p.frame_cur,
+                      "gap_records": p.gap_records_between, "dt_s": p.dt_s}
+                     for p in cross[:MAX_CROSS_GAP_ROWS]],
+            "rows_omitted": max(0, len(cross) - MAX_CROSS_GAP_ROWS),
+        }
+    if not cont:
+        out["statistics_apply_to"] = None
+        out["stats_note"] = "没有相邻 observed 对：连续统计不输出（不填 0）"
+        for key in STAT_KEYS:
+            out[key] = None
+        return out
+
     def stat(vals: list[float]) -> dict:
         a = np.asarray(vals, dtype=float)
         return {"median": float(np.median(a)),
                 "p90": float(np.percentile(a, 90)),
                 "max": float(a.max())}
-    return {
-        "n_pairs": len(pairs),
-        "disp_norm": stat([p.disp_norm for p in pairs]),
-        "speed_norm_per_s": stat([p.speed_norm_per_s for p in pairs]),
-        "dtheta_rad": stat([p.dtheta_rad for p in pairs]),
-        "residual_after_rigid": stat([p.residual_after_rigid for p in pairs]),
-        "d_area_frac": stat([p.d_area_frac for p in pairs]),
-        "local_motion_inside_vs_outside": LOCAL_MOTION_NOT_IMPLEMENTED,
-        "local_motion_reason": LOCAL_MOTION_REASON,
-    }
+
+    out["statistics_apply_to"] = "continuous_pairs_only"
+    for key in STAT_KEYS:
+        out[key] = stat([getattr(p, key) for p in cont])
+    return out

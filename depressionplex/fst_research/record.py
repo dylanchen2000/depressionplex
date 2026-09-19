@@ -11,7 +11,9 @@
    两种 None 必须写不同的 semantics，混在一起就读错了。
 3. **活动 vs 不动不分类**——observed 帧里哪些算活动哪些算不动，
    是一条**新的科学口径**（运动判据/阈值），没有批准就不做。
-   本层只出可见性分区时长，并把"没做"和原因写进记录。
+   本层只出**抽样记录**的可见性分区计数与显式命名的时间加权估计
+   （R2-115 T1：抽样计数不是连续时长，`time_weighted_seconds` 的权重、
+   尾处理与"这是估计"都写进记录），并把"没做"和原因写进记录。
 
 身份关联走 DP-133 共用清单（两条线共用一张表，不另建真值表）：
 按 sha256 查登记行；**多个别名就全列**、`material_id` 写 null（同 DP-135 的规矩），
@@ -108,9 +110,53 @@ def top_reasons(diags: list[FrameDiag], limit: int = 6) -> list[dict]:
     return [{"reason": k, "frames": v} for k, v in rows]
 
 
+def time_weighted_seconds(diags: list[FrameDiag], *, fps: float,
+                          tail_spacing_frames: int,
+                          declared_absent: bool) -> dict:
+    """状态时长的**时间加权估计**（R2-115 T1）：显式命名、区间权重、尾处理写明。
+
+    抽样计数不是连续时长——旧版 `counts/fps` 把每条抽样记录当 1/fps 秒，
+    step=5 时低估 5 倍还叫"秒"。这里改成明确的估计量：
+    - 权重 = 相邻抽样记录的**实际源帧号差** / fps（区间权重，不假设等距）；
+    - 尾记录没有"下一条"，按一个抽样步长 `tail_spacing_frames/fps` 计——
+      这是**假设**，写进 provenance，不静默；
+    - 申报空杯 / 空序列 ⇒ 全 None：结果为空，不是 0 秒。
+    """
+    if declared_absent:
+        return {"seconds": {q: None for q in QUALITIES},
+                "provenance": {"computed": False,
+                               "reason": "申报空杯：结果为空，不输出 0 秒"}}
+    if not diags:
+        return {"seconds": {q: None for q in QUALITIES},
+                "provenance": {"computed": False, "reason": "抽样序列为空：结果为空"}}
+    if fps <= 0:
+        raise ValueError(f"fps 必须为正: {fps}")
+    if tail_spacing_frames < 1:
+        raise ValueError(f"尾处理步长必须 ≥ 1 帧: {tail_spacing_frames}")
+    total = {q: 0.0 for q in QUALITIES}
+    for i, d in enumerate(diags):
+        if i + 1 < len(diags):
+            span = diags[i + 1].frame - d.frame
+            if span <= 0:
+                raise ValueError(
+                    f"抽样记录帧号必须严格递增: {d.frame} → {diags[i + 1].frame}")
+        else:
+            span = tail_spacing_frames          # 尾处理：一个抽样步长（假设，已写明）
+        total[d.quality] = total.get(d.quality, 0.0) + span / fps
+    return {"seconds": {q: total[q] for q in QUALITIES},
+            "provenance": {
+                "computed": True,
+                "method": "时间加权估计：权重 = 相邻抽样记录的实际源帧号差 / fps",
+                "tail_handling": (f"尾记录按一个抽样步长 {tail_spacing_frames} 帧"
+                                  f"（{tail_spacing_frames / fps:.3f} s）计——假设，"
+                                  "视频末尾未被抽样的部分不补"),
+                "note": "这是抽样帧上的估计量，不是连续逐帧统计"}}
+
+
 def cup_record(*, cup_index: int, diags: list[FrameDiag], fps: float,
                declared_absent: bool, geometry: dict,
-               features_summary: dict, spatial_scale_px: float | None) -> dict:
+               features_summary: dict, spatial_scale_px: float | None,
+               sample_step_frames: int = 1) -> dict:
     counts = counts_of(diags)
     problems = check_partition(counts, len(diags))
     if problems:
@@ -119,14 +165,19 @@ def cup_record(*, cup_index: int, diags: list[FrameDiag], fps: float,
         semantics = BEHAVIOR_SECONDS_EMPTY
     else:
         semantics = BEHAVIOR_SECONDS_NO_WINDOW
+    tw = time_weighted_seconds(diags, fps=fps,
+                               tail_spacing_frames=sample_step_frames,
+                               declared_absent=declared_absent)
     return {
         "cup": cup_index,
         "declared_absent": declared_absent,
         "geometry": geometry,
         "spatial_scale_px": spatial_scale_px,
-        "analyzed_frames": len(diags),
-        "quality_counts": counts,
-        "observable_durations_s": {q: counts[q] / fps for q in QUALITIES},
+        # R2-115 T1：这些是**抽样记录**的计数，不是连续时长/帧数
+        "sampled_frames": len(diags),
+        "sampled_state_counts": counts,
+        "time_weighted_sampled_s": tw["seconds"],
+        "time_weighting": tw["provenance"],
         "behavior_seconds": None,
         "behavior_seconds_semantics": semantics,
         "motion_classification": {"performed": False,
@@ -138,7 +189,8 @@ def cup_record(*, cup_index: int, diags: list[FrameDiag], fps: float,
 
 
 def build_record(*, source: dict, time_base: dict, clock_ledger: dict,
-                 window: dict, coverage: dict, geometry_confirmation: dict,
+                 window: dict, coverage: dict, sampling: dict,
+                 geometry_confirmation: dict,
                  cups: list[dict], manifest: dict | None,
                  limits: list[str]) -> dict:
     return {
@@ -151,6 +203,8 @@ def build_record(*, source: dict, time_base: dict, clock_ledger: dict,
         "clocks": clock_ledger,
         "window": window,
         "coverage": coverage,
+        # R2-115 T1：抽样口径与实际消费的帧号（计数是抽样记录数，不是连续帧数）
+        "sampling": sampling,
         "geometry_confirmation": geometry_confirmation,
         "cups": cups,
         "must_not_enter_acceptance_paths": True,
