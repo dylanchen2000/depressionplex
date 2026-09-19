@@ -401,12 +401,16 @@ def confirmation_payload(env: geo.GeometryEnvelope, *, video_sha256: str,
         "envelope": json.loads(env.to_json()),
         "proposal_context": proposal_context,
         "instructions": (
-            "人工确认步骤：在叠加短片/静帧上逐杯核对，然后改本文件——"
-            "①envelope 里 tank（分析 ROI，**顶边必须在水线上方**，容纳探头/前肢）"
-            "与 water_surface（水线，必须**严格**在 tank 顶底边之间）的坐标；"
-            "②envelope.confirmed 与每个 primitive 的 confirmed 都改成 true；"
-            "③binding.confirmed_by 填确认人、confirmed_at 填时间（ISO 8601）、"
-            "confirmed_basis 填看了哪些叠加材料。改完用 --geometry 指回本文件。"
+            "这是脚本生成的**提案态** wrapper（status=proposal_unconfirmed），"
+            "**不要手工编辑本 JSON**。人工确认走「确认表 + 构建脚本」，同事全程不碰 JSON："
+            "①在材料脚本产出的 `确认表_<视频>.md` 上逐杯给 ROI/水线 verdict"
+            "（采用候选 / 修正并填坐标 / 无法确认——**两条候选都允许错、允许无法确认**），"
+            "并填确认人/确认时间(ISO 8601)/看了哪些材料；②由构建脚本"
+            "（build_confirmed_geometry.py）据表应用坐标、翻 envelope.confirmed 与每个 "
+            "primitive 的 confirmed、填 binding，并校验水线**严格**在 tank（分析 ROI，"
+            "顶边在水线上方）顶底边之间、杯号 1..n 左到右升序，产出确认件；任一杯"
+            "无法确认/字段未填即**拒绝产件、保持提案态**（半确认比没有更危险）；"
+            "③用 --geometry 指回构建脚本产出的确认件回灌重跑。"
             "video_sha256/width/height/cup_ids 由脚本绑定，**不要改**：改了加载即拒。"),
     }
 

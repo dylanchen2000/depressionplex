@@ -580,7 +580,8 @@ def test_load_confirmed_file_refuses_bare_envelope() -> None:
 
 
 def test_confirmation_payload_prefills_binding() -> None:
-    """Agent 生成、人只改几何/确认字段：binding 由脚本预填（视频 sha/尺寸/杯号）。"""
+    """R3-115：提案态 wrapper 由脚本预填 binding；instructions 不再叫人手改 JSON，
+    改指向「确认表 + 构建脚本」（同事不编辑 JSON）。"""
     env = _confirmed_multi_env(n=2, confirmed=False)
     payload = cg.confirmation_payload(env, video_sha256=_SHA, video_bytes=99,
                                       width=220, height=120, cup_ids=[1, 2])
@@ -589,5 +590,9 @@ def test_confirmation_payload_prefills_binding() -> None:
     b = payload["binding"]
     assert b["video_sha256"] == _SHA and b["video_bytes"] == 99
     assert b["width"] == 220 and b["height"] == 120 and b["cup_ids"] == [1, 2]
-    assert b["confirmed_by"] == "" and b["confirmed_at"] == ""   # 留给人填
+    assert b["confirmed_by"] == "" and b["confirmed_at"] == ""   # 留给构建脚本按确认表填
+    ins = payload["instructions"]
     assert "instructions" in payload
+    # 不再指示手改本文件；改走确认表 + 构建脚本，并允许「无法确认」
+    assert "改本文件" not in ins and "不要手工编辑" in ins
+    assert "确认表" in ins and "构建脚本" in ins and "无法确认" in ins
