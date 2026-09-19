@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import numpy as np
 
+from depressionplex.assay_core import silhouette as sil
 from depressionplex.fst_research import cup_features as feat
 
 
@@ -94,6 +95,104 @@ def test_non_rigid_deformation_leaves_residual() -> None:
     cur[20:25, 26:37] = True
     p = _pf(prev, cur)
     assert p.residual_after_rigid > 0.1      # 刚性补偿后仍对不上 ⇒ 非刚性信号
+
+
+# ---------------------------------------------------------------------------
+# R2-115 R组：刚体旋转的符号——配准用带方向轴向最短角，报告幅度仍非负
+# ---------------------------------------------------------------------------
+
+def _theta(m: np.ndarray) -> float:
+    mm = sil.metrics(m, with_holes=False)
+    assert mm is not None
+    return mm.theta
+
+
+def test_signed_axial_range_magnitude_and_boundary() -> None:
+    """_signed_axial：范围 [−π/2, π/2)、幅度与 _wrap_angle 一致、跨轴角边界对。"""
+    assert abs(feat._signed_axial(0.35) - 0.35) < 1e-12
+    assert abs(feat._signed_axial(-0.35) + 0.35) < 1e-12
+    for d in np.linspace(-4 * np.pi, 4 * np.pi, 161):
+        v = feat._signed_axial(d)
+        assert -np.pi / 2 <= v < np.pi / 2
+        assert abs(abs(v) - feat._wrap_angle(d)) < 1e-9   # 报告幅度口径不变
+        assert abs(feat._signed_axial(d + np.pi) - v) < 1e-9  # 轴向等价
+    # 跨轴角边界：theta_prev=π/2（竖直条），真旋转 +5° 后 theta 折到 −175°附近
+    # ⇒ 原始 delta≈−3.054，带符号轴向最短角必须还原成 +0.0873
+    v = feat._signed_axial(-1.48353 - 1.5707963)
+    assert abs(v - np.radians(5)) < 1e-3 and v > 0
+
+
+def test_rotate_about_direction_in_image_coordinates() -> None:
+    """方向约定核对（评审要求：结合图像坐标旋转方向测，不是只改公式）。
+
+    图像坐标 y 向下；_rotate_about(mask, +d) 使实测主轴角 theta **增加** d
+    （mod π）。配准因此应传 _signed_axial(theta_cur − theta_prev)。
+    """
+    base = _mask((28, 31), (10, 49))             # 水平条，theta=0
+    for deg in (20, -20, 30, -30):
+        rot = feat._rotate_about(base, 29.5, 29.5, np.radians(deg))
+        delta = _theta(rot) - _theta(base)
+        assert np.sign(delta) == np.sign(deg), \
+            f"_rotate_about({deg:+d}°) 后 theta 变化方向错了: {delta:+.4f}"
+        assert abs(abs(delta) - abs(np.radians(deg))) < 0.02
+
+
+def test_rigid_residual_rotation_sign_symmetric() -> None:
+    """评审复现：同一刚体旋转（无形变），±20°/±30° 残差必须同量级的小值。
+
+    旧代码把非负 _wrap_angle 传给 _rotate_about：+20° 残差 0.107 而 −20°
+    0.697（+30° 0.149 / −30° 0.778）——反向转动被朝错误方向补，方向性缺陷
+    冒充"非刚性信号"。最近邻离散化留下小残差是正常的，系统性大差异不是。
+    """
+    base = _mask((28, 31), (10, 49))
+    for deg in (20, -20, 30, -30):
+        rot = feat._rotate_about(base, 29.5, 29.5, np.radians(deg))
+        r = feat.rigid_residual(base, rot, _cent(base), _cent(rot),
+                                _theta(base), _theta(rot))
+        assert r < 0.15, f"{deg:+d}° 刚体旋转残差过大（方向没补对？）: {r:.6f}"
+
+
+def test_rigid_residual_wrong_sign_is_detectably_worse() -> None:
+    """方向敏感性钉子：谎报 theta_cur 符号 ⇒ 残差立刻大——证明补的方向在起作用。"""
+    base = _mask((28, 31), (10, 49))
+    rot = feat._rotate_about(base, 29.5, 29.5, np.radians(-20))
+    tp, tc = _theta(base), _theta(rot)           # tc ≈ −0.354
+    right = feat.rigid_residual(base, rot, _cent(base), _cent(rot), tp, tc)
+    wrong = feat.rigid_residual(base, rot, _cent(base), _cent(rot), tp, -tc)
+    assert right < 0.15
+    assert wrong > 0.4                           # 旧 abs 行为等效于这个"wrong"
+    assert wrong - right > 0.3
+
+
+def test_rigid_residual_rotation_plus_translation() -> None:
+    """纯旋转+平移（评审用例）：Δθ=−25° 且质心挪 (5,3) ⇒ 残差仍是离散化小值。"""
+    base = _mask((28, 31), (10, 49))
+    rot = feat._rotate_about(base, 29.5, 29.5, np.radians(-25))
+    moved = feat._translate(rot, 3, 5)
+    r = feat.rigid_residual(base, moved, _cent(base), _cent(moved),
+                            _theta(base), _theta(moved))
+    assert r < 0.15
+
+
+def test_true_non_rigid_with_rotation_still_flagged() -> None:
+    """真正非刚体（评审用例）：旋转 −20° 后身体还弯曲/伸长 ⇒ 残差留得下。"""
+    base = _mask((28, 31), (10, 49))
+    rot = feat._rotate_about(base, 29.5, 29.5, np.radians(-20))
+    deformed = rot.copy()
+    deformed[20:31, 20:26] = True                # 附加形变：不是刚体能补掉的
+    r = feat.rigid_residual(base, deformed, _cent(base), _cent(deformed),
+                            _theta(base), _theta(deformed))
+    assert r > 0.1
+
+
+def test_reported_dtheta_magnitude_stays_nonnegative() -> None:
+    """报告口径：dtheta_rad 仍是非负幅度（评审允许），配准符号不外泄。"""
+    base = _mask((28, 31), (10, 49))
+    rot = feat._rotate_about(base, 29.5, 29.5, np.radians(-30))
+    p = _pf(base, rot, theta_prev=_theta(base), theta_cur=_theta(rot))
+    assert p.dtheta_rad >= 0.0
+    assert abs(p.dtheta_rad - abs(np.radians(-30))) < 0.02
+    assert p.residual_after_rigid < 0.15         # 但残差配准用了符号
 
 
 def test_pair_features_rejects_bad_input() -> None:

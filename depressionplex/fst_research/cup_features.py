@@ -43,8 +43,9 @@ class PairFeatures:
     disp_px: float                    # 质心平移量（像素，未归一）
     disp_norm: float                  # disp_px / 杯内区宽度（可解释尺度）
     speed_norm_per_s: float           # disp_norm / dt
-    dtheta_rad: float                 # 主轴方向变化（无方向性，取 mod π 后的最小角）
-    residual_after_rigid: float       # 刚性对齐后 1−IoU；0=纯刚体
+    dtheta_rad: float                 # 主轴转动**幅度**（mod π 最小角，非负——报告口径；
+                                      # 配准另用带符号的 _signed_axial，R2-115 R组）
+    residual_after_rigid: float       # 带方向刚性对齐后 1−IoU；0=纯刚体
     d_elongation: float
     d_bend: float
     d_area_frac: float                # (area_cur − area_prev) / area_prev
@@ -57,9 +58,27 @@ class PairFeatures:
 
 
 def _wrap_angle(d: float) -> float:
-    """主轴无方向性（θ 与 θ+π 等价），差值折到 [0, π/2]。"""
+    """主轴无方向性（θ 与 θ+π 等价），差值折到 [0, π/2] 的**幅度**。
+
+    只用于报告 dtheta_rad（转动幅度非负是评审允许的）；**不许**拿它去
+    旋转掩膜配准——abs 丢掉了方向，反向旋转会被当正向补（R2-115 R组：
+    同一椭圆刚体 −20° 旋转，旧代码残差 0.697 vs +20° 的 0.107）。
+    """
     d = abs(d) % np.pi
     return float(min(d, np.pi - d))
+
+
+def _signed_axial(delta: float) -> float:
+    """保留符号的轴向最短角（R2-115 R组）：折到 [−π/2, π/2)。
+
+    主轴 mod π 折叠后，把 prev 转到 cur 的最短旋转是有方向的：
+    `((delta + π/2) mod π) − π/2`。幅度与 _wrap_angle 一致
+    （|_signed_axial(d)| == _wrap_angle(d)），符号供 _rotate_about 配准用。
+    方向约定（在测试中用图像坐标核对，不是只改公式）：_rotate_about(mask,
+    d) 使实测主轴角 theta 增加 d（mod π）——即配准应传
+    _signed_axial(theta_cur − theta_prev)。
+    """
+    return float(((delta + np.pi / 2) % np.pi) - np.pi / 2)
 
 
 def _translate(mask: np.ndarray, dy: int, dx: int) -> np.ndarray:
@@ -96,6 +115,11 @@ def rigid_residual(mask_prev: np.ndarray, mask_cur: np.ndarray,
                    theta_prev: float, theta_cur: float) -> float:
     """把 prev 按 (Δx, Δy, Δθ) 对齐到 cur 后的 1−IoU。
 
+    Δθ 用**保留符号**的轴向最短角（_signed_axial，R2-115 R组）：
+    旋转方向丢了的话，反向转动会被朝错误方向补——同一椭圆刚体旋转
+    （无形变）本该只剩最近邻离散化的小残差，旧代码 −20°/−30° 却给出
+    0.697/0.778 的系统性大残差，把"方向性缺陷"混进"非刚性信号"。
+
     两个掩膜都空 ⇒ 0.0（没有东西可残差）；只有一个空 ⇒ 1.0（完全没对上）。
     """
     a = np.asarray(mask_prev, dtype=bool)
@@ -108,7 +132,7 @@ def rigid_residual(mask_prev: np.ndarray, mask_cur: np.ndarray,
     dy = int(round(cent_cur[1] - cent_prev[1]))
     aligned = _translate(a, dy, dx)
     aligned = _rotate_about(aligned, cent_cur[1], cent_cur[0],
-                            _wrap_angle(theta_cur - theta_prev))
+                            _signed_axial(theta_cur - theta_prev))
     inter = int((aligned & b).sum())
     union = int((aligned | b).sum())
     return 1.0 - (inter / union if union else 0.0)
