@@ -52,6 +52,55 @@ def test_water_surface_must_be_inside_tank() -> None:
     assert any("不在" in p for p in problems), problems
 
 
+def test_water_surface_strict_inequality_single_instance() -> None:
+    """R2-115 G2：单实例旧素材的水线区间是**严格开区间** min(ys) < wy < max(ys)。
+
+    早先版本悄悄放宽成闭区间（<=），把"水线压杯顶/杯底"从不通过变通过——
+    这改变了旧单实例语义。共享契约不接受静默语义变更，这里钉死严格开区间：
+    恰好压在顶边/底边都算不通过。
+    """
+    def _env(wy: float) -> G.GeometryEnvelope:
+        e = G.GeometryEnvelope(assay="FST", video_size=(640, 480))
+        G.make_rect(e, G.ROLE_TANK, 100, 100, 300, 300, confirmed=True)  # ys 100..300
+        G.make_line(e, G.ROLE_WATER_SURFACE, 100, wy, 300, wy, confirmed=True)
+        return e
+
+    assert _env(200).validate() == []                       # 严格内部：通过
+    assert any("不在" in p for p in _env(100).validate())    # 压顶边：不通过
+    assert any("不在" in p for p in _env(300).validate())    # 压底边：不通过
+    assert any("不在" in p for p in _env(99).validate())     # 顶边之外：不通过
+    assert any("不在" in p for p in _env(301).validate())    # 底边之外：不通过
+
+
+def test_fst_multi_cup_pairing_by_instance() -> None:
+    """R2-115 G2：多杯时 tank 与 water_surface 按同号配对，逐条检查。"""
+    def _two_cup() -> G.GeometryEnvelope:
+        e = G.GeometryEnvelope(assay="FST", video_size=(640, 480), confirmed=True)
+        for inst, (x0, x1) in {1: (20, 90), 2: (120, 190)}.items():
+            G.make_rect(e, G.ROLE_TANK, x0, 100, x1, 300, instance=inst, confirmed=True)
+            G.make_line(e, G.ROLE_WATER_SURFACE, x0, 200, x1, 200,
+                        instance=inst, confirmed=True)
+        return e
+
+    assert _two_cup().validate() == []                      # 两杯各自配对：通过
+
+    # 缺同号水线：tank_2 没有 water_surface_2
+    e = _two_cup()
+    e.primitives = [p for p in e.primitives
+                    if not (p.semantic_role == G.ROLE_WATER_SURFACE and p.instance == 2)]
+    assert any("tank_2" in p and "缺同号" in p for p in e.validate())
+
+    # 同号重复：water_surface_1 出现两次 ⇒ 配对有歧义
+    e = _two_cup()
+    G.make_line(e, G.ROLE_WATER_SURFACE, 20, 210, 90, 210, instance=1, confirmed=True)
+    assert any("water_surface_1" in p and "重复" in p for p in e.validate())
+
+    # 孤儿水线：water_surface_3 没有同号 tank
+    e = _two_cup()
+    G.make_line(e, G.ROLE_WATER_SURFACE, 300, 200, 380, 200, instance=3, confirmed=True)
+    assert any("water_surface_3" in p and "孤儿" in p for p in e.validate())
+
+
 def test_out_of_frame_coords_flagged() -> None:
     env = G.GeometryEnvelope(assay="FST", video_size=(640, 480))
     G.make_rect(env, G.ROLE_TANK, 10, 10, 700, 400, confirmed=True)

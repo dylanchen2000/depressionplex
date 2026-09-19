@@ -1,0 +1,844 @@
+"""DP-136 · FST 独立研究入口 CLI：真视频 → 研究诊断 + 叠加短片。
+
+用法（仓库外落盘，`--out-dir` 在仓库里会被拒）：
+
+    python -m depressionplex.cli.fst_research <视频> --out-dir ~/Work/fst_diag \\
+        --manifest docs/共用输入身份清单_v1.csv
+
+产三件，全在本次运行的独立 run 目录 `--out-dir/<名>_run_<时间戳>_<hex8>/`
+（R2-115 P组：研究证据不被下一轮覆盖——旧 run 目录只读，重复运行同一
+`--out-dir` 各得其所）：
+- `诊断_<名>.json` —— 研究诊断记录（schema `fst-research-v1`），带完整
+  研究配置：代码 SHA/dirty、实际命令行、研究参数及起点值出处、输入哈希；
+- `叠加_<名>_杯<k>.mp4` —— 每杯一段带帧号/状态烧字的叠加短片，
+  给人核"我们看的是不是对的动物区域"（Spec A §5.1）。
+  **分析 ROI、水体区、水线分开画**（复核 §9：人核的是三件不同的东西）；
+- `几何提案_<名>.json` —— 确认件 wrapper（schema `fst-confirmed-geometry-v1`）
+  的**提案态**：binding 已预填（视频 sha256/尺寸/杯号），几何 confirmed=False。
+  人核对叠加图后改几何值、翻 confirmed、填确认人/时间，即成确认件。
+
+**完成清单**：三件全部成功写出后，run 目录里最后落 `_完成清单.json`
+（逐件 sha256 + 输入哈希 + 代码出处）。中途任何失败（解码/编码器断管/
+JSON 写出）⇒ 只清理**本次** run 目录，旧证据分毫不动；没有完成清单的
+run 目录视为未完成，不得当交付证据。
+
+**人工确认几何的输入（R2-115 G4）**：`--geometry <确认件.json>`。
+加载时逐项核对 binding：整段视频 sha256、帧尺寸、cup_ids 与 envelope
+实例一致且左到右升序、确认人/确认时间非空、envelope 全部 confirmed 且
+validate() 干净（含严格水线区间）。任何一项不符即拒绝——确认件绑定的
+不是这段素材时，拿它分析就是张冠李戴。确认件的 sha256 随诊断记录落盘。
+
+**申报空杯绑物理杯号（R2-115 G3）**：`--declared-empty` 的杯号 = 画面
+左到右的物理杯号（1 起），不是列表下标。杯候选数与 `--cups` 不符时
+物理编号有歧义 ⇒ **拒绝应用申报**（照实记录，相关杯保持未决），不许
+让申报顺着过滤后的下标漂移。
+
+退出码：0 = 记录产出且至少一杯看得见动物（或有申报空杯）；
+3 = 记录产出但**没有一杯看得见动物**（"看得清"这步没过，Spec A §5.1，
+    记录照写、照实报，但不许拿退出码 0 假装这步过了）；
+2 = 守卫/用法拒绝；1 = 解码/编码失败（本次 run 目录已清理）；
+4 = 产物写出失败（编码器断管/JSON 失败等；本次 run 目录已清理，
+    旧证据未动——没有完成清单就没有可交付状态）。
+
+**本入口不套标准窗**：t0 没给（`--t0-source-s`）时 `protocol_alignment=unknown`，
+诊断走整条媒体时间轴。t0 要人给并附证据字符串，脚本不猜、不从清单猜。
+"""
+
+from __future__ import annotations
+
+import argparse
+import inspect
+import json
+import math
+import shlex
+import shutil
+import sys
+from pathlib import Path
+
+import numpy as np
+
+from .. import video
+from ..assay_core import silhouette as sil
+from ..fst_research import cup_features as feat
+from ..fst_research import cup_geometry as cg
+from ..fst_research import cup_perception as perc
+from ..fst_research import isolation
+from ..fst_research import overlay as ov
+from ..fst_research import record as rec
+from ..fst_research import timeline as tl
+from ._stdio import force_utf8
+
+EXIT_OK = 0
+EXIT_DECODE = 1
+EXIT_REFUSED = 2
+EXIT_NOTHING_VISIBLE = 3
+#: R2-115 P组：产物写出失败（编码器断管/JSON 失败等）。本次 run 目录已清理、
+#: 旧证据未动；没有完成清单 ⇒ 没有可交付状态。
+EXIT_ARTIFACT = 4
+
+#: 每杯诊断记录里保留的非 observed 逐帧行上限。超出只留计数与 top 原因——
+#: 记录是给人读的，不是数据库。
+MAX_REASON_ROWS = 500
+
+
+def _parse_cup_ids(text: str, flag: str = "--declared-empty") -> list[int]:
+    """解析杯号列表：返回**物理杯号**（1 起），不减 1、不当下标。
+
+    R2-115 G3：杯号到 cup 的绑定发生在 `cup_geometry.bind_declared_empty`
+    （数目有歧义即拒绝应用），这里只做语法解析。
+    """
+    if not text.strip():
+        return []
+    out = []
+    for part in text.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        v = int(part)
+        if v < 1:
+            raise ValueError(f"{flag} 的杯号从 1 起：{v}")
+        out.append(v)
+    return sorted(set(out))
+
+
+def _parse_channel_mapping(text: str) -> dict[int, int]:
+    """解析 `--channel-cup-mapping`：`通道=物理杯,...`（R3-115 ①）。
+
+    通道号是评分员清单里的记载形态，物理杯号是画面左到右 1 起。两者之间的
+    对应是**需要证据的事实**，不是约定：映射 + 证据串齐了才许把通道申报换算
+    成物理杯申报，缺一就保持映射未决（见 main 里的处理）。
+    """
+    out: dict[int, int] = {}
+    for part in text.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        lhs, sep, rhs = part.partition("=")
+        if not sep:
+            raise ValueError(
+                f"--channel-cup-mapping 的格式是 通道=物理杯：{part!r}")
+        ch, cup = int(lhs), int(rhs)
+        if ch < 1 or cup < 1:
+            raise ValueError(f"--channel-cup-mapping 的通道/杯号从 1 起：{part!r}")
+        if ch in out and out[ch] != cup:
+            raise ValueError(f"通道 {ch} 被映到两个物理杯：{out[ch]} 与 {cup}")
+        out[ch] = cup
+    return out
+
+
+#: 记录里 declared_empty_binding 的语义注（R3-115 ①）：applied 的词义钉死。
+DECLARATION_SEMANTICS = (
+    "applied 只说明程序按给定的物理杯号/映射执行了申报；映射是否成立看 "
+    "declaration.mapping_verified 与证据串。status=mapping_unresolved 或 "
+    "mapping_verified=False 时申报没有落到任何物理杯上，相关杯保持未决。")
+
+#: R3-115 ③：确认件没有 water_body（人工确认只画 tank ROI + 水线，派生的
+#: 水体区不进确认件，`proposals_from_confirmed` 里 water_body=None）。三处
+#: 平时用 water_body 的计算于是**退回整个 ROI**，即使确认件坐标与提案逐位
+#: 相同，这几处也可能与提案态不同——这类差异是"少了一个派生量"造成的，
+#: **不是**人工修正了几何。落进记录，免得对照时被算到人工修正头上。
+WATER_BODY_FALLBACK_NOTE = {
+    "applies": True,
+    "reason": ("人工确认件不含派生量 water_body（None）；下列计算退回整个分析 ROI，"
+               "与提案态用 water_body 时的取值可能不同——即使坐标逐位相同"),
+    "affected_computations": [
+        "对比度检查的背景亮度中值（bright_med）：ROI vs water_body 的中值可能不同，"
+        "影响“背景亮度对比不足（采集对比度问题）”这一 unclear 判定",
+        "候选面积占比的分母（interior_area）：整 ROI 面积 ≥ water_body 面积，"
+        "同样候选的占比被稀释，影响“候选面积超过水体区 X%（反光/波纹连片）”判定",
+        "静态动物吸收陷阱检查区（_static_animal_blob）：在整 ROI 而非 water_body 内找"
+        "动物尺寸连通域，线上留白里的挂钩/架子等静态暗结构可能被算进来",
+    ],
+    "attribution": ("以上差异由 water_body=None 的回退产生，不得归因于人工几何修正；"
+                    "判断人工修正的效果，须在坐标完全不变、仅切换确认件输入的对照下看"),
+}
+
+
+def main(argv: list[str] | None = None) -> int:
+    force_utf8()
+    ap = argparse.ArgumentParser(
+        prog="fst_research",
+        description="FST 独立研究入口：真视频 → 研究诊断 + 叠加短片（不进仓库、不套标准窗）")
+    ap.add_argument("video", type=Path, help="原视频路径")
+    ap.add_argument("--out-dir", type=Path, required=True,
+                    help="落盘目录；仓库工作树/data//tests/ 一律拒绝")
+    ap.add_argument("--step", type=int, default=5,
+                    help="分析抽帧步长（帧）；默认 5 = 25 fps 下 5 Hz")
+    ap.add_argument("--cups", type=int, default=4, help="期望杯数；数目不符即报问题")
+    ap.add_argument("--calib", type=int, default=40, help="背景/几何标定的抽帧数")
+    ap.add_argument("--declared-empty", default="",
+                    help="人工申报的空杯号（**物理杯号**，1 起，逗号分隔，按画面左到右）。"
+                         "空杯只认申报；杯候选数与 --cups 不符时拒绝应用（绑定有歧义）。"
+                         "与 --declared-empty-channel 互斥：申报只走一条路")
+    ap.add_argument("--declared-empty-channel", default="",
+                    help="评分员清单记载的**通道号**申报（1 起，逗号分隔）。通道≠物理杯："
+                         "通道↔物理杯映射必须有证据才许换算（--channel-cup-mapping + "
+                         "--mapping-evidence），否则映射未决、本次不应用申报")
+    ap.add_argument("--channel-cup-mapping", default="",
+                    help="通道↔物理杯映射，格式 通道=物理杯,...（例 4=4）。"
+                         "给了映射不给证据串 ⇒ 仍按映射未决处理")
+    ap.add_argument("--mapping-evidence", default="",
+                    help="通道↔物理杯映射的依据字符串（谁、依据什么材料核对的）。"
+                         "映射是事实不是约定：无依据不应用")
+    ap.add_argument("--geometry", type=Path, default=None,
+                    help="人工确认件（fst-confirmed-geometry-v1 wrapper JSON）。"
+                         "给了就跳过自动提案，用确认件的 ROI/水线，并把 binding 与"
+                         "文件 sha256 随记录落盘；binding 与本视频不符即拒绝")
+    ap.add_argument("--roi-above-margin", type=int, default=cg.ROI_ABOVE_WATER_MARGIN_PX,
+                    help="分析 ROI 在水线上方留白的像素数（起点值，须在叠加图上人工核对）")
+    ap.add_argument("--lost-short-max-gap-frames", type=int,
+                    default=perc.DEFAULT_LOST_SHORT_MAX_GAP_FRAMES,
+                    help="短暂丢失门的**源帧跨度**上限（前后 observed 抽样点的实际帧号差；"
+                         "起点值 11 ≈ 0.44 s @ 25 fps，未经真实素材标定，改动随记录落盘）")
+    ap.add_argument("--clip", type=int, default=100, help="每杯叠加短片的分析帧数")
+    ap.add_argument("--clip-at", type=float, default=0.4,
+                    help="短片起点取分析序列的位置比例（默认 40%% 处，避开开场手忙脚乱）")
+    ap.add_argument("--manifest", type=Path, default=None,
+                    help="DP-133 共用身份清单；不给则身份关联记 null")
+    ap.add_argument("--t0-source-s", type=float, default=None,
+                    help="入水时刻（源媒体时间，秒）。要人给，脚本不猜")
+    ap.add_argument("--t0-evidence", default="",
+                    help="--t0-source-s 的依据字符串；给 t0 不给依据即拒")
+    ap.add_argument("--self-check", action="store_true",
+                    help="只跑路径隔离自检（静态 AST 闸），不碰视频")
+    ap.add_argument("--dark", type=float, default=96.0, help="暗阈（起点值，换采集条件要重看直方图）")
+    ap.add_argument("--bright", type=float, default=150.0, help="亮阈（同上）")
+    ap.add_argument("--min-area", type=int, default=40, help="候选连通域最小面积（px）")
+    args = ap.parse_args(argv)
+
+    if args.self_check:
+        violations, files = isolation.self_check()
+        print(f"路径隔离自检：扫了 {len(files)} 个文件")
+        for f in files:
+            print(f"  - {f}")
+        if violations:
+            print(f"违规 {len(violations)} 条：", file=sys.stderr)
+            for v in violations:
+                print(f"  ! {v}", file=sys.stderr)
+            return EXIT_REFUSED
+        print("违规 0 条：研究入口未引用任何 TST 专属符号/被禁模块")
+        return EXIT_OK
+
+    if args.t0_source_s is not None and not args.t0_evidence.strip():
+        print("给了 --t0-source-s 却没给 --t0-evidence：t0 是科学事实不是参数，"
+              "必须带依据字符串", file=sys.stderr)
+        return EXIT_REFUSED
+    try:
+        declared_physical = _parse_cup_ids(args.declared_empty)
+        declared_channels = _parse_cup_ids(args.declared_empty_channel,
+                                           "--declared-empty-channel")
+        ch_mapping = _parse_channel_mapping(args.channel_cup_mapping)
+        out_dir = ov.refuse_in_repo(args.out_dir)
+    except ValueError as e:
+        print(f"拒绝：{e}", file=sys.stderr)
+        return EXIT_REFUSED
+    if declared_physical and declared_channels:
+        print("拒绝：--declared-empty（物理杯号）与 --declared-empty-channel（通道号）"
+              "同时给——申报只走一条路，一次运行不混两种形态", file=sys.stderr)
+        return EXIT_REFUSED
+    # ---- 通道申报 → 物理杯：映射是事实不是约定（R3-115 ①）----
+    mapping_evidence = args.mapping_evidence.strip() or None
+    de_unresolved_note = None
+    if declared_channels:
+        missing = [ch for ch in declared_channels if ch not in ch_mapping]
+        if missing or mapping_evidence is None:
+            why = []
+            if missing:
+                why.append(f"映射缺通道 {missing}")
+            if mapping_evidence is None:
+                why.append("缺 --mapping-evidence 依据串")
+            de_unresolved_note = (
+                f"通道申报 {declared_channels} 没有可验证的通道↔物理杯映射"
+                f"（{'；'.join(why)}）：本次**不应用**申报，映射保持未决；"
+                "applied（任何记录里）只说明程序执行了申报，不表示映射已验证。")
+            declared: list[int] = []
+            mapping_verified = False
+        else:
+            declared = sorted({ch_mapping[ch] for ch in declared_channels})
+            mapping_verified = True
+        declaration = {
+            "kind": "channel", "declared_channels": declared_channels,
+            "channel_cup_mapping": dict(ch_mapping) or None,
+            "mapping_evidence": mapping_evidence,
+            "mapping_verified": mapping_verified}
+    elif declared_physical:
+        declared = declared_physical
+        declaration = {
+            "kind": "physical_cup", "declared_channels": [],
+            "channel_cup_mapping": dict(ch_mapping) or None,
+            "mapping_evidence": mapping_evidence,
+            "mapping_verified": None}
+    else:
+        declared = []
+        declaration = {
+            "kind": "none", "declared_channels": [],
+            "channel_cup_mapping": dict(ch_mapping) or None,
+            "mapping_evidence": None,
+            "mapping_verified": None}
+    # ---- 数值守卫（R2-115 T3）：坏数在写任何文件**之前**拒绝 ----
+    if args.step < 1:
+        print(f"拒绝：--step 必须 ≥ 1（得到 {args.step}）；步长 0/负会让抽样序列退化",
+              file=sys.stderr)
+        return EXIT_REFUSED
+    if args.lost_short_max_gap_frames < 1:
+        print(f"拒绝：--lost-short-max-gap-frames 必须 ≥ 1（得到 "
+              f"{args.lost_short_max_gap_frames}）", file=sys.stderr)
+        return EXIT_REFUSED
+    if args.min_area < 1:
+        print(f"拒绝：--min-area 必须 ≥ 1（得到 {args.min_area}）", file=sys.stderr)
+        return EXIT_REFUSED
+    if args.roi_above_margin < 0:
+        print(f"拒绝：--roi-above-margin 不能为负（得到 {args.roi_above_margin}）",
+              file=sys.stderr)
+        return EXIT_REFUSED
+    for name, val in (("--t0-source-s", args.t0_source_s),
+                      ("--dark", args.dark), ("--bright", args.bright),
+                      ("--clip-at", args.clip_at)):
+        if val is not None and not math.isfinite(val):
+            print(f"拒绝：{name} 不是有限数（NaN/Inf）：坏数不进记录、不参与计算",
+                  file=sys.stderr)
+            return EXIT_REFUSED
+
+    try:
+        info = video.probe(args.video)
+    except video.VideoError as e:
+        print(f"解码/探测失败：{e}", file=sys.stderr)
+        return EXIT_DECODE
+
+    sha = rec.sha256_of(info.path)
+    lookup = rec.manifest_lookup(args.manifest, sha) if args.manifest else {
+        "found": False, "aliases": [], "material_id": None,
+        "note": "未提供 --manifest：不做身份关联，不猜"}
+
+    # ---- 素材角色只认清单登记（R2-115 T3）：不再把任何输入口头称作"原视频" ----
+    media_role, offset_evidence, role_problems = tl.resolve_media_role(
+        lookup if args.manifest else None)
+    if role_problems:
+        for prob in role_problems:
+            print(f"拒绝：{prob}", file=sys.stderr)
+        return EXIT_REFUSED
+    clock = (tl.CLOCK_ANALYSIS_MEDIA if media_role == tl.MEDIA_ROLE_TRANSCODE
+             else tl.CLOCK_SOURCE_MEDIA)
+    try:
+        tb = tl.TimeBase(
+            fps=info.fps, n_frames=info.n_frames, clock=clock,
+            protocol_alignment=(tl.PROTOCOL_ALIGNMENT_KNOWN
+                                if args.t0_source_s is not None
+                                else tl.PROTOCOL_ALIGNMENT_UNKNOWN),
+            t0_source_s=args.t0_source_s,
+            analysis_offset_s=None,       # 未查到就是 None：known_t0+转码件会被拒
+            offset_evidence=offset_evidence,
+            frame_count_source=info.frame_count_source,
+            t0_evidence=args.t0_evidence,
+            media_role=media_role)
+    except ValueError as e:
+        print(f"拒绝：{e}", file=sys.stderr)
+        return EXIT_REFUSED
+    ledger = tl.build_ledger(tb)
+    plan = tl.plan_window(tb)
+
+    # ---- 几何来源：人工确认件（--geometry）优先，否则从真帧提案 ----
+    # 标定帧两条路都要（背景 max 模型是逐帧分割的基础，与几何来源无关）。
+    calib_idx = [int(v) for v in np.linspace(0, info.n_frames - 1, args.calib)]
+    try:
+        calib_frames = video.frames_at(info, calib_idx)
+    except video.VideoError as e:
+        print(f"标定抽帧失败：{e}", file=sys.stderr)
+        return EXIT_DECODE
+    geo_binding = None          # 人工确认件的 binding（G4）
+    geo_file_sha = None         # 人工确认件自身 sha256，随记录落盘
+    geo_source = "proposal"
+    if args.geometry is not None:
+        # 人工确认件：绑定整段视频 sha256/尺寸/杯号/确认人/时间，任何一项不符即拒。
+        try:
+            env, geo_binding, geo_file_sha, props = cg.load_confirmed_file(
+                args.geometry, video_sha256=sha, width=info.width, height=info.height,
+                video_bytes=info.path.stat().st_size)
+        except (ValueError, OSError) as e:
+            print(f"拒绝人工确认件：{e}", file=sys.stderr)
+            return EXIT_REFUSED
+        geo_problems = []       # 确认件已过 validate()，无提案问题
+        geo_source = "human_confirmed_file"
+        expected_n = None       # 杯号由确认件 binding 核过，不再与 --cups 比
+    else:
+        # propose_cups 内部用中值帧提水体/水线，并做行梯度旁证；这里不再二次加工
+        props, geo_problems = cg.propose_cups(
+            calib_frames, n_cups=args.cups, dark=args.dark, bright=args.bright,
+            roi_above_margin=args.roi_above_margin)
+        env = cg.to_envelope(props, (info.width, info.height))
+        expected_n = args.cups
+    env_problems = env.validate()
+
+    # ---- 申报空杯绑物理杯号（G3）：有歧义就拒绝应用，不顺下标漂移 ----
+    cup_ids = [p.cup_id for p in props]
+    try:
+        de_binding = cg.bind_declared_empty(cup_ids, declared, expected_n=expected_n,
+                                            unresolved_note=de_unresolved_note)
+    except ValueError as e:
+        print(f"拒绝：{e}", file=sys.stderr)
+        return EXIT_REFUSED
+    for prob in de_binding.problems:
+        print(f"申报空杯未应用：{prob}", file=sys.stderr)
+    # declared_absent 用 CupDiagnoser 的 index（0 起）；binding.applied 是物理杯号（1 起）
+    declared_set = {cid - 1 for cid in de_binding.applied}
+
+    # ---- 分析序列与短片窗口 ----
+    analyzed = list(range(0, info.n_frames, args.step))
+    start_pos = int(len(analyzed) * min(max(args.clip_at, 0.0), 0.95))
+    clip_frames = set(analyzed[start_pos:start_pos + args.clip])
+
+    # ---- R2-115 P组：本次运行独立 run 目录（统一暂存区）----
+    # 记录/几何提案/短片全落这里；out_dir 里的旧 run 目录只读、绝不覆盖。
+    try:
+        run_dir, run_id = rec.new_run_dir(out_dir, info.path.stem)
+    except (ValueError, FileExistsError, OSError) as e:
+        print(f"拒绝：{e}", file=sys.stderr)
+        return EXIT_REFUSED
+    stem = info.path.stem
+    code_prov = rec.code_provenance(ov.REPO_ROOT)
+    cmdline = " ".join(shlex.quote(str(x)) for x in
+                       (["python", "-m", "depressionplex.cli.fst_research"]
+                        + list(argv if argv is not None else sys.argv[1:])))
+
+    writers: dict[int, ov.ClipWriter] = {}
+    clip_masks: dict[int, dict[int, np.ndarray]] = {p.index: {} for p in props}
+    last_seen: dict[int, tuple[int, np.ndarray, tuple[float, float], float] | None] = {
+        p.index: None for p in props}
+    pairs: dict[int, list[feat.PairFeatures]] = {p.index: [] for p in props}
+    diags_all: dict[int, list[perc.FrameDiag]] = {}
+    diagnosers: dict[int, perc.CupDiagnoser] = {}
+
+    def make_on_observed(cup: int):
+        def on_observed(idx: int, mask: np.ndarray, diag: perc.FrameDiag,
+                        gap_records: int) -> None:
+            if idx in clip_frames:
+                clip_masks[cup][idx] = mask
+            assert diag.centroid is not None      # observed 帧必有质心
+            theta = _theta_of(mask)
+            prev = last_seen[cup]
+            if prev is not None:
+                p_idx, p_mask, p_cent, p_theta = prev
+                pairs[cup].append(feat.pair_features(
+                    frame_prev=p_idx, frame_cur=idx, fps=info.fps,
+                    mask_prev=p_mask, mask_cur=mask,
+                    cent_prev=p_cent, cent_cur=diag.centroid,
+                    theta_prev=p_theta, theta_cur=theta,
+                    spatial_scale_px=float(props[cup].width_px),
+                    above_water_frac_cur=diag.above_water_frac,
+                    wall_dist_px_cur=diag.wall_dist_px,
+                    # R2-115 T2：跨观测缺口的对标出来，summarize 单列不进连续统计
+                    gap_records_between=gap_records))
+            last_seen[cup] = (idx, mask, diag.centroid, theta)
+        return on_observed
+
+    for p in props:
+        diagnosers[p.index] = perc.CupDiagnoser(
+            p, dark=args.dark, min_area=args.min_area, fps=info.fps,
+            lost_short_max_gap_frames=args.lost_short_max_gap_frames,
+            declared_absent=(p.index in declared_set),
+            on_observed=None if p.index in declared_set else make_on_observed(p.index))
+
+    def _cleanup_failed_run() -> None:
+        """失败清理（P组）：只删**本次**新建的 run 目录（先 abort 编码器）。
+
+        out_dir 里上一轮/别人的旧证据一个字节都不动——清理的是本次暂存区，
+        不是整个输出目录。
+        """
+        for w in writers.values():
+            try:
+                w.abort()
+            except Exception:
+                pass
+        shutil.rmtree(run_dir, ignore_errors=True)
+
+    # ---- 产物生成全程在同一个 try 里：任何失败只清理本次 run 目录（P组）----
+    consumed: list[int] = []      # 实际消费（解码并诊断）的帧号——覆盖从它数出
+    try:
+        # pass 1：背景 max（只过分析帧）
+        for i, g in enumerate(video.iter_gray(info)):
+            if i % args.step:
+                continue
+            for d in diagnosers.values():
+                if not d.declared_absent:
+                    d.see_background(g)
+        # pass 2：逐帧诊断 + 短片
+        for i, g in enumerate(video.iter_gray(info)):
+            if i % args.step:
+                continue
+            for p in props:
+                diagnosers[p.index].diagnose(i, g)
+            consumed.append(i)    # R2-115 T1：真消费了才计数，不按计划表报
+            if i in clip_frames:
+                rgb = _render(g, props, {c: clip_masks[c].get(i) for c in clip_masks},
+                              {c: diagnosers[c].last() for c in diagnosers},
+                              i, info.fps)
+                for c in clip_masks:
+                    if c not in writers:
+                        writers[c] = ov.ClipWriter(
+                            run_dir / f"叠加_{stem}_杯{c + 1}.mp4",
+                            fps=info.fps / args.step, size=(info.width, info.height))
+                    writers[c].write(rgb)
+
+        clips: dict[int, str] = {}
+        for c, w in writers.items():
+            clips[c] = str(w.close())
+
+        # ---- 组装记录 ----
+        # R3-115 ②：时间加权的尾区间不许越过分析末端。完整解码 ⇒ 末端 = 视频末；
+        # 截断 ⇒ 末端 = 最后消费帧 + 1（tail 只剩 1 帧也照实计，不补一个整步长）。
+        analysis_end = (info.n_frames
+                        if not consumed or len(consumed) >= len(analyzed)
+                        else consumed[-1] + 1)
+        cups_out = []
+        any_visible = False
+        for p in props:
+            diags = diagnosers[p.index].finish()
+            diags_all[p.index] = diags
+            counts = rec.counts_of(diags)
+            if counts[perc.QUALITY_OBSERVED] or p.index in declared_set:
+                any_visible = True
+            cups_out.append(rec.cup_record(
+                cup_index=p.index, diags=diags, fps=info.fps,
+                sample_step_frames=args.step,
+                declared_absent=(p.index in declared_set),
+                geometry={"cup_id": p.cup_id,
+                          # G1：分析 ROI / 水体候选区 / 水线是三件不同的东西，全落盘
+                          "roi": list(p.roi),
+                          "water_body": list(p.water_body) if p.water_body else None,
+                          "water_surface_y": p.water_surface_y,
+                          "water_surface_basis": p.water_surface_basis,
+                          "water_surface_candidates": list(p.water_surface_candidates),
+                          "water_surface_reliable": p.water_surface_reliable,
+                          "water_surface_unreliable_reason": p.water_surface_unreliable_reason,
+                          "basis": p.basis, "confirmed": p.confirmed,
+                          # 提案 notes（旁证分歧/无活动/误滤提示）必须随记录落盘：
+                          # 它们是给人看的诚实机制，只打在终端上等于没交付。
+                          "notes": list(p.notes)},
+                features_summary=feat.summarize(pairs[p.index]),
+                spatial_scale_px=float(p.width_px),
+                analysis_end_frames=analysis_end))
+            cups_out[-1]["frame_rows"] = _frame_rows(diags, clip_frames)
+            cups_out[-1]["overlay_clip"] = clips.get(p.index)
+
+        coverage = tl.coverage_of(plan, n_frames=info.n_frames, consumed=consumed,
+                                  sample_step=args.step, fps=info.fps)
+        record = rec.build_record(
+            source={"path": str(info.path), "name": info.path.name,
+                    "sha256": sha, "bytes": info.path.stat().st_size,
+                    "fps": info.fps, "n_frames": info.n_frames,
+                    "width": info.width, "height": info.height,
+                    "duration_s": info.duration_s,
+                    "frame_count_source": info.frame_count_source},
+            time_base={"clock": tb.clock, "media_role": tb.media_role,
+                       "protocol_alignment": tb.protocol_alignment,
+                       "t0_source_s": tb.t0_source_s,
+                       # R2-115 T3：t0 的依据字符串必须随记录落盘，不只打在终端
+                       "t0_evidence": tb.t0_evidence or None,
+                       "analysis_offset_s": tb.analysis_offset_s,
+                       "offset_evidence": tb.offset_evidence},
+            clock_ledger=ledger.to_dict(),
+            window={"requested_s": list(plan.requested_s), "alignment": plan.alignment,
+                    "media_frames": list(plan.media_frames) if plan.media_frames else None,
+                    "applies_standard_window": plan.applies_standard_window,
+                    # R2-115 T3：套窗标记 ≠ 统计已按窗截取。本次各杯统计跑在
+                    # 整条抽样媒体时间轴上；窗口只标"名义窗能否落点"。
+                    "stats_are_windowed": False,
+                    "stats_scope": "各杯统计覆盖整条抽样媒体时间轴（未按窗口截取）；"
+                                   "applies_standard_window=True 仅表示名义窗在素材上"
+                                   "可算出落点，不表示统计已按窗",
+                    "reason": plan.reason, "truncated": plan.truncated},
+            coverage=coverage.to_dict(),
+            # R2-115 T1：抽样口径与实际消费的帧号（计数是抽样记录数，不是连续帧数）
+            sampling={"step_frames": args.step,
+                      "sample_spacing_s": args.step / info.fps,
+                      "sampled_frames": len(consumed),
+                      "sample_fraction": (len(consumed) / info.n_frames
+                                          if info.n_frames else None),
+                      "frame_indices": consumed,
+                      "semantics": "所有状态计数（sampled_state_counts）与时间加权"
+                                   "估计都是抽样记录口径，不是连续逐帧统计；短于 "
+                                   f"step/fps = {args.step / info.fps:.2f} s 的帧间细节不可见",
+                      "tail_note": "视频末尾未被抽样的部分不补帧、不外推"},
+            geometry_confirmation=_geometry_confirmation(
+                geo_source=geo_source, confirmed=(geo_source == "human_confirmed_file"),
+                env_problems=env_problems, geo_problems=geo_problems,
+                geometry_path=args.geometry, geo_file_sha=geo_file_sha,
+                geo_binding=geo_binding, de_binding=de_binding,
+                declaration=declaration),
+            # R2-115 P组：run 标识、代码 SHA/dirty、实际命令行、研究参数与起点值出处
+            provenance={"run_id": run_id, "run_dir": str(run_dir),
+                        "generated_by": "depressionplex.cli.fst_research",
+                        "code": code_prov, "command_line": cmdline},
+            research_params=_research_params(args, geo_source=geo_source,
+                                             geo_file_sha=geo_file_sha,
+                                             declared=declared, input_sha=sha,
+                                             declared_channels=declared_channels,
+                                             ch_mapping=dict(ch_mapping) or None,
+                                             mapping_evidence=mapping_evidence),
+            cups=cups_out,
+            manifest=lookup,
+            limits=_limits(args, info, geo_source, de_binding))
+        rec_path = rec.write_record(record, run_dir / f"诊断_{stem}.json")
+        # 几何提案文件：没给确认件时，落一份**提案态 wrapper**（binding 已预填），
+        # 人工核对后改几何/翻 confirmed/填确认人时间即成确认件；给了确认件就不写。
+        geo_path = None
+        if args.geometry is None:
+            geo_path = run_dir / f"几何提案_{stem}.json"
+            payload = cg.confirmation_payload(
+                env, video_sha256=sha, video_bytes=info.path.stat().st_size,
+                width=info.width, height=info.height, cup_ids=cup_ids,
+                proposal_context={"geo_problems": geo_problems,
+                                  "roi_above_margin_px": args.roi_above_margin,
+                                  "cups": [{"cup_id": p.cup_id, "roi": list(p.roi),
+                                            "water_body": list(p.water_body) if p.water_body else None,
+                                            "water_surface_y": p.water_surface_y,
+                                            "water_surface_reliable": p.water_surface_reliable,
+                                            "water_surface_unreliable_reason": p.water_surface_unreliable_reason,
+                                            "notes": list(p.notes)} for p in props]})
+            geo_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2),
+                                encoding="utf-8")
+
+        # ---- 完成清单：全部产物成功后**最后**落盘（P组）----
+        # 中途任何失败都到不了这里 ⇒ 没有清单的 run 目录 = 未完成。
+        artifacts: dict[str, Path] = {"诊断记录": rec_path}
+        if geo_path is not None:
+            artifacts["几何提案"] = geo_path
+        for c in sorted(clips):
+            artifacts[f"叠加短片_杯{c + 1}"] = Path(clips[c])
+        manifest_path = rec.write_completion_manifest(
+            run_dir, run_id=run_id, input_sha256=sha, code=code_prov,
+            artifacts=artifacts)
+    except video.VideoError as e:
+        _cleanup_failed_run()
+        print(f"解码/编码失败（本次 run 目录已清理，旧证据未动）：{e}",
+              file=sys.stderr)
+        return EXIT_DECODE
+    except Exception as e:
+        _cleanup_failed_run()
+        print(f"产物写出失败（本次 run 目录已清理，旧证据未动）："
+              f"{type(e).__name__}: {e}", file=sys.stderr)
+        return EXIT_ARTIFACT
+
+    # ---- 人读摘要 ----
+    print(f"源：{info.path.name}  sha256 {sha[:16]}…  {info.n_frames} 帧 @ {info.fps} fps"
+          f"（{info.duration_s:.2f} s，帧数来源 {info.frame_count_source}）")
+    print(f"对齐：protocol_alignment={tb.protocol_alignment}"
+          f"（{plan.reason}）")
+    frac = coverage.sample_fraction
+    print(f"覆盖：解码 {coverage.consumed_frames}/{coverage.expected_samples} 个抽样帧"
+          f"（完整={coverage.decode_complete}）  时间轴占比 "
+          f"{f'{frac:.2f}' if frac is not None else '—'}（step={args.step}）"
+          f"  截断 {coverage.truncated_frames}")
+    if geo_source == "human_confirmed_file":
+        print(f"几何来源：人工确认件 {args.geometry}  sha256 {geo_file_sha[:16]}…"
+              f"（确认人 {geo_binding.get('confirmed_by')} @ {geo_binding.get('confirmed_at')}）")
+    else:
+        print("几何来源：真帧提案（confirmed=False，未人工确认）")
+    if de_binding.status == cg.BIND_APPLIED and de_binding.applied:
+        print(f"申报空杯（物理杯号）：{list(de_binding.applied)}")
+    elif de_binding.status == cg.BIND_REFUSED_AMBIGUOUS:
+        print(f"申报空杯**未应用**（绑定有歧义）：请求 {declared}，applied []")
+    elif de_binding.status == cg.BIND_MAPPING_UNRESOLVED:
+        print(f"申报空杯（通道）**未应用**（映射未决）：通道 "
+              f"{declaration['declared_channels']}，applied []")
+    for c in cups_out:
+        q = c["sampled_state_counts"]     # 抽样记录计数（R2-115 T1），不是连续时长
+        g = c["geometry"]
+        wnote = "" if g["water_surface_reliable"] else "（水线不可靠，above_water 记 null）"
+        print(f"  杯 {g['cup_id']}: observed {q['observed']}  unclear {q['unclear']}"
+              f"  lost_short {q['lost_short']}  declared_absent {q['declared_absent']}"
+              f"  水线 {g['water_surface_y']}{wnote}")
+        for n in g["notes"]:
+            print(f"        注：{n}")
+        if g["water_surface_unreliable_reason"]:
+            print(f"        水线：{g['water_surface_unreliable_reason']}")
+        if c["overlay_clip"]:
+            print(f"        叠加短片 {c['overlay_clip']}")
+    print(f"几何提案问题 {len(env_problems) + len(geo_problems)} 条（未确认是设计，不是失败）")
+    for gp in geo_problems:
+        print(f"  - {gp}")
+    for gp in de_binding.problems:
+        print(f"  - {gp}")
+    # ---- R2-115 P组：run 目录 / 代码出处 / 完成清单 ----
+    print(f"run 目录：{run_dir}  (run_id {run_id})")
+    if code_prov.get("vcs") == "git":
+        dirty = "，dirty" if code_prov.get("dirty") else "，clean"
+        print(f"代码出处：{str(code_prov.get('commit'))[:12]} @ "
+              f"{code_prov.get('branch')}{dirty}")
+    else:
+        print(f"代码出处：{code_prov.get('vcs')}——{code_prov.get('note', '')}")
+    print(f"记录：{rec_path}")
+    print(f"完成清单：{manifest_path}（全部产物成功写出；无清单的 run 目录不得当交付证据）")
+    return EXIT_OK if any_visible else EXIT_NOTHING_VISIBLE
+
+
+def _research_params(args, *, geo_source: str, geo_file_sha: str | None,
+                     declared: list[int], input_sha: str,
+                     declared_channels: list[int], ch_mapping: dict[int, int] | None,
+                     mapping_evidence: str | None) -> dict:
+    """本次运行的**完整研究配置**与起点值出处（R2-115 P组）。
+
+    CLI 参数 + 代码起点值（杯几何 min_width / ROI 上留白 / propose_cups
+    默认 min_area / lost_short 门）逐项写明来源。起点值 ≠ 标定值：未经
+    真实素材标定的一律写明"起点值"，后来的读者不会把它当调好的数。
+    """
+    propose_min_area = inspect.signature(
+        cg.propose_cups).parameters["min_area"].default
+    return {
+        "input_sha256": input_sha,
+        "step_frames": args.step,
+        "calib_frames": args.calib,
+        "clip_frames": args.clip,
+        "clip_at_ratio": args.clip_at,
+        # 给了人工确认件时 --cups 不参与（杯号由确认件 binding 核过）
+        "cups_expected": None if args.geometry is not None else args.cups,
+        "declared_empty_requested": list(declared),
+        # R3-115 ①：通道形态申报与映射证据单列；映射无证据 ⇒ 未决不应用
+        "declared_empty_channel_requested": list(declared_channels),
+        "channel_cup_mapping": ch_mapping,
+        "mapping_evidence": mapping_evidence,
+        "dark": args.dark,
+        "bright": args.bright,
+        "min_area_px": args.min_area,
+        "roi_above_margin_px": args.roi_above_margin,
+        "lost_short_max_gap_frames": args.lost_short_max_gap_frames,
+        "cup_min_width_px": cg.MIN_CUP_WIDTH_PX,
+        "cup_proposal_min_area_px": propose_min_area,
+        "geometry_source": geo_source,
+        "geometry_file_sha256": geo_file_sha,
+        "manifest": str(args.manifest) if args.manifest else None,
+        "provenance": {
+            "cup_min_width_px": (f"代码起点值 cup_geometry.MIN_CUP_WIDTH_PX="
+                                 f"{cg.MIN_CUP_WIDTH_PX}：杯候选最小宽度，未经真实素材标定"),
+            "roi_above_margin_px": (
+                f"CLI --roi-above-margin 默认 = cup_geometry.ROI_ABOVE_WATER_MARGIN_PX="
+                f"{cg.ROI_ABOVE_WATER_MARGIN_PX}：水线上方留白，须在叠加图上人工核对"),
+            "cup_proposal_min_area_px": (
+                f"propose_cups(min_area=…) 代码默认 = {propose_min_area}："
+                "连通域面积下限，未经真实素材标定"),
+            "lost_short_max_gap_frames": (
+                f"CLI 默认 = perc.DEFAULT_LOST_SHORT_MAX_GAP_FRAMES="
+                f"{perc.DEFAULT_LOST_SHORT_MAX_GAP_FRAMES}：源帧跨度门"
+                "（≈0.44 s @ 25 fps），未经真实素材标定"),
+            "dark_bright": (f"CLI 默认 dark={args.dark} / bright={args.bright}："
+                            "分割阈值起点值，换采集条件须重看直方图"),
+            "step_frames": (f"CLI --step（默认 5）：抽样步长；"
+                            "状态计数是抽样记录口径，不是连续逐帧"),
+            "declared_empty_channel": (
+                "评分员清单的申报形态是通道号；通道↔物理杯是**需要证据的事实**："
+                "--channel-cup-mapping + --mapping-evidence 齐了才换算应用，"
+                "缺一 ⇒ status=mapping_unresolved、本次不应用、映射保持未决"),
+        },
+    }
+
+
+def _geometry_confirmation(*, geo_source, confirmed, env_problems, geo_problems,
+                           geometry_path, geo_file_sha, geo_binding, de_binding,
+                           declaration) -> dict:
+    """记录里的几何确认段。确认件带 binding + 文件 sha256；提案带问题清单。
+
+    R2-115 G4：确认件必须可追溯——谁确认的、什么时候、绑的哪段视频、文件自身
+    哈希，全落盘。提案态如实记 confirmed=False + validate/proposal 问题。
+    """
+    out = {
+        "confirmed": confirmed,
+        "source": geo_source,
+        # R4-115：机器可读身份单列——工程对照件标 engineering_control，
+        # 缺失/工程对照都不计入真人确认数量（cg.is_human_confirmation 只认 human）。
+        "confirmation_kind": (geo_binding or {}).get("confirmation_kind"),
+        "counts_as_human_confirmation": cg.is_human_confirmation(geo_binding),
+        "validate_problems": list(env_problems),
+        "proposal_problems": list(geo_problems),
+        "geometry_file": str(geometry_path) if geometry_path else None,
+        "geometry_file_sha256": geo_file_sha,
+        "binding": dict(geo_binding) if geo_binding else None,
+        "declared_empty_binding": {
+            "applied_cup_ids": list(de_binding.applied),
+            "status": de_binding.status,
+            "problems": list(de_binding.problems),
+            # R3-115 ①：申报形态/通道/映射/证据单列；applied 的词义钉死在 semantics
+            "declaration": declaration,
+            "semantics": DECLARATION_SEMANTICS},
+        # R3-115 ③：确认件 water_body=None ⇒ 三处计算退回整 ROI，影响清单落盘
+        "water_body_fallback": (dict(WATER_BODY_FALLBACK_NOTE)
+                                if geo_source == "human_confirmed_file" else None),
+        "note": ("几何为人工确认件（已绑定视频 sha256/尺寸/确认人）"
+                 if confirmed else
+                 "几何为提案：人工确认前正式解释与发布验收受限"),
+    }
+    return out
+
+
+def _limits(args, info, geo_source, de_binding) -> list[str]:
+    limits = [
+        "研究诊断：不产出正式 CSV、不进验收路径、不借 TST 发布/标定资质",
+        "t0 未知 ⇒ protocol_alignment=unknown，未套 (120,360) 标准窗",
+        ("杯体/水线为人工确认件（--geometry）" if geo_source == "human_confirmed_file"
+         else "杯体/水线为提案（confirmed=False），未人工确认"),
+        "observed 帧内的活动/不动分类未做（新的科学口径，未经批准）",
+        "光流/局部运动（动物区内 vs 区外水扰）无实现，标记 not_implemented",
+        f"分析抽帧 step={args.step}：计数是抽样记录数；帧间细节"
+        f"（< {args.step / info.fps:.2f} s）不可见",
+        f"短暂丢失门 lost_short_max_gap_frames={args.lost_short_max_gap_frames} 源帧"
+        "（起点值 ≈0.44 s @ 25 fps，未经真实素材标定）：超过门的缺口记 unclear",
+        "各杯统计未按窗截取（stats_are_windowed=False）：即使 t0 已知，本次统计"
+        "仍覆盖整条抽样时间轴",
+    ]
+    if de_binding.status == cg.BIND_REFUSED_AMBIGUOUS:
+        limits.append("申报空杯未应用：杯候选数与期望不符，物理杯号绑定有歧义，相关杯保持未决")
+    return limits
+
+
+def _theta_of(mask: np.ndarray) -> float:
+    m = sil.metrics(mask, with_holes=False)
+    return m.theta if m is not None else 0.0
+
+
+def _frame_rows(diags: list[perc.FrameDiag], clip_frames: set[int]) -> list[dict]:
+    rows = []
+    reasons = 0
+    for d in diags:
+        if d.quality != perc.QUALITY_OBSERVED and reasons < MAX_REASON_ROWS:
+            reasons += 1
+            rows.append({"frame": d.frame, "quality": d.quality,
+                         "reasons": list(d.reasons)})
+        elif d.frame in clip_frames:
+            row = {"frame": d.frame, "quality": d.quality,
+                   "area_px": d.area_px,
+                   "centroid": list(d.centroid) if d.centroid else None,
+                   "above_water_frac": d.above_water_frac,
+                   "wall_dist_px": d.wall_dist_px}
+            if d.above_water_null_reason:
+                # G1：above_water_frac 为 null 时把原因一起落盘（不是无声 null，
+                # 更不是假 0），复核的人一眼看到"这杯水线不可靠"。
+                row["above_water_null_reason"] = d.above_water_null_reason
+            rows.append(row)
+    return rows
+
+
+def _render(g, props, masks, last_diags, idx, fps) -> np.ndarray:
+    rgb = ov.gray_to_rgb(g)
+    for p in props:
+        # 复核 §9：分析 ROI、水体候选区、水线是三件不同的东西，分开画，
+        # 让人核"ROI 有没有把线上活动圈进来""水线画对没有"。
+        r0, c0, r1, c1 = p.roi
+        d = last_diags.get(p.index)
+        q = d.quality if d is not None else "declared_absent"
+        color = ov.QUALITY_COLORS.get(q, ov.COLOR_UNCLEAR)
+        ov.draw_rect(rgb, r0, c0, r1, c1, ov.COLOR_TANK)         # 分析 ROI
+        if p.water_body is not None:
+            wr0, wc0, wr1, wc1 = p.water_body
+            ov.draw_rect(rgb, wr0, wc0, wr1, wc1, ov.COLOR_WATER_BODY)  # 水体候选区
+        if p.water_surface_y is not None:
+            wcol = ov.COLOR_WATER if p.water_surface_reliable else ov.COLOR_UNCLEAR
+            ov.draw_hline(rgb, int(round(p.water_surface_y)), c0, c1, wcol)  # 水线
+        m = masks.get(p.index)
+        if m is not None:
+            ov.draw_mask_outline(rgb, m, color)
+        label = f"C{p.cup_id} F{idx} T{idx / fps:.1f}S {q[:4].upper()}"
+        ov.draw_text_outlined(rgb, max(0, r0 - 8), c0, label, color)
+    return rgb
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -183,11 +183,41 @@ class GeometryEnvelope:
                     break
 
         if self.assay == "FST" and self.by_role(ROLE_WATER_SURFACE):
-            wy = self.water_surface_y()
+            # FST 真实素材是一帧多杯（DP-136）：tank 与 water_surface 按同号
+            # 配对检查。单实例旧素材两边都是 instance=1，配对退化为旧行为。
+            # R2-115 G2：不等号**保持旧版严格开区间**——早先版本在这里悄悄
+            # 放宽成闭区间，改变了旧单实例语义（"水线压杯顶/杯底"从不通过
+            # 变通过）。共享契约不接受静默语义变更；研究层若要表达"水线取自
+            # ROI 顶边"这类新语义，须走显式版本/研究模式并过变更评审——
+            # 研究提案的做法是让分析 ROI 在水线上方留白（cup_geometry），
+            # 正确提案天然满足严格不等式，压边提案照实报。
+            lines = self.by_role(ROLE_WATER_SURFACE)
+            tank_instances = {t.instance for t in self.by_role(ROLE_TANK)}
+            line_count: dict[int, int] = {}
+            for line in lines:
+                line_count[line.instance] = line_count.get(line.instance, 0) + 1
+            for inst in sorted(line_count):
+                if line_count[inst] > 1:
+                    problems.append(
+                        f"water_surface_{inst} 出现 {line_count[inst]} 次"
+                        "（同号重复，配对有歧义）")
+                if inst not in tank_instances:
+                    problems.append(
+                        f"water_surface_{inst} 没有同号 tank（孤儿水线）")
             for tank in self.by_role(ROLE_TANK):
+                matched = [p for p in lines if p.instance == tank.instance]
+                if not matched:
+                    problems.append(
+                        f"{tank.key} 缺同号 water_surface（多杯时水线不共用）")
+                    continue
                 ys = [y for _, y in tank.coords]
-                if not (min(ys) < wy < max(ys)):
-                    problems.append(f"水面线 y={wy:.1f} 不在 {tank.key} 垂直范围内")
+                for line in matched:
+                    wy = sum(y for _, y in line.coords) / len(line.coords)
+                    # 严格开区间（旧版语义）：水线必须严格在 tank 垂直范围内，
+                    # 恰好压在顶边/底边也算不通过。
+                    if not (min(ys) < wy < max(ys)):
+                        problems.append(
+                            f"水面线 y={wy:.1f} 不在 {tank.key} 垂直范围内")
 
         unconfirmed = [p.key for p in self.primitives if not p.confirmed]
         if unconfirmed:
