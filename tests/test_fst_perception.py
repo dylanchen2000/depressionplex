@@ -428,3 +428,103 @@ def test_wall_dist_excludes_top_edge() -> None:
         assert d.wall_dist_px == float(expected)
         # 动物靠近顶边（br0-r0 小），但顶不计入 ⇒ wall_dist 明显大于到顶距离
         assert d.wall_dist_px > br0 - r0
+
+def _flat_prop(water_body, *, roi=(0, 0, 9, 9)):
+    """R3-115 ③ 对照夹具：roi/水线**逐位相同**，只有 water_body 一个变量。
+
+    water_body 给值 = 提案态（派生水体区）；None = 确认件态
+    （proposals_from_confirmed 里 water_body 恒 None，计算退回整 ROI）。
+    """
+    return cg.CupProposal(
+        index=0, roi=roi, water_body=water_body,
+        water_surface_y=None, water_surface_basis=cg.WATERLINE_BASIS_NONE,
+        water_surface_candidates=(), water_surface_reliable=False,
+        water_surface_unreliable_reason="单元夹具：不画水线",
+        confirmed=True)
+
+
+def _diagnose_with_calib(prop, calib, frame, **kw):
+    d = perc.CupDiagnoser(prop, **kw)
+    for f in calib:
+        d.see_background(f)
+    return d.diagnose(0, frame)
+
+
+def test_water_body_none_fallback_flips_area_ratio_denominator() -> None:
+    """R3-115 ③ 对照：坐标完全不变，仅 water_body→None（确认件态）。
+
+    面积占比分母从水体区(90px)退回整 ROI(100px)：同一只 52px 候选，
+    提案态 >55%×90=49.5 ⇒ "超过水体区" unclear；确认件态 <55%×100=55 ⇒
+    observed。这类差异由回退产生，**不得**归因于人工修正几何。
+    """
+    calib = [np.full((12, 12), 200.0) for _ in range(3)]
+    frame = np.full((12, 12), 200.0)
+    frame[1:8, 1:8] = 0.0                       # 7×7=49
+    frame[8, 1:4] = 0.0                         # +3 ⇒ 52px 单连通域
+    prop_wb = _flat_prop((1, 0, 9, 9))          # 水体区 9×10=90
+    prop_none = _flat_prop(None)                # 确认件态：退回整 ROI 10×10=100
+    assert prop_wb.roi == prop_none.roi         # 坐标逐位相同（对照变量唯一）
+    d_wb = _diagnose_with_calib(prop_wb, calib, frame)
+    d_none = _diagnose_with_calib(prop_none, calib, frame)
+    assert d_wb.quality == perc.QUALITY_UNCLEAR
+    assert any("超过水体区" in r for r in d_wb.reasons)
+    assert d_none.quality == perc.QUALITY_OBSERVED
+    assert d_wb.area_px == d_none.area_px == 52  # 候选本身没变，变的只是分母
+
+
+def test_water_body_none_fallback_flips_contrast_check() -> None:
+    """R3-115 ③ 对照：坐标完全不变，仅 water_body→None（确认件态）。
+
+    背景亮度中值改在整 ROI 上算：线上留白里的暗架子(30)把中值拉到
+    dark+20 以下 ⇒ 同一帧从 observed 翻成"对比不足" unclear。
+    这是回退的影响，不是人工修正几何的影响。
+    """
+    bg = np.full((16, 10), 200.0)
+    bg[0:10, :] = 30.0                          # ROI 上半留白：暗架子/阴影
+    calib = [bg.copy() for _ in range(3)]
+    frame = bg.copy()
+    frame[10:15, 1:9] = 0.0                     # 动物：水体区内 5×8=40px
+    roi = (0, 0, 15, 9)
+    prop_wb = _flat_prop((10, 0, 15, 9), roi=roi)   # 水体区全亮 ⇒ 中值 200
+    prop_none = _flat_prop(None, roi=roi)            # 整 ROI：60% 暗 ⇒ 中值 30
+    assert prop_wb.roi == prop_none.roi
+    d_wb = _diagnose_with_calib(prop_wb, calib, frame, max_area_frac=0.9)
+    d_none = _diagnose_with_calib(prop_none, calib, frame, max_area_frac=0.9)
+    assert d_wb.quality == perc.QUALITY_OBSERVED
+    assert d_none.quality == perc.QUALITY_UNCLEAR
+    assert any("对比不足" in r for r in d_none.reasons)
+
+
+def test_water_body_none_fallback_widens_static_absorption_region() -> None:
+    """R3-115 ③ 对照：坐标完全不变，仅 water_body→None（确认件态）。
+
+    静态动物吸收陷阱的检查区从水体区退回整 ROI：留白里一块动物尺寸的
+    恒暗结构（挂钩/架子），提案态查水体区看不到 ⇒ "无候选"；确认件态
+    查整 ROI 看到 ⇒ possible_static_animal_absorbed。同一帧、同一几何，
+    原因不同——这是回退的影响，不是人工修正几何。
+    """
+    roi = (0, 0, 15, 9)
+    water_body = (8, 0, 15, 9)                  # 水体区：rows 8..15（不含留白）
+    bg = np.full((16, 10), 200.0)
+    bg[1:8, 1:8] = 30.0                         # 留白内恒暗结构 7×7=49px（在水体区外）
+    calib = [bg.copy() for _ in range(3)]       # 该结构在所有标定帧 ⇒ 静态
+    frame = bg.copy()                           # 当前帧无游动动物
+    prop_wb = _flat_prop(water_body, roi=roi)
+    prop_none = _flat_prop(None, roi=roi)
+    assert prop_wb.roi == prop_none.roi
+
+    def resolved(prop):
+        d = perc.CupDiagnoser(prop)
+        for f in calib:
+            d.see_background(f)
+        d.diagnose(0, frame)
+        return d.finish()[0]
+
+    d_wb = resolved(prop_wb)
+    d_none = resolved(prop_none)
+    # 提案态：水体区里没有那块静态结构 ⇒ 记无候选（不作吸收陷阱）
+    assert d_wb.quality == perc.QUALITY_UNCLEAR
+    assert not any("possible_static_animal_absorbed" in r for r in d_wb.reasons)
+    # 确认件态：整 ROI 里看到了 ⇒ 记吸收陷阱嫌疑（同一坐标，只因回退）
+    assert d_none.quality == perc.QUALITY_UNCLEAR
+    assert any("possible_static_animal_absorbed" in r for r in d_none.reasons)

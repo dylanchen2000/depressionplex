@@ -132,6 +132,27 @@ DECLARATION_SEMANTICS = (
     "declaration.mapping_verified 与证据串。status=mapping_unresolved 或 "
     "mapping_verified=False 时申报没有落到任何物理杯上，相关杯保持未决。")
 
+#: R3-115 ③：确认件没有 water_body（人工确认只画 tank ROI + 水线，派生的
+#: 水体区不进确认件，`proposals_from_confirmed` 里 water_body=None）。三处
+#: 平时用 water_body 的计算于是**退回整个 ROI**，即使确认件坐标与提案逐位
+#: 相同，这几处也可能与提案态不同——这类差异是"少了一个派生量"造成的，
+#: **不是**人工修正了几何。落进记录，免得对照时被算到人工修正头上。
+WATER_BODY_FALLBACK_NOTE = {
+    "applies": True,
+    "reason": ("人工确认件不含派生量 water_body（None）；下列计算退回整个分析 ROI，"
+               "与提案态用 water_body 时的取值可能不同——即使坐标逐位相同"),
+    "affected_computations": [
+        "对比度检查的背景亮度中值（bright_med）：ROI vs water_body 的中值可能不同，"
+        "影响“背景亮度对比不足（采集对比度问题）”这一 unclear 判定",
+        "候选面积占比的分母（interior_area）：整 ROI 面积 ≥ water_body 面积，"
+        "同样候选的占比被稀释，影响“候选面积超过水体区 X%（反光/波纹连片）”判定",
+        "静态动物吸收陷阱检查区（_static_animal_blob）：在整 ROI 而非 water_body 内找"
+        "动物尺寸连通域，线上留白里的挂钩/架子等静态暗结构可能被算进来",
+    ],
+    "attribution": ("以上差异由 water_body=None 的回退产生，不得归因于人工几何修正；"
+                    "判断人工修正的效果，须在坐标完全不变、仅切换确认件输入的对照下看"),
+}
+
 
 def main(argv: list[str] | None = None) -> int:
     force_utf8()
@@ -734,6 +755,9 @@ def _geometry_confirmation(*, geo_source, confirmed, env_problems, geo_problems,
             # R3-115 ①：申报形态/通道/映射/证据单列；applied 的词义钉死在 semantics
             "declaration": declaration,
             "semantics": DECLARATION_SEMANTICS},
+        # R3-115 ③：确认件 water_body=None ⇒ 三处计算退回整 ROI，影响清单落盘
+        "water_body_fallback": (dict(WATER_BODY_FALLBACK_NOTE)
+                                if geo_source == "human_confirmed_file" else None),
         "note": ("几何为人工确认件（已绑定视频 sha256/尺寸/确认人）"
                  if confirmed else
                  "几何为提案：人工确认前正式解释与发布验收受限"),

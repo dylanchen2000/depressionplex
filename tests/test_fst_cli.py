@@ -478,6 +478,58 @@ def test_cli_geometry_confirmed_file_roundtrip() -> None:
         assert set(man["files"]) == {"诊断记录", "叠加短片_杯1"}
 
 
+def test_cli_confirmed_same_coords_control_water_body_fallback() -> None:
+    """R3-115 ③：坐标完全不变、仅改为确认件输入的对照。
+
+    提案模板翻成确认件时**一个坐标都不改**：两次运行唯一的差别是
+    water_body（提案=派生水体区；确认件=None ⇒ 三处计算退回整 ROI）。
+    干净合成场景里可见性计数一致（回退不必然造成差异）；确认件记录
+    必须带 water_body_fallback 影响清单，真实素材上若出现差异，先对照
+    这份清单归因，不许全部算到人工修正几何头上。
+    """
+    if not _ffmpeg_ok():
+        print("  SKIP  test_cli_confirmed_same_coords_control_water_body_fallback（无 ffmpeg）")
+        return
+    scene = fst_synth.Scene(cups=1)
+    frames = scene.swim_series(20, cup=0)
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        vid = _encode(frames, tmp / "synth_ctrl.mp4")
+        out1 = tmp / "diag1"
+        assert _run([str(vid), "--out-dir", str(out1), "--cups", "1",
+                     "--step", "2", "--calib", "6", "--clip", "3"]) == 0
+        r1 = _record(out1, "synth_ctrl")
+        # 提案态没有回退清单（water_body 在手）
+        assert r1["geometry_confirmation"]["water_body_fallback"] is None
+        # 翻确认件：只动确认字段，坐标一个不改
+        tmpl_path = _run_dir(out1, "synth_ctrl") / "几何提案_synth_ctrl.json"
+        tmpl = json.loads(tmpl_path.read_text(encoding="utf-8"))
+        tmpl["envelope"]["confirmed"] = True
+        for pr in tmpl["envelope"]["primitives"]:
+            pr["confirmed"] = True
+        tmpl["binding"]["confirmed_by"] = "对照夹具（坐标未动）"
+        tmpl["binding"]["confirmed_at"] = "2026-09-19T00:00:00Z"
+        tmpl["binding"]["confirmed_basis"] = "同坐标对照，不是真实人工确认"
+        conf = tmp / "same_coords.json"
+        conf.write_text(json.dumps(tmpl, ensure_ascii=False), encoding="utf-8")
+        out2 = tmp / "diag2"
+        assert _run([str(vid), "--out-dir", str(out2), "--cups", "1",
+                     "--step", "2", "--calib", "6", "--clip", "3",
+                     "--geometry", str(conf)]) == 0
+        r2 = _record(out2, "synth_ctrl")
+        # 确认件态带 water_body=None 回退影响清单（背景/面积分母/静态吸收三处）
+        fb = r2["geometry_confirmation"]["water_body_fallback"]
+        assert fb["applies"] is True
+        assert len(fb["affected_computations"]) == 3
+        assert "不得归因" in fb["attribution"] and "water_body=None" in fb["attribution"]
+        # 坐标完全不变：ROI 逐位相同；唯一控制变量是 water_body
+        g1, g2 = r1["cups"][0]["geometry"], r2["cups"][0]["geometry"]
+        assert g1["roi"] == g2["roi"]
+        assert g1["water_body"] is not None and g2["water_body"] is None
+        # 干净合成场景：可见性计数一致 ⇒ 无其他漂移；差异只可能来自清单三处
+        assert r1["cups"][0]["sampled_state_counts"] == r2["cups"][0]["sampled_state_counts"]
+
+
 def test_cli_geometry_wrong_video_sha_refused() -> None:
     """G4：确认件绑定的不是这段素材（sha 不符）⇒ 拒绝，退出码 2。"""
     if not _ffmpeg_ok():
