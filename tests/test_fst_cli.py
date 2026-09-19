@@ -85,10 +85,19 @@ def test_cli_synth_swim_exit0_and_artifacts() -> None:
         assert clip.exists() and clip.stat().st_size > 100
         info = video.probe(clip)
         assert info.n_frames > 0
-        # 几何提案件也落了盘，且仍未确认
+        # 几何提案件落盘为**确认件 wrapper 的提案态**（G4）：binding 已预填、
+        # envelope.confirmed=False、确认人留空——人工核对后改它即成确认件。
         geo_path = out / "几何提案_synth_swim.json"
         assert geo_path.exists()
-        assert json.loads(geo_path.read_text(encoding="utf-8"))["confirmed"] is False
+        geo = json.loads(geo_path.read_text(encoding="utf-8"))
+        assert geo["schema"] == "fst-confirmed-geometry-v1"
+        assert geo["status"] == "proposal_unconfirmed"
+        assert geo["envelope"]["confirmed"] is False
+        assert geo["binding"]["confirmed_by"] == ""        # 留给人填
+        assert geo["binding"]["video_sha256"] == r["source"]["sha256"]  # 脚本预绑
+        # 记录里的几何确认段：提案态、带问题清单
+        assert r["geometry_confirmation"]["source"] == "proposal"
+        assert r["geometry_confirmation"]["geometry_file"] is None
         # 没给 --manifest：如实记"不做身份关联，不猜"
         assert r["manifest_lookup"]["found"] is False
         assert "不猜" in r["manifest_lookup"]["note"]
@@ -192,3 +201,115 @@ def test_cli_t0_known_sets_window() -> None:
         # ⇒ 截断必须如实报，不许静默
         assert r["window"]["truncated"] is True
         assert r["coverage"]["coverage_frac"] < 1.0
+
+
+def test_cli_geometry_confirmed_file_roundtrip() -> None:
+    """G4 端到端：提案模板 → 人工翻 confirmed/填确认人 → --geometry 吃回去。
+
+    模板态（未确认）当确认件用必须被拒；人工确认后的文件加载成功，
+    记录里 source=human_confirmed_file、带确认件 sha256、validate 干净。
+    """
+    if not _ffmpeg_ok():
+        print("  SKIP  test_cli_geometry_confirmed_file_roundtrip（无 ffmpeg）")
+        return
+    scene = fst_synth.Scene(cups=1)
+    frames = scene.swim_series(20, cup=0)
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        vid = _encode(frames, tmp / "synth_geo.mp4")
+        out1 = tmp / "diag1"
+        rc = _run([str(vid), "--out-dir", str(out1), "--cups", "1",
+                   "--step", "2", "--calib", "6", "--clip", "3"])
+        assert rc == 0
+        tmpl_path = out1 / "几何提案_synth_geo.json"
+        tmpl = json.loads(tmpl_path.read_text(encoding="utf-8"))
+        assert tmpl["status"] == "proposal_unconfirmed"
+        # 模板直接当确认件 ⇒ 拒（confirmed_by 空 + envelope 未确认）
+        out2 = tmp / "diag2"
+        assert _run([str(vid), "--out-dir", str(out2), "--cups", "1",
+                     "--step", "2", "--calib", "6", "--clip", "3",
+                     "--geometry", str(tmpl_path)]) == 2
+        # 人工翻 confirmed + 填确认人/时间 ⇒ 成确认件
+        tmpl["envelope"]["confirmed"] = True
+        for pr in tmpl["envelope"]["primitives"]:
+            pr["confirmed"] = True
+        tmpl["binding"]["confirmed_by"] = "测试确认人"
+        tmpl["binding"]["confirmed_at"] = "2026-09-19T00:00:00Z"
+        tmpl["binding"]["confirmed_basis"] = "看了叠加短片"
+        conf = tmp / "confirmed.json"
+        conf.write_text(json.dumps(tmpl, ensure_ascii=False), encoding="utf-8")
+        out3 = tmp / "diag3"
+        rc = _run([str(vid), "--out-dir", str(out3), "--cups", "1",
+                   "--step", "2", "--calib", "6", "--clip", "3",
+                   "--geometry", str(conf)])
+        assert rc == 0
+        r = json.loads((out3 / "诊断_synth_geo.json").read_text(encoding="utf-8"))
+        gc = r["geometry_confirmation"]
+        assert gc["confirmed"] is True
+        assert gc["source"] == "human_confirmed_file"
+        assert gc["geometry_file"] == str(conf)
+        assert gc["geometry_file_sha256"] and len(gc["geometry_file_sha256"]) == 64
+        assert gc["binding"]["confirmed_by"] == "测试确认人"
+        assert gc["validate_problems"] == []
+        # 确认件的几何标 confirmed=True（不再是提案）
+        assert r["cups"][0]["geometry"]["confirmed"] is True
+
+
+def test_cli_geometry_wrong_video_sha_refused() -> None:
+    """G4：确认件绑定的不是这段素材（sha 不符）⇒ 拒绝，退出码 2。"""
+    if not _ffmpeg_ok():
+        print("  SKIP  test_cli_geometry_wrong_video_sha_refused（无 ffmpeg）")
+        return
+    scene = fst_synth.Scene(cups=1)
+    frames = scene.swim_series(16, cup=0)
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        vid = _encode(frames, tmp / "synth_sha.mp4")
+        out1 = tmp / "diag1"
+        assert _run([str(vid), "--out-dir", str(out1), "--cups", "1",
+                     "--step", "2", "--calib", "6", "--clip", "3"]) == 0
+        tmpl = json.loads((out1 / "几何提案_synth_sha.json").read_text(encoding="utf-8"))
+        tmpl["envelope"]["confirmed"] = True
+        for pr in tmpl["envelope"]["primitives"]:
+            pr["confirmed"] = True
+        tmpl["binding"]["confirmed_by"] = "测试确认人"
+        tmpl["binding"]["confirmed_at"] = "2026-09-19T00:00:00Z"
+        tmpl["binding"]["video_sha256"] = "00" * 32     # 绑到别的视频
+        conf = tmp / "wrong.json"
+        conf.write_text(json.dumps(tmpl, ensure_ascii=False), encoding="utf-8")
+        out2 = tmp / "diag2"
+        rc = _run([str(vid), "--out-dir", str(out2), "--cups", "1",
+                   "--step", "2", "--calib", "6", "--clip", "3",
+                   "--geometry", str(conf)])
+        assert rc == 2
+
+
+def test_cli_declared_empty_refused_when_cup_count_ambiguous() -> None:
+    """G3 端到端：期望 2 杯但只找到 1 杯 ⇒ 物理杯号有歧义 ⇒ 拒绝应用申报。
+
+    跑不中断（不是 exit 2），但记录里 declared_empty_binding.status=
+    refused_ambiguous、applied 为空，那杯**不**被当空杯处理（保持未决）。
+    """
+    if not _ffmpeg_ok():
+        print("  SKIP  test_cli_declared_empty_refused_when_cup_count_ambiguous（无 ffmpeg）")
+        return
+    scene = fst_synth.Scene(cups=1)                 # 画面里只有 1 个杯
+    frames = scene.swim_series(20, cup=0)
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        vid = _encode(frames, tmp / "synth_amb.mp4")
+        out = tmp / "diag"
+        # 申报杯 1 空，但 --cups 说应有 2 杯 ⇒ 找到 1 杯 ≠ 2 ⇒ 绑定有歧义
+        rc = _run([str(vid), "--out-dir", str(out), "--cups", "2",
+                   "--step", "2", "--calib", "6", "--clip", "3",
+                   "--declared-empty", "1"])
+        # 杯 1 看得见动物（observed）⇒ 退出码 0；拒绝申报只影响"空杯结论"，
+        # 不影响可见性口径。
+        assert rc == 0
+        r = json.loads((out / "诊断_synth_amb.json").read_text(encoding="utf-8"))
+        deb = r["geometry_confirmation"]["declared_empty_binding"]
+        assert deb["status"] == "refused_ambiguous"
+        assert deb["applied_cup_ids"] == []
+        assert deb["problems"]
+        # 那杯保持未决：不是 declared_absent
+        assert r["cups"][0]["declared_absent"] is False

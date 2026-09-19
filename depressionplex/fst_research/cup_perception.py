@@ -60,7 +60,10 @@ class FrameDiag:
     centroid: tuple[float, float] | None = None     # (x, y) 全帧坐标
     bbox: tuple[int, int, int, int] | None = None    # (r0, c0, r1, c1)
     above_water_frac: float | None = None            # 动物面积在水线上方的比例
-    wall_dist_px: float | None = None                # 到杯内区四壁的最小距离
+    #: R2-115 G1：水线为 None 或不可靠（无旁证/旁证分歧）时 above_water_frac
+    #: 置 null，**原因写在这里**——不许填假 0，也不许无声置 null。
+    above_water_null_reason: str | None = None
+    wall_dist_px: float | None = None                # 到 ROI 左/右/底的最小距离（顶边是水面上方的观察留白，不是杯壁，不计）
 
 
 class CupDiagnoser:
@@ -111,7 +114,7 @@ class CupDiagnoser:
             return d
         self._ready()
         assert self._static is not None
-        r0, c0, r1, c1 = self.prop.interior
+        r0, c0, r1, c1 = self.prop.roi
         g = np.asarray(gray, dtype=np.float64)
         d = self._diagnose_one(idx, g, self._mx, self._static,
                                (r0, c0, r1, c1))
@@ -122,8 +125,12 @@ class CupDiagnoser:
         r0, c0, r1, c1 = box
         roi = g[r0:r1 + 1, c0:c1 + 1]
         if roi.size == 0:
-            return FrameDiag(idx, QUALITY_UNCLEAR, ("杯内区为空",))
-        bright_med = float(np.median(mx[r0:r1 + 1, c0:c1 + 1]))
+            return FrameDiag(idx, QUALITY_UNCLEAR, ("分析 ROI 为空",))
+        # 对比度检查看**水体区**（有派生水体时）：ROI 含线上留白，
+        # 留白处可能是暗的架子/阴影，中值会被拉低造成假"对比不足"。
+        # 人工确认件没有 water_body（None）⇒ 退回整个 ROI。
+        b = self.prop.water_body if self.prop.water_body is not None else box
+        bright_med = float(np.median(mx[b[0]:b[2] + 1, b[1]:b[3] + 1]))
         if bright_med < self.dark + 20:
             return FrameDiag(
                 idx, QUALITY_UNCLEAR,
@@ -141,9 +148,12 @@ class CupDiagnoser:
             return FrameDiag(idx, _PENDING, ("本帧无动物候选",))
         big = comps[0]
         reasons: list[str] = []
-        interior_area = max(1, (r1 - r0 + 1) * (c1 - c0 + 1))
+        # 面积占比的分母用**水体区**（有派生水体时），与旧行为一致：
+        # 反光/波纹连片发生在水里，用含线上留白的 ROI 当分母会稀释灵敏度。
+        b = self.prop.water_body if self.prop.water_body is not None else box
+        interior_area = max(1, (b[2] - b[0] + 1) * (b[3] - b[1] + 1))
         if big.area > self.max_area_frac * interior_area:
-            reasons.append(f"候选面积 {big.area} 超过杯内区的 {self.max_area_frac:.0%}"
+            reasons.append(f"候选面积 {big.area} 超过水体区的 {self.max_area_frac:.0%}"
                            "（更可能是水面反光/波纹连片，不是动物）")
         rivals = [c for c in comps[1:] if c.area >= self.rival_frac * big.area]
         if rivals:
@@ -151,20 +161,35 @@ class CupDiagnoser:
                            "（分不清哪个是动物）")
         br0, bc0, br1, bc1 = big.bbox
         if br0 <= r0 or br1 >= r1 or bc0 <= c0 or bc1 >= c1:
-            reasons.append("候选剪影贴着杯内区边界（被 ROI 截断，几何量不可信）")
+            reasons.append("候选剪影贴着分析 ROI 边界（被截断，几何量不可信）")
         if reasons:
             return FrameDiag(idx, QUALITY_UNCLEAR, tuple(reasons),
                              area_px=big.area, centroid=_centroid(big),
                              bbox=big.bbox)
+        # R2-115 G1：水线特征只有在水线**可靠**时才算。水线缺失或不可靠 ⇒
+        # above_water_frac=None + 原因（不填假 0，不无声置 null）。
         above_frac = None
-        if self.prop.water_surface_y is not None:
+        null_reason = None
+        if self.prop.water_surface_y is None:
+            null_reason = "水线为 None（提不出/确认件没画）：above_water_frac 不计算，不填 0"
+        elif not self.prop.water_surface_reliable:
+            null_reason = (
+                "水线不可靠（"
+                + (self.prop.water_surface_unreliable_reason or "未经旁证")
+                + "）：above_water_frac 不计算、不填 0，等人工确认")
+        else:
             above, below = sil.above_below(big.mask, self.prop.water_surface_y)
             tot = int(above.sum()) + int(below.sum())
             above_frac = float(above.sum()) / tot if tot else None
-        wall = min(br0 - r0, r1 - br1, bc0 - c0, c1 - bc1)
+            if above_frac is None:
+                null_reason = "剪影像素数为 0（不应发生）：above_water_frac 不可算"
+        # 触壁距离只量左/右/底：ROI 顶边是水面之上的观察留白（G1），
+        # 不是物理杯壁——动物贴着顶边是"离开观察区"，由上面的截断检查记 unclear。
+        wall = min(bc0 - c0, c1 - bc1, r1 - br1)
         diag = FrameDiag(idx, QUALITY_OBSERVED, (),
                          area_px=big.area, centroid=_centroid(big),
                          bbox=big.bbox, above_water_frac=above_frac,
+                         above_water_null_reason=null_reason,
                          wall_dist_px=float(wall))
         if self.on_observed is not None:
             # observed 的定性不会被后面的缺失归并改写，回调在这里发是稳的；
@@ -201,8 +226,14 @@ def _centroid(comp) -> tuple[float, float]:
 
 def _static_animal_blob(static_mask: np.ndarray, prop: CupProposal,
                         min_area: int) -> bool:
-    """杯内区里的恒暗结构中有没有动物尺寸的紧连通域（静态动物吸收陷阱）。"""
-    r0, c0, r1, c1 = prop.interior
+    """水体区里的恒暗结构中有没有动物尺寸的紧连通域（静态动物吸收陷阱）。
+
+    查**水体区**而不是含线上留白的整个 ROI：真实素材里留白处有挂钩/架子
+    这类细暗静态结构（形状和大小都像"静态动物"），拿它查会把每个无候选帧
+    都冤枉成吸收陷阱。整段不动的动物只会在水里。确认件没有 water_body
+    ⇒ 退回 ROI（人工确认时留白本来就画得干净）。
+    """
+    r0, c0, r1, c1 = prop.water_body if prop.water_body is not None else prop.roi
     sub = static_mask[r0:r1 + 1, c0:c1 + 1]
     if not sub.any():
         return False
@@ -254,6 +285,7 @@ def _resolve_pending(diags: list[FrameDiag], max_run: int) -> list[FrameDiag]:
             out[k] = FrameDiag(old.frame, state_k, why_k,
                                area_px=old.area_px, centroid=old.centroid,
                                bbox=old.bbox, above_water_frac=old.above_water_frac,
+                               above_water_null_reason=old.above_water_null_reason,
                                wall_dist_px=old.wall_dist_px)
         i = j
     return out

@@ -126,7 +126,9 @@ def _run_research_path() -> dict:
         assert rec.check_partition(counts, len(diags)) == []
         cups.append(rec.cup_record(cup_index=p.index, diags=diags, fps=25.0,
                                    declared_absent=False,
-                                   geometry={"interior": list(p.interior),
+                                   geometry={"cup_id": p.cup_id,
+                                             "roi": list(p.roi),
+                                             "water_body": list(p.water_body) if p.water_body else None,
                                              "confirmed": False},
                                    features_summary=feat.summarize(pairs),
                                    spatial_scale_px=float(p.width_px)))

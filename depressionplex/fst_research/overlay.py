@@ -24,8 +24,9 @@ from .. import video
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
-COLOR_TANK = (80, 220, 120)
-COLOR_WATER = (90, 200, 255)
+COLOR_TANK = (80, 220, 120)         # 分析 ROI（含线上留白，R2-115 G1）
+COLOR_WATER = (90, 200, 255)        # 水线
+COLOR_WATER_BODY = (150, 120, 255)  # 水体候选区（复核 §9：ROI/水体/水线分开画）
 COLOR_ANIMAL = (255, 90, 60)
 COLOR_UNCLEAR = (255, 200, 40)
 COLOR_ABSENT = (160, 160, 160)

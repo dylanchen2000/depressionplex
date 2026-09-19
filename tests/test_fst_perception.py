@@ -26,14 +26,17 @@ def _props(scene: fst_synth.Scene, frames) -> list:
 
 
 def test_synth_scene_proposal_matches_construction() -> None:
-    """夹具自检：提案的内区/水线必须等于构造参数（标签合成，不是真值）。"""
+    """夹具自检：提案的水体区/ROI/水线必须等于构造参数（标签合成，不是真值）。"""
     scene = fst_synth.Scene(cups=2)
     frames = scene.swim_series(12, cup=0)
     props = _props(scene, frames)
     assert len(props) == 2
     for p, cup in zip(props, scene.cup_defs):
         # 水体块 = water_y..r1 行、c0-1..c1+1 列（base() 的画水范围）
-        assert p.interior == (cup.water_y, cup.c0 - 1, cup.r1, cup.c1 + 1)
+        assert p.water_body == (cup.water_y, cup.c0 - 1, cup.r1, cup.c1 + 1)
+        # 分析 ROI 顶边在水线上方（G1）
+        assert p.roi[0] < p.water_body[0]
+        assert p.roi[1:] == p.water_body[1:]
         assert p.water_surface_y == float(cup.water_y)
         assert p.confirmed is False
 
@@ -171,7 +174,7 @@ def test_rival_component_is_unclear() -> None:
         d.see_background(f)
     # 造一帧：真动物 + 一个同尺寸的假暗斑（模拟水面反光阴影）
     g = frames[0].copy()
-    r0, c0, r1, c1 = p.interior
+    r0, c0, r1, c1 = p.water_body
     rival = np.zeros_like(g, dtype=bool)
     rival[r0 + 8:r0 + 16, c0 + 40:c0 + 52] = True
     g[rival] = fst_synth.ANIMAL_GRAY
@@ -188,8 +191,8 @@ def test_oversized_blob_is_unclear() -> None:
     for f in frames:
         d.see_background(f)
     g = frames[0].copy()
-    r0, c0, r1, c1 = p.interior
-    g[r0 + 1:r1, c0 + 1:c1] = fst_synth.ANIMAL_GRAY   # 几乎整个杯内区变暗
+    r0, c0, r1, c1 = p.water_body
+    g[r0 + 1:r1, c0 + 1:c1] = fst_synth.ANIMAL_GRAY   # 几乎整个水体区变暗
     diag = d.diagnose(0, g)
     assert diag.quality == perc.QUALITY_UNCLEAR
     assert any("水面反光" in r or "波纹连片" in r for r in diag.reasons)
@@ -231,3 +234,103 @@ def test_streaming_and_batch_agree() -> None:
     stream = d.finish()
     assert [x.quality for x in batch] == [x.quality for x in stream]
     assert [x.frame for x in batch] == [x.frame for x in stream]
+
+
+# ---------------------------------------------------------------------------
+# R2-115 G1：ROI 含线上留白 ⇒ above_water_frac 能 >0；水线不可靠 ⇒ null + 原因
+# ---------------------------------------------------------------------------
+
+def test_above_water_frac_positive_when_mask_crosses_waterline() -> None:
+    """G1：剪影跨越已知水线 ⇒ 水上比例必须 >0（旧行为 ROI 顶=水线会恒为假 0）。"""
+    scene = fst_synth.Scene(cups=1)
+    c = scene.cup_defs[0]
+    wy = c.water_y
+    # 动物中心压在水线上左右游：剪影跨水线，上半在水上、下半在水下
+    frames = [scene.frame([(c.c0 + 14 + (i * 3) % (c.c1 - c.c0 - 28), float(wy))])
+              for i in range(14)]
+    p = _props(scene, frames)[0]
+    assert p.water_surface_reliable is True          # 合成边强，旁证命中
+    diags = perc.diagnose_cup(frames, list(range(len(frames))), p)
+    obs = [d for d in diags if d.quality == perc.QUALITY_OBSERVED]
+    assert obs, "应有 observed 帧"
+    assert any(d.above_water_frac is not None and d.above_water_frac > 0.0 for d in obs)
+    assert all(d.above_water_null_reason is None for d in obs)
+
+
+def test_forelimb_activity_above_waterline_is_captured() -> None:
+    """G1：身体几乎不动（被背景吸收），只有前肢在水线上扑腾——ROI 含线上留白，
+    这段水上活动必须被看见且 above_water_frac>0；旧行为（ROI 顶=水线）会裁掉恒 0。"""
+    scene = fst_synth.Scene(cups=1)
+    c = scene.cup_defs[0]
+    wy = c.water_y
+    frames = []
+    for i in range(15):
+        g = scene.base()
+        scene.add_animal(g, c, c.cx, wy + 6, rx=7, ry=5)        # 身体：恒定位，会被吸收
+        fx = c.cx + (i % 3 - 1) * 12                            # 前肢：左/中/右不重叠
+        scene.add_animal(g, c, fx, wy - 6, rx=4, ry=4)          # 前肢：水线上方
+        frames.append(g)
+    p = _props(scene, frames)[0]
+    assert p.roi[0] < wy                                        # ROI 顶在水线上方
+    diags = perc.diagnose_cup(frames, list(range(15)), p)
+    obs = [d for d in diags if d.quality == perc.QUALITY_OBSERVED]
+    assert obs, "前肢活动应被看见（observed）"
+    assert any(d.above_water_frac is not None and d.above_water_frac > 0.0 for d in obs)
+
+
+def test_unreliable_waterline_gives_null_above_water_with_reason() -> None:
+    """G1：水线不可靠（无旁证/旁证分歧）⇒ above_water_frac=null + 原因，不填假 0。"""
+    scene = fst_synth.Scene(cups=1)
+    frames = scene.swim_series(12, cup=0)
+    p_good = _props(scene, frames)[0]
+    p_bad = cg.CupProposal(
+        index=p_good.index, roi=p_good.roi, water_body=p_good.water_body,
+        water_surface_y=p_good.water_surface_y,
+        water_surface_basis=p_good.water_surface_basis,
+        water_surface_candidates=p_good.water_surface_candidates,
+        water_surface_reliable=False,
+        water_surface_unreliable_reason="行梯度旁证分歧（测试）")
+    diags = perc.diagnose_cup(frames, list(range(12)), p_bad)
+    obs = [d for d in diags if d.quality == perc.QUALITY_OBSERVED]
+    assert obs
+    for d in obs:
+        assert d.above_water_frac is None               # 不填假 0
+        assert d.above_water_null_reason and "不可靠" in d.above_water_null_reason
+
+
+def test_none_waterline_gives_null_above_water_with_reason() -> None:
+    """G1：水线为 None（提不出）⇒ above_water_frac=null + 原因，不填假 0。"""
+    scene = fst_synth.Scene(cups=1)
+    frames = scene.swim_series(12, cup=0)
+    p_good = _props(scene, frames)[0]
+    p_none = cg.CupProposal(
+        index=0, roi=p_good.roi, water_body=p_good.water_body,
+        water_surface_y=None, water_surface_basis=cg.WATERLINE_BASIS_NONE,
+        water_surface_candidates=(), water_surface_reliable=False,
+        water_surface_unreliable_reason="水线为 None")
+    diags = perc.diagnose_cup(frames, list(range(12)), p_none)
+    obs = [d for d in diags if d.quality == perc.QUALITY_OBSERVED]
+    assert obs
+    for d in obs:
+        assert d.above_water_frac is None
+        assert d.above_water_null_reason and "None" in d.above_water_null_reason
+
+
+def test_wall_dist_excludes_top_edge() -> None:
+    """G1：ROI 顶边是水面之上的观察留白、不是物理杯壁 ⇒ 触壁距离只量左/右/底。"""
+    scene = fst_synth.Scene(cups=1)
+    c = scene.cup_defs[0]
+    # 动物在水线上方留白里、靠近 ROI 顶但不贴边；左右小幅移动避免被背景吸收
+    frames = [scene.frame([(c.cx + (i % 3 - 1) * 4, float(c.water_y - 12))])
+              for i in range(10)]
+    p = _props(scene, frames)[0]
+    diags = perc.diagnose_cup(frames, list(range(10)), p)
+    obs = [d for d in diags if d.quality == perc.QUALITY_OBSERVED]
+    assert obs
+    r0, c0, r1, c1 = p.roi
+    for d in obs:
+        br0, bc0, br1, bc1 = d.bbox
+        expected = min(bc0 - c0, c1 - bc1, r1 - br1)   # 左/右/底，不含顶
+        assert d.wall_dist_px == float(expected)
+        # 动物靠近顶边（br0-r0 小），但顶不计入 ⇒ wall_dist 明显大于到顶距离
+        assert d.wall_dist_px > br0 - r0

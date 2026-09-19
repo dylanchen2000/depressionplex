@@ -184,8 +184,26 @@ class GeometryEnvelope:
 
         if self.assay == "FST" and self.by_role(ROLE_WATER_SURFACE):
             # FST 真实素材是一帧多杯（DP-136）：tank 与 water_surface 按同号
-            # 配对检查。单实例旧素材两边都是 instance=1，行为与旧版一致。
+            # 配对检查。单实例旧素材两边都是 instance=1，配对退化为旧行为。
+            # R2-115 G2：不等号**保持旧版严格开区间**——早先版本在这里悄悄
+            # 放宽成闭区间，改变了旧单实例语义（"水线压杯顶/杯底"从不通过
+            # 变通过）。共享契约不接受静默语义变更；研究层若要表达"水线取自
+            # ROI 顶边"这类新语义，须走显式版本/研究模式并过变更评审——
+            # 研究提案的做法是让分析 ROI 在水线上方留白（cup_geometry），
+            # 正确提案天然满足严格不等式，压边提案照实报。
             lines = self.by_role(ROLE_WATER_SURFACE)
+            tank_instances = {t.instance for t in self.by_role(ROLE_TANK)}
+            line_count: dict[int, int] = {}
+            for line in lines:
+                line_count[line.instance] = line_count.get(line.instance, 0) + 1
+            for inst in sorted(line_count):
+                if line_count[inst] > 1:
+                    problems.append(
+                        f"water_surface_{inst} 出现 {line_count[inst]} 次"
+                        "（同号重复，配对有歧义）")
+                if inst not in tank_instances:
+                    problems.append(
+                        f"water_surface_{inst} 没有同号 tank（孤儿水线）")
             for tank in self.by_role(ROLE_TANK):
                 matched = [p for p in lines if p.instance == tank.instance]
                 if not matched:
@@ -195,9 +213,9 @@ class GeometryEnvelope:
                 ys = [y for _, y in tank.coords]
                 for line in matched:
                     wy = sum(y for _, y in line.coords) / len(line.coords)
-                    # 闭区间：水线取自水体外边界时恰好压在 tank 顶边上
-                    # （DP-136 提案就是这种派生关系），压边不算"在范围外"。
-                    if not (min(ys) <= wy <= max(ys)):
+                    # 严格开区间（旧版语义）：水线必须严格在 tank 垂直范围内，
+                    # 恰好压在顶边/底边也算不通过。
+                    if not (min(ys) < wy < max(ys)):
                         problems.append(
                             f"水面线 y={wy:.1f} 不在 {tank.key} 垂直范围内")
 

@@ -8,9 +8,22 @@
 产三件，全在 `--out-dir`：
 - `诊断_<名>.json` —— 研究诊断记录（schema `fst-research-v1`）；
 - `叠加_<名>_杯<k>.mp4` —— 每杯一段带帧号/状态烧字的叠加短片，
-  给人核"我们看的是不是对的动物区域"（Spec A §5.1）；
-- `几何提案_<名>.json` —— 杯体/水线**提案**（confirmed=False），
-  人工确认的工作底稿，不是确认件。
+  给人核"我们看的是不是对的动物区域"（Spec A §5.1）。
+  **分析 ROI、水体区、水线分开画**（复核 §9：人核的是三件不同的东西）；
+- `几何提案_<名>.json` —— 确认件 wrapper（schema `fst-confirmed-geometry-v1`）
+  的**提案态**：binding 已预填（视频 sha256/尺寸/杯号），几何 confirmed=False。
+  人核对叠加图后改几何值、翻 confirmed、填确认人/时间，即成确认件。
+
+**人工确认几何的输入（R2-115 G4）**：`--geometry <确认件.json>`。
+加载时逐项核对 binding：整段视频 sha256、帧尺寸、cup_ids 与 envelope
+实例一致且左到右升序、确认人/确认时间非空、envelope 全部 confirmed 且
+validate() 干净（含严格水线区间）。任何一项不符即拒绝——确认件绑定的
+不是这段素材时，拿它分析就是张冠李戴。确认件的 sha256 随诊断记录落盘。
+
+**申报空杯绑物理杯号（R2-115 G3）**：`--declared-empty` 的杯号 = 画面
+左到右的物理杯号（1 起），不是列表下标。杯候选数与 `--cups` 不符时
+物理编号有歧义 ⇒ **拒绝应用申报**（照实记录，相关杯保持未决），不许
+让申报顺着过滤后的下标漂移。
 
 退出码：0 = 记录产出且至少一杯看得见动物（或有申报空杯）；
 3 = 记录产出但**没有一杯看得见动物**（"看得清"这步没过，Spec A §5.1，
@@ -24,6 +37,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -50,7 +64,12 @@ EXIT_NOTHING_VISIBLE = 3
 MAX_REASON_ROWS = 500
 
 
-def _parse_indices(text: str) -> list[int]:
+def _parse_cup_ids(text: str) -> list[int]:
+    """解析 `--declared-empty`：返回**物理杯号**（1 起），不减 1、不当下标。
+
+    R2-115 G3：杯号到 cup 的绑定发生在 `cup_geometry.bind_declared_empty`
+    （数目有歧义即拒绝应用），这里只做语法解析。
+    """
     if not text.strip():
         return []
     out = []
@@ -61,7 +80,7 @@ def _parse_indices(text: str) -> list[int]:
         v = int(part)
         if v < 1:
             raise ValueError(f"--declared-empty 的杯号从 1 起：{v}")
-        out.append(v - 1)
+        out.append(v)
     return sorted(set(out))
 
 
@@ -78,7 +97,14 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--cups", type=int, default=4, help="期望杯数；数目不符即报问题")
     ap.add_argument("--calib", type=int, default=40, help="背景/几何标定的抽帧数")
     ap.add_argument("--declared-empty", default="",
-                    help="人工申报的空杯号（1 起，逗号分隔）。空杯只认申报")
+                    help="人工申报的空杯号（**物理杯号**，1 起，逗号分隔，按画面左到右）。"
+                         "空杯只认申报；杯候选数与 --cups 不符时拒绝应用（绑定有歧义）")
+    ap.add_argument("--geometry", type=Path, default=None,
+                    help="人工确认件（fst-confirmed-geometry-v1 wrapper JSON）。"
+                         "给了就跳过自动提案，用确认件的 ROI/水线，并把 binding 与"
+                         "文件 sha256 随记录落盘；binding 与本视频不符即拒绝")
+    ap.add_argument("--roi-above-margin", type=int, default=cg.ROI_ABOVE_WATER_MARGIN_PX,
+                    help="分析 ROI 在水线上方留白的像素数（起点值，须在叠加图上人工核对）")
     ap.add_argument("--clip", type=int, default=100, help="每杯叠加短片的分析帧数")
     ap.add_argument("--clip-at", type=float, default=0.4,
                     help="短片起点取分析序列的位置比例（默认 40%% 处，避开开场手忙脚乱）")
@@ -113,10 +139,14 @@ def main(argv: list[str] | None = None) -> int:
               "必须带依据字符串", file=sys.stderr)
         return EXIT_REFUSED
     try:
-        declared = _parse_indices(args.declared_empty)
+        declared = _parse_cup_ids(args.declared_empty)
         out_dir = ov.refuse_in_repo(args.out_dir)
     except ValueError as e:
         print(f"拒绝：{e}", file=sys.stderr)
+        return EXIT_REFUSED
+    if args.step < 1:
+        print(f"拒绝：--step 必须 ≥ 1（得到 {args.step}）；步长 0/负会让抽样序列退化",
+              file=sys.stderr)
         return EXIT_REFUSED
 
     try:
@@ -141,24 +171,49 @@ def main(argv: list[str] | None = None) -> int:
     ledger = tl.build_ledger(tb)
     plan = tl.plan_window(tb)
 
-    # ---- 标定：背景 max + 杯体/水线提案 ----
+    # ---- 几何来源：人工确认件（--geometry）优先，否则从真帧提案 ----
+    # 标定帧两条路都要（背景 max 模型是逐帧分割的基础，与几何来源无关）。
     calib_idx = [int(v) for v in np.linspace(0, info.n_frames - 1, args.calib)]
     try:
         calib_frames = video.frames_at(info, calib_idx)
     except video.VideoError as e:
         print(f"标定抽帧失败：{e}", file=sys.stderr)
         return EXIT_DECODE
-    # propose_cups 内部用中值帧提水体/水线，并做行梯度旁证；这里不再二次加工
-    props, geo_problems = cg.propose_cups(calib_frames, n_cups=args.cups,
-                                          dark=args.dark, bright=args.bright)
-    env = cg.to_envelope(props, (info.width, info.height))
+    geo_binding = None          # 人工确认件的 binding（G4）
+    geo_file_sha = None         # 人工确认件自身 sha256，随记录落盘
+    geo_source = "proposal"
+    if args.geometry is not None:
+        # 人工确认件：绑定整段视频 sha256/尺寸/杯号/确认人/时间，任何一项不符即拒。
+        try:
+            env, geo_binding, geo_file_sha, props = cg.load_confirmed_file(
+                args.geometry, video_sha256=sha, width=info.width, height=info.height,
+                video_bytes=info.path.stat().st_size)
+        except (ValueError, OSError) as e:
+            print(f"拒绝人工确认件：{e}", file=sys.stderr)
+            return EXIT_REFUSED
+        geo_problems = []       # 确认件已过 validate()，无提案问题
+        geo_source = "human_confirmed_file"
+        expected_n = None       # 杯号由确认件 binding 核过，不再与 --cups 比
+    else:
+        # propose_cups 内部用中值帧提水体/水线，并做行梯度旁证；这里不再二次加工
+        props, geo_problems = cg.propose_cups(
+            calib_frames, n_cups=args.cups, dark=args.dark, bright=args.bright,
+            roi_above_margin=args.roi_above_margin)
+        env = cg.to_envelope(props, (info.width, info.height))
+        expected_n = args.cups
     env_problems = env.validate()
 
-    declared_set = set(declared)
-    for i in sorted(declared_set):
-        if i >= len(props):
-            print(f"拒绝：申报空杯 #{i + 1} 但只找到 {len(props)} 个杯", file=sys.stderr)
-            return EXIT_REFUSED
+    # ---- 申报空杯绑物理杯号（G3）：有歧义就拒绝应用，不顺下标漂移 ----
+    cup_ids = [p.cup_id for p in props]
+    try:
+        de_binding = cg.bind_declared_empty(cup_ids, declared, expected_n=expected_n)
+    except ValueError as e:
+        print(f"拒绝：{e}", file=sys.stderr)
+        return EXIT_REFUSED
+    for prob in de_binding.problems:
+        print(f"申报空杯未应用：{prob}", file=sys.stderr)
+    # declared_absent 用 CupDiagnoser 的 index（0 起）；binding.applied 是物理杯号（1 起）
+    declared_set = {cid - 1 for cid in de_binding.applied}
 
     # ---- 分析序列与短片窗口 ----
     analyzed = list(range(0, info.n_frames, args.step))
@@ -245,10 +300,15 @@ def main(argv: list[str] | None = None) -> int:
         cups_out.append(rec.cup_record(
             cup_index=p.index, diags=diags, fps=info.fps,
             declared_absent=(p.index in declared_set),
-            geometry={"interior": list(p.interior),
+            geometry={"cup_id": p.cup_id,
+                      # G1：分析 ROI / 水体候选区 / 水线是三件不同的东西，全落盘
+                      "roi": list(p.roi),
+                      "water_body": list(p.water_body) if p.water_body else None,
                       "water_surface_y": p.water_surface_y,
                       "water_surface_basis": p.water_surface_basis,
                       "water_surface_candidates": list(p.water_surface_candidates),
+                      "water_surface_reliable": p.water_surface_reliable,
+                      "water_surface_unreliable_reason": p.water_surface_unreliable_reason,
                       "basis": p.basis, "confirmed": p.confirmed,
                       # 提案 notes（旁证分歧/无活动/误滤提示）必须随记录落盘：
                       # 它们是给人看的诚实机制，只打在终端上等于没交付。
@@ -276,23 +336,32 @@ def main(argv: list[str] | None = None) -> int:
                 "applies_standard_window": plan.applies_standard_window,
                 "reason": plan.reason, "truncated": plan.truncated},
         coverage=coverage.to_dict(),
-        geometry_confirmation={"confirmed": False,
-                               "validate_problems": env_problems,
-                               "proposal_problems": geo_problems,
-                               "note": "几何为提案：人工确认前正式解释与发布验收受限"},
+        geometry_confirmation=_geometry_confirmation(
+            geo_source=geo_source, confirmed=(geo_source == "human_confirmed_file"),
+            env_problems=env_problems, geo_problems=geo_problems,
+            geometry_path=args.geometry, geo_file_sha=geo_file_sha,
+            geo_binding=geo_binding, de_binding=de_binding),
         cups=cups_out,
         manifest=lookup,
-        limits=[
-            "研究诊断：不产出正式 CSV、不进验收路径、不借 TST 发布/标定资质",
-            "t0 未知 ⇒ protocol_alignment=unknown，未套 (120,360) 标准窗",
-            "杯体/水线为提案（confirmed=False），未人工确认",
-            "observed 帧内的活动/不动分类未做（新的科学口径，未经批准）",
-            "光流/局部运动（动物区内 vs 区外水扰）无实现，标记 not_implemented",
-            f"分析抽帧 step={args.step}：帧间细节（< {args.step / info.fps:.2f} s）不可见",
-        ])
+        limits=_limits(args, info, geo_source, de_binding))
     rec_path = rec.write_record(record, out_dir / f"诊断_{info.path.stem}.json")
-    geo_path = ov.refuse_in_repo(out_dir / f"几何提案_{info.path.stem}.json")
-    geo_path.write_text(env.to_json(), encoding="utf-8")
+    # 几何提案文件：没给确认件时，落一份**提案态 wrapper**（binding 已预填），
+    # 人工核对后改几何/翻 confirmed/填确认人时间即成确认件；给了确认件就不覆盖它。
+    if args.geometry is None:
+        geo_path = ov.refuse_in_repo(out_dir / f"几何提案_{info.path.stem}.json")
+        payload = cg.confirmation_payload(
+            env, video_sha256=sha, video_bytes=info.path.stat().st_size,
+            width=info.width, height=info.height, cup_ids=cup_ids,
+            proposal_context={"geo_problems": geo_problems,
+                              "roi_above_margin_px": args.roi_above_margin,
+                              "cups": [{"cup_id": p.cup_id, "roi": list(p.roi),
+                                        "water_body": list(p.water_body) if p.water_body else None,
+                                        "water_surface_y": p.water_surface_y,
+                                        "water_surface_reliable": p.water_surface_reliable,
+                                        "water_surface_unreliable_reason": p.water_surface_unreliable_reason,
+                                        "notes": list(p.notes)} for p in props]})
+        geo_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2),
+                            encoding="utf-8")
 
     # ---- 人读摘要 ----
     print(f"源：{info.path.name}  sha256 {sha[:16]}…  {info.n_frames} 帧 @ {info.fps} fps"
@@ -301,20 +370,76 @@ def main(argv: list[str] | None = None) -> int:
           f"（{plan.reason}）")
     print(f"覆盖：{coverage.observed_frames}/{coverage.requested_frames or '整条'} 帧"
           f"  截断 {coverage.truncated_frames}")
+    if geo_source == "human_confirmed_file":
+        print(f"几何来源：人工确认件 {args.geometry}  sha256 {geo_file_sha[:16]}…"
+              f"（确认人 {geo_binding.get('confirmed_by')} @ {geo_binding.get('confirmed_at')}）")
+    else:
+        print("几何来源：真帧提案（confirmed=False，未人工确认）")
+    if de_binding.status == cg.BIND_APPLIED and de_binding.applied:
+        print(f"申报空杯（物理杯号）：{list(de_binding.applied)}")
+    elif de_binding.status == cg.BIND_REFUSED_AMBIGUOUS:
+        print(f"申报空杯**未应用**（绑定有歧义）：请求 {declared}，applied []")
     for c in cups_out:
         q = c["quality_counts"]
-        print(f"  杯 {c['cup'] + 1}: observed {q['observed']}  unclear {q['unclear']}"
+        g = c["geometry"]
+        wnote = "" if g["water_surface_reliable"] else "（水线不可靠，above_water 记 null）"
+        print(f"  杯 {g['cup_id']}: observed {q['observed']}  unclear {q['unclear']}"
               f"  lost_short {q['lost_short']}  declared_absent {q['declared_absent']}"
-              f"  水线 {c['geometry']['water_surface_y']}")
-        for n in c["geometry"]["notes"]:
+              f"  水线 {g['water_surface_y']}{wnote}")
+        for n in g["notes"]:
             print(f"        注：{n}")
+        if g["water_surface_unreliable_reason"]:
+            print(f"        水线：{g['water_surface_unreliable_reason']}")
         if c["overlay_clip"]:
             print(f"        叠加短片 {c['overlay_clip']}")
     print(f"几何提案问题 {len(env_problems) + len(geo_problems)} 条（未确认是设计，不是失败）")
     for gp in geo_problems:
         print(f"  - {gp}")
+    for gp in de_binding.problems:
+        print(f"  - {gp}")
     print(f"记录：{rec_path}")
     return EXIT_OK if any_visible else EXIT_NOTHING_VISIBLE
+
+
+def _geometry_confirmation(*, geo_source, confirmed, env_problems, geo_problems,
+                           geometry_path, geo_file_sha, geo_binding, de_binding) -> dict:
+    """记录里的几何确认段。确认件带 binding + 文件 sha256；提案带问题清单。
+
+    R2-115 G4：确认件必须可追溯——谁确认的、什么时候、绑的哪段视频、文件自身
+    哈希，全落盘。提案态如实记 confirmed=False + validate/proposal 问题。
+    """
+    out = {
+        "confirmed": confirmed,
+        "source": geo_source,
+        "validate_problems": list(env_problems),
+        "proposal_problems": list(geo_problems),
+        "geometry_file": str(geometry_path) if geometry_path else None,
+        "geometry_file_sha256": geo_file_sha,
+        "binding": dict(geo_binding) if geo_binding else None,
+        "declared_empty_binding": {
+            "applied_cup_ids": list(de_binding.applied),
+            "status": de_binding.status,
+            "problems": list(de_binding.problems)},
+        "note": ("几何为人工确认件（已绑定视频 sha256/尺寸/确认人）"
+                 if confirmed else
+                 "几何为提案：人工确认前正式解释与发布验收受限"),
+    }
+    return out
+
+
+def _limits(args, info, geo_source, de_binding) -> list[str]:
+    limits = [
+        "研究诊断：不产出正式 CSV、不进验收路径、不借 TST 发布/标定资质",
+        "t0 未知 ⇒ protocol_alignment=unknown，未套 (120,360) 标准窗",
+        ("杯体/水线为人工确认件（--geometry）" if geo_source == "human_confirmed_file"
+         else "杯体/水线为提案（confirmed=False），未人工确认"),
+        "observed 帧内的活动/不动分类未做（新的科学口径，未经批准）",
+        "光流/局部运动（动物区内 vs 区外水扰）无实现，标记 not_implemented",
+        f"分析抽帧 step={args.step}：帧间细节（< {args.step / info.fps:.2f} s）不可见",
+    ]
+    if de_binding.status == cg.BIND_REFUSED_AMBIGUOUS:
+        limits.append("申报空杯未应用：杯候选数与期望不符，物理杯号绑定有歧义，相关杯保持未决")
+    return limits
 
 
 def _theta_of(mask: np.ndarray) -> float:
@@ -331,28 +456,39 @@ def _frame_rows(diags: list[perc.FrameDiag], clip_frames: set[int]) -> list[dict
             rows.append({"frame": d.frame, "quality": d.quality,
                          "reasons": list(d.reasons)})
         elif d.frame in clip_frames:
-            rows.append({"frame": d.frame, "quality": d.quality,
-                         "area_px": d.area_px,
-                         "centroid": list(d.centroid) if d.centroid else None,
-                         "above_water_frac": d.above_water_frac,
-                         "wall_dist_px": d.wall_dist_px})
+            row = {"frame": d.frame, "quality": d.quality,
+                   "area_px": d.area_px,
+                   "centroid": list(d.centroid) if d.centroid else None,
+                   "above_water_frac": d.above_water_frac,
+                   "wall_dist_px": d.wall_dist_px}
+            if d.above_water_null_reason:
+                # G1：above_water_frac 为 null 时把原因一起落盘（不是无声 null，
+                # 更不是假 0），复核的人一眼看到"这杯水线不可靠"。
+                row["above_water_null_reason"] = d.above_water_null_reason
+            rows.append(row)
     return rows
 
 
 def _render(g, props, masks, last_diags, idx, fps) -> np.ndarray:
     rgb = ov.gray_to_rgb(g)
     for p in props:
-        r0, c0, r1, c1 = p.interior
+        # 复核 §9：分析 ROI、水体候选区、水线是三件不同的东西，分开画，
+        # 让人核"ROI 有没有把线上活动圈进来""水线画对没有"。
+        r0, c0, r1, c1 = p.roi
         d = last_diags.get(p.index)
         q = d.quality if d is not None else "declared_absent"
         color = ov.QUALITY_COLORS.get(q, ov.COLOR_UNCLEAR)
-        ov.draw_rect(rgb, r0, c0, r1, c1, ov.COLOR_TANK)
+        ov.draw_rect(rgb, r0, c0, r1, c1, ov.COLOR_TANK)         # 分析 ROI
+        if p.water_body is not None:
+            wr0, wc0, wr1, wc1 = p.water_body
+            ov.draw_rect(rgb, wr0, wc0, wr1, wc1, ov.COLOR_WATER_BODY)  # 水体候选区
         if p.water_surface_y is not None:
-            ov.draw_hline(rgb, int(round(p.water_surface_y)), c0, c1, ov.COLOR_WATER)
+            wcol = ov.COLOR_WATER if p.water_surface_reliable else ov.COLOR_UNCLEAR
+            ov.draw_hline(rgb, int(round(p.water_surface_y)), c0, c1, wcol)  # 水线
         m = masks.get(p.index)
         if m is not None:
             ov.draw_mask_outline(rgb, m, color)
-        label = f"C{p.index + 1} F{idx} T{idx / fps:.1f}S {q[:4].upper()}"
+        label = f"C{p.cup_id} F{idx} T{idx / fps:.1f}S {q[:4].upper()}"
         ov.draw_text_outlined(rgb, max(0, r0 - 8), c0, label, color)
     return rgb
 
